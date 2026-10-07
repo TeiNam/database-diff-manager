@@ -1,57 +1,59 @@
 # @tdm/core
 
-td-export 덤프(`.sql`, `.md`)를 스키마 모델로 읽고, 두 버전을 비교해 BASE를 TARGET으로 바꾸는 MySQL 8.0/8.4 DDL을 만드는 순수 TypeScript 패키지다. 런타임 의존성이 없고 `node:` 모듈을 쓰지 않으므로 서버와 브라우저에서 함께 쓴다. 앱은 생성한 DDL을 보여 주고 복사하게 할 뿐, 직접 실행하지 않는다.
+English | [한국어](README.ko.md)
 
-## 공개 API
+A pure TypeScript package that reads td-export dumps (`.sql`, `.md`) into a schema model, compares two versions, and generates the MySQL 8.0/8.4 DDL that turns BASE into TARGET. It has no runtime dependencies and does not use `node:` modules, so it runs on both the server and in the browser. The app only displays the generated DDL and lets you copy it; it never executes it.
 
-| 함수 | 입력 → 출력 | 설명 |
+## Public API
+
+| Function | Input → Output | Description |
 |---|---|---|
-| `parseSqlDump(text)` | SQL 덤프 → `{ model, warnings }` | `SHOW CREATE` 원문을 파싱한다. 실패한 객체만 `parseError`·`rawDdl`로 남긴다 |
-| `parseMdDump(text)` | MD 정의서 → `{ model, warnings }` | 손실 있는 형식이라 `fidelity: 'partial'`과 `unknown` 목록을 단다 |
-| `printTable(t)`, `printView(v)` | 모델 → DDL 문자열 | `SHOW CREATE` 형식으로 다시 출력한다 |
-| `diffSchemas(base, target, renames?)` | 두 모델 → `SchemaDiff` | 테이블·뷰 변경, rename 후보, 적용하지 못한 rename(`ignoredRenames`) |
-| `generateDdl(diff)` | `SchemaDiff` → `Statement[]` | FK·뷰 의존성을 고려한 고정 순서로 문장을 만든다 |
-| `renderDdl(stmts, partial?)` | `Statement[]` → 문자열 | 객체별 머리 주석, `notes`, 문장 끝 `;`를 붙인다 |
+| `parseSqlDump(text)` | SQL dump → `{ model, warnings }` | Parses the raw `SHOW CREATE` output. Only objects that fail to parse are kept as `parseError` and `rawDdl` |
+| `parseMdDump(text)` | MD definition → `{ model, warnings }` | The format is lossy, so the result carries `fidelity: 'partial'` and an `unknown` list |
+| `printTable(t)`, `printView(v)` | Model → DDL string | Prints back in `SHOW CREATE` format |
+| `diffSchemas(base, target, renames?)` | Two models → `SchemaDiff` | Table and view changes, rename candidates, and renames that could not be applied (`ignoredRenames`) |
+| `generateDdl(diff)` | `SchemaDiff` → `Statement[]` | Generates statements in a fixed order that accounts for FK and view dependencies |
+| `renderDdl(stmts, partial?)` | `Statement[]` → string | Adds a header comment per object, `notes`, and the trailing `;` on each statement |
 
-파싱 경고(`ParseWarning`)의 `code`는 `'parse-error'`(파싱 실패) 또는 `'round-trip'`(재출력 결과가 원문과 다름)이고, `kind`는 `'table'` 또는 `'view'`다.
+In a parse warning (`ParseWarning`), `code` is `'parse-error'` (parsing failed) or `'round-trip'` (the re-printed output differs from the original), and `kind` is `'table'` or `'view'`.
 
-`Statement`의 필드는 다음과 같다.
+The fields of `Statement` are as follows.
 
-- `object`, `kind`, `op`: 대상 객체와 변경 종류
-- `sql`: 끝에 `;`가 없는 SQL
-- `comment`: `true`면 실행할 SQL이 없는 안내 문장이다. `sql`은 `-- ` 주석 줄로만 이루어진다
-- `notes`: 문장 위에 붙는 안내. MD 출처라 확인하지 못한 속성 등을 적는다
+- `object`, `kind`, `op`: the target object and the type of change
+- `sql`: SQL without a trailing `;`
+- `comment`: if `true`, the statement is a notice with no SQL to run. `sql` consists only of `-- ` comment lines
+- `notes`: notes placed above the statement, such as attributes that could not be verified because the source is MD
 
 ```ts
 import { diffSchemas, generateDdl, parseSqlDump, renderDdl } from '@tdm/core';
 
-// 두 덤프를 비교해 실행할 DDL 텍스트를 만든다
+// Compare two dumps and build the DDL text to run
 const base = parseSqlDump(baseText).model;
 const target = parseSqlDump(targetText).model;
 const diff = diffSchemas(base, target);
 const sql = renderDdl(generateDdl(diff), diff.partial);
 ```
 
-## fidelity와 unknown
+## fidelity and unknown
 
-- SQL 덤프는 `fidelity: 'full'`이다. 모든 속성을 비교한다.
-- MD 덤프는 `fidelity: 'partial'`이다. MD에 없는 속성은 객체별 `unknown` 목록에 적는다. 예: 문자셋·콜레이션, legacy 형식에서 빈 칸으로만 나오는 기본값, 생성 컬럼 표현식, `[Normal]` 인덱스의 종류, CHECK, 파티션.
-- MD 기본값(Default 칸) 형식은 파일마다 판별한다. Columns 표에 `NULL` 또는 `''` 칸이 하나라도 있으면 td-export 0.1.15 이상(v2)으로 본다.
-  - v2: `NULL`은 기본값 없는 nullable 컬럼이다(`DEFAULT NULL`, text/blob/geometry·auto_increment는 DEFAULT 절 없음). 빈 칸은 기본값 없는 NOT NULL, `''`는 빈 문자열 기본값이다. 문자열 기본값 `'NULL'`은 `DEFAULT NULL`과 구분할 수 없다.
-  - legacy(0.1.14 이하): NULL·빈 문자열·기본값 없음이 모두 빈 칸이므로, 기본값이 없음이 확실한 타입이 아니면 `default`를 `unknown`으로 둔다.
-- diff는 한쪽이라도 `unknown`인 속성을 비교하지 않고 `TableDiff.skipped`에 기록한다.
-- DDL을 만들 때는 TARGET의 `unknown` 속성을 짝지어진 BASE 객체 값으로 채운다. 채우지 못한 속성은 해당 문장의 `notes`에 적는다. 생성 컬럼 표현식처럼 올바른 SQL을 만들 수 없으면 SQL을 주석 처리한 수동 확인 문장(`comment: true`)을 만든다.
+- A SQL dump has `fidelity: 'full'`. All attributes are compared.
+- An MD dump has `fidelity: 'partial'`. Attributes that are absent from MD are listed in the per-object `unknown` list. Examples: character set and collation, defaults that appear only as blank cells in the legacy format, generated column expressions, the kind of a `[Normal]` index, CHECK, and partitions.
+- The MD default value (Default column) format is detected per file. If the Columns table contains at least one `NULL` or `''` cell, the file is treated as td-export 0.1.15 or later (v2).
+  - v2: `NULL` is a nullable column with no default (`DEFAULT NULL`; no DEFAULT clause for text/blob/geometry or auto_increment). A blank cell is NOT NULL with no default, and `''` is an empty-string default. The string default `'NULL'` cannot be distinguished from `DEFAULT NULL`.
+  - legacy (0.1.14 or earlier): NULL, empty string, and no default all appear as blank cells, so unless the type is one that certainly has no default, `default` is set to `unknown`.
+- The diff does not compare an attribute that is `unknown` on either side; it records it in `TableDiff.skipped`.
+- When generating DDL, `unknown` attributes of TARGET are filled in with the values of the paired BASE object. Attributes that cannot be filled in are listed in the `notes` of the corresponding statement. If valid SQL cannot be produced, as with a generated column expression, a manual-check statement (`comment: true`) with the SQL commented out is generated.
 
-## 테스트
+## Testing
 
 ```bash
-npm test -w @tdm/core        # 단위·골든 테스트
-npm run typecheck -w @tdm/core   # 전체 + src 전용(types: [], node: 사용 금지) 타입 검사
-npm run test:mysql -w @tdm/core  # 실 MySQL 8.0/8.4 컨테이너에서 base + 생성 DDL = target 확인
-docker compose -f packages/core/docker-compose.test.yml down   # 컨테이너 정리
+npm test -w @tdm/core        # unit and golden tests
+npm run typecheck -w @tdm/core   # typecheck: whole package + src only (types: [], no node: imports)
+npm run test:mysql -w @tdm/core  # verify base + generated DDL = target on real MySQL 8.0/8.4 containers
+docker compose -f packages/core/docker-compose.test.yml down   # clean up containers
 ```
 
-`test:mysql`은 `docker-compose.test.yml`로 `mysql:8.0`(포트 33080)과 `mysql:8.4`(포트 33084)를 `127.0.0.1`에만 띄운다. 루트 비밀번호는 테스트 전용 `test`다. Docker Hub에서 이미지를 받으려면 `docker login`이 필요하다. 로그인할 수 없으면 다른 레지스트리의 이미지를 받아 로컬 태그를 붙인다.
+`test:mysql` uses `docker-compose.test.yml` to start `mysql:8.0` (port 33080) and `mysql:8.4` (port 33084), bound to `127.0.0.1` only. The root password is `test`, used for testing only. Pulling the images from Docker Hub requires `docker login`. If you cannot log in, pull the images from another registry and apply local tags.
 
 ```bash
 docker pull public.ecr.aws/docker/library/mysql:8.0
@@ -60,4 +62,4 @@ docker pull public.ecr.aws/docker/library/mysql:8.4
 docker tag public.ecr.aws/docker/library/mysql:8.4 mysql:8.4
 ```
 
-골든 시나리오는 `test/fixtures/scenarios/<이름>/`(base.sql, target.sql, expected.sql)에 있고 `test/helpers.ts`의 `SCENARIOS`에 등록하면 골든 테스트와 실 MySQL 테스트가 모두 돈다. MD TARGET 시나리오(`test/fixtures/scenarios-md/`)는 실행 가능한 왕복이 아니므로 `MD_SCENARIOS`에 따로 등록하고 골든 테스트만 돈다.
+Golden scenarios live in `test/fixtures/scenarios/<name>/` (base.sql, target.sql, expected.sql). Registering one in `SCENARIOS` in `test/helpers.ts` runs it in both the golden test and the real MySQL test. MD TARGET scenarios (`test/fixtures/scenarios-md/`) are not executable round trips, so register them separately in `MD_SCENARIOS`; they run only in the golden test.
