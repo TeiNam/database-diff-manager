@@ -1,4 +1,4 @@
-# 로컬/단일 서버 실행용. 저장소 루트에서: docker compose -f docker/docker-compose.yml up -d --build
+# 로컬/단일 서버 실행용. 저장소 루트에서: docker compose -f docker/compose.yaml up -d --build
 services:
   app:
     build:
