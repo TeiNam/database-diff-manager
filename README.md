@@ -23,8 +23,8 @@ td-export 사용법은 [table-define-exporter](https://github.com/TeiNam/table-d
 ## Docker로 실행
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d --build      # http://localhost:3000
-docker compose -f docker/docker-compose.yml exec -it app \
+docker compose -f docker/compose.yaml up -d --build      # http://localhost:3000
+docker compose -f docker/compose.yaml exec -it app \
   node --import tsx src/cli/create-admin.ts admin               # 최초 관리자 (비밀번호 프롬프트)
 ```
 
@@ -61,7 +61,7 @@ Schema·Database 삭제는 이름을 직접 입력해야 진행되며, 그 아�
 | `packages/core` | 파서·프린터·diff·DDL 생성 (런타임 의존성 0, 서버·브라우저 공용) — [README](packages/core/README.md) |
 | `apps/server` | Fastify + node:sqlite API, 인증, 업로드, 빌드된 웹 서빙 — [README](apps/server/README.md) |
 | `apps/web` | React 화면 (트리, GitHub 스타일 diff, DDL, 업로드, 이력, 계정) |
-| `docker/` | Dockerfile, docker-compose.yml |
+| `docker/` | Dockerfile, compose.yaml |
 
 ## 개발
 
