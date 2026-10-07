@@ -1,0 +1,6 @@
+.mark { width: 16px; height: 16px; border-radius: 3px; display: inline-grid; place-items: center; font: 600 var(--text-xs) var(--mono); flex: none; }
+.add { color: var(--add); background: var(--add-bg); }
+.drop { color: var(--del); background: var(--del-bg); }
+.modify { color: var(--mod); background: var(--mod-bg); }
+.rename { color: var(--accent); background: var(--accent-bg); }
+.same { background: transparent; }

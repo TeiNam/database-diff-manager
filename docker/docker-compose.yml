@@ -1,0 +1,20 @@
+# 로컬/단일 서버 실행용. 저장소 루트에서: docker compose -f docker/docker-compose.yml up -d --build
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: ghcr.io/teinam/database-diff-manager:latest
+    ports:
+      - "3000:3000"
+    environment:
+      # HTTPS 리버스 프록시 뒤에서 운영하면 이 줄을 지운다(기본 true). HTTP 로 직접 접속할 때만 false
+      COOKIE_SECURE: "false"
+      # 프록시 뒤라면 홉 수나 프록시 IP 를 지정한다 (apps/server/README.md 참고)
+      # TRUST_PROXY: "1"
+    volumes:
+      - tdm-data:/data
+    restart: unless-stopped
+
+volumes:
+  tdm-data:

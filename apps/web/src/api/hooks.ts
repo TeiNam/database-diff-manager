@@ -1,0 +1,146 @@
+import type { RenameMapping } from '@tdm/core';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api, ApiError } from './client';
+import type { DiffResponse, Me, ObjectHistory, Role, SchemaInfo, TreeDatabase, UploadMeta, UploadResult, User, VersionDetail, VersionSummary } from './types';
+
+export const queryKeys = {
+  me: ['me'] as const,
+  tree: ['tree'] as const,
+  schema: (id?: number) => ['schema', id] as const,
+  versions: (schemaId?: number) => ['versions', schemaId] as const,
+  version: (id?: number) => ['version', id] as const,
+  diff: (base?: number, target?: number) => ['diff', base, target] as const,
+  users: ['users'] as const,
+  objectHistory: (id?: number) => ['object-history', id] as const,
+};
+
+export function useMe() {
+  return useQuery({
+    queryKey: queryKeys.me,
+    queryFn: () => api<Me>('/auth/me').catch((e: unknown) => {
+      if (e instanceof ApiError && e.status === 401) return null;
+      throw e;
+    }),
+    staleTime: 60_000,
+  });
+}
+
+export function useLogin() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { username: string; password: string }) => api<Me>('/auth/login', { method: 'POST', json: body }),
+    onSuccess: (me) => client.setQueryData(queryKeys.me, me),
+  });
+}
+
+export function useLogout() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<{ ok: true }>('/auth/logout', { method: 'POST' }),
+    // 실패해도 화면은 로그인으로 가므로, 남은 me 캐시가 되돌려 보내지 않게 항상 비운다
+    onSettled: () => {
+      client.clear();
+      client.setQueryData(queryKeys.me, null);
+    },
+  });
+}
+
+export const useTree = () => useQuery({ queryKey: queryKeys.tree, queryFn: () => api<TreeDatabase[]>('/tree') });
+
+export const useSchemaInfo = (id?: number) =>
+  useQuery({ queryKey: queryKeys.schema(id), queryFn: () => api<SchemaInfo>(`/schemas/${id}`), enabled: id !== undefined });
+
+export const useVersions = (schemaId?: number) =>
+  useQuery({ queryKey: queryKeys.versions(schemaId), queryFn: () => api<VersionSummary[]>(`/schemas/${schemaId}/versions`), enabled: schemaId !== undefined });
+
+export const useVersion = (id?: number) =>
+  useQuery({ queryKey: queryKeys.version(id), queryFn: () => api<VersionDetail>(`/versions/${id}`), enabled: id !== undefined, staleTime: Infinity });
+
+// 버전 내용은 불변이라 diff 결과는 rename 변경 전까지 다시 받을 필요가 없다
+export const useDiff = (base?: number, target?: number) =>
+  useQuery({
+    queryKey: queryKeys.diff(base, target),
+    queryFn: () => api<DiffResponse>(`/diff?base=${base}&target=${target}`),
+    enabled: base !== undefined && target !== undefined,
+    staleTime: Infinity,
+  });
+
+export function useSaveRenames() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { base: number; target: number; renames: RenameMapping[] }) => api<DiffResponse>('/diff/renames', { method: 'PUT', json: body }),
+    onSuccess: (data, body) => client.setQueryData(queryKeys.diff(body.base, body.target), data),
+  });
+}
+
+export function useUpload() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { meta: UploadMeta[]; files: File[] }) => {
+      const form = new FormData();
+      form.append('meta', JSON.stringify(input.meta));
+      input.files.forEach((file, i) => form.append('files', file, input.meta[i].filename));
+      return api<{ results: UploadResult[] }>('/uploads', { method: 'POST', form });
+    },
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.tree });
+      client.invalidateQueries({ queryKey: ['versions'] });
+    },
+  });
+}
+
+// 삭제된 id 는 SQLite 가 다시 쓸 수 있다 → id 로 캐시한 내용이 남으면 새 객체 자리에 옛 내용이 보인다
+const CATALOG_CACHE_KEYS = [['versions'], ['version'], ['schema'], ['object-history'], ['diff']] as const;
+
+export function useDeleteVersion() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api<{ ok: true }>(`/versions/${id}`, { method: 'DELETE' }),
+    onSuccess: (_data, id) => {
+      client.invalidateQueries({ queryKey: queryKeys.tree });
+      client.invalidateQueries({ queryKey: ['versions'] });
+      // 스키마는 그대로 남는다. 지운 버전과 그 버전을 담은 객체 이력·diff 는 버린다
+      client.removeQueries({ queryKey: queryKeys.version(id) });
+      client.removeQueries({ queryKey: ['object-history'] });
+      client.removeQueries({ queryKey: ['diff'] });
+    },
+  });
+}
+
+// Schema·Database 삭제는 하위 버전까지 연쇄로 지워지므로 서버가 확인용 이름을 요구한다
+function useDeleteCatalog(path: 'schemas' | 'databases') {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { id: number; confirmName: string }) =>
+      api<{ ok: true }>(`/${path}/${input.id}`, { method: 'DELETE', json: { confirmName: input.confirmName } }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.tree });
+      for (const queryKey of CATALOG_CACHE_KEYS) client.removeQueries({ queryKey });
+    },
+  });
+}
+
+export const useDeleteSchema = () => useDeleteCatalog('schemas');
+export const useDeleteDatabase = () => useDeleteCatalog('databases');
+
+export const useUsers = (enabled: boolean) =>
+  useQuery({ queryKey: queryKeys.users, queryFn: () => api<User[]>('/users'), enabled });
+
+export function useCreateUser() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { username: string; password: string; role: Role }) => api<User>('/users', { method: 'POST', json: body }),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.users }),
+  });
+}
+
+export function usePatchUser() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...patch }: { id: number; role?: Role; disabled?: boolean; password?: string }) => api<User>(`/users/${id}`, { method: 'PATCH', json: patch }),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.users }),
+  });
+}
+
+export const useObjectHistory = (id?: number) =>
+  useQuery({ queryKey: queryKeys.objectHistory(id), queryFn: () => api<ObjectHistory>(`/objects/${id}/history`), enabled: id !== undefined });

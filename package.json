@@ -1,0 +1,14 @@
+{
+  "name": "table-diff-manager",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "test": "npm test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build -w @tdm/web",
+    "start": "npm start -w @tdm/server",
+    "dev:server": "COOKIE_SECURE=false npm run dev -w @tdm/server",
+    "dev:web": "npm run dev -w @tdm/web"
+  }
+}

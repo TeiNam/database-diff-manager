@@ -1,0 +1,6 @@
+-- [~] TABLE t2
+ALTER TABLE `t2`
+  DROP CHECK `chk_a`,
+  ALTER INDEX `ix_b` INVISIBLE,
+  ADD CONSTRAINT `chk_a` CHECK ((`a` >= 0)),
+  ROW_FORMAT=DYNAMIC;

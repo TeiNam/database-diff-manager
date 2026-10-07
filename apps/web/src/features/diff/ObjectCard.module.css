@@ -1,0 +1,20 @@
+.card { margin: 0 var(--space-4) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--card); scroll-margin-top: 52px; }
+.head { display: flex; align-items: center; gap: 10px; padding: var(--space-2) var(--space-3); background: var(--muted); border-bottom: 1px solid var(--border); font-size: var(--text-sm); }
+.toggle { border: 0; background: transparent; color: var(--fg-dim); display: grid; padding: 2px; }
+.path { font-family: var(--mono); color: var(--fg); }
+.same { color: var(--fg-dim); }
+.numAdd { color: var(--add); font-family: var(--mono); }
+.numDel { color: var(--del); font-family: var(--mono); }
+.bar { display: inline-flex; gap: 1px; }
+.bar i { width: 8px; height: 8px; border-radius: 1px; background: var(--border-strong); }
+.bar .barAdd { background: var(--add); }
+.bar .barDel { background: var(--del); }
+.spacer { flex: 1; }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--card); color: var(--fg); font-size: var(--text-xs); text-decoration: none; }
+.btn:hover { background: var(--bg); }
+.toolbar { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--space-4); }
+.seg { display: flex; padding: 2px; background: var(--muted); border-radius: var(--radius); font-size: var(--text-sm); }
+.seg button { padding: 3px 12px; border: 0; border-radius: 4px; background: transparent; color: var(--fg-muted); }
+.seg .on { background: var(--card); color: var(--fg); box-shadow: var(--shadow); }
+.hint { color: var(--fg-dim); font-size: var(--text-xs); }
+.empty { margin: var(--space-4); padding: var(--space-6); border: 1px dashed var(--border-strong); border-radius: var(--radius); color: var(--fg-muted); text-align: center; }

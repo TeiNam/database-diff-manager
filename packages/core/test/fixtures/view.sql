@@ -1,0 +1,1 @@
+CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `v_daily` AS select `o`.`id` AS `id` from `orders` `o` WITH CASCADED CHECK OPTION

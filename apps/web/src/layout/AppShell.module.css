@@ -1,0 +1,4 @@
+.shell { display: grid; grid-template-rows: var(--topbar-h) 1fr auto; height: 100%; }
+.body { display: grid; grid-template-columns: var(--sidebar-w) 1fr; min-height: 0; }
+.main { min-width: 0; min-height: 0; overflow: auto; background: var(--bg); }
+.loading { padding: var(--space-6); color: var(--fg-muted); }

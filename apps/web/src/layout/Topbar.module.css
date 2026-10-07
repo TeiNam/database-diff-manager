@@ -1,0 +1,24 @@
+.topbar { display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-4); background: var(--surface); border-bottom: 1px solid var(--border); min-width: 0; overflow: hidden; }
+.brand { display: flex; flex-shrink: 0; white-space: nowrap; align-items: center; gap: var(--space-2); font-weight: 600; font-size: 14px; color: var(--fg); text-decoration: none; }
+.logo { width: 22px; height: 22px; border-radius: 5px; background: var(--accent); color: var(--bg); display: grid; place-items: center; }
+.crumb { display: flex; align-items: center; gap: 6px; color: var(--fg-muted); min-width: 0; overflow: hidden; white-space: nowrap; }
+.crumb span, .crumb b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.crumb b { color: var(--fg); font-weight: 500; }
+.spacer { flex: 1; }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 var(--space-3); border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--card); color: var(--fg); font-size: var(--text-sm); font-weight: 500; text-decoration: none; white-space: nowrap; transition: background var(--duration); }
+.btn:hover { background: var(--muted); }
+.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.primary:hover { background: var(--accent); filter: brightness(1.08); }
+.iconBtn { width: 30px; height: 30px; display: grid; place-items: center; border-radius: var(--radius); border: 0; background: transparent; color: var(--fg-muted); }
+.iconBtn:hover { background: var(--muted); color: var(--fg); }
+.user { color: var(--fg-muted); font-size: var(--text-sm); }
+.picker { display: flex; align-items: center; gap: 6px; font: var(--text-sm) var(--mono); }
+.picker label { display: flex; align-items: center; gap: 6px; }
+.tag { font: 600 10px var(--sans); padding: 1px 5px; border-radius: 3px; background: var(--muted); color: var(--fg-muted); }
+.select { height: 30px; max-width: 220px; padding: 0 var(--space-2); border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--card); color: var(--fg); font: var(--text-sm) var(--mono); }
+.dialog { position: fixed; top: calc(var(--topbar-h) + 8px); right: var(--space-4); left: auto; margin: 0; z-index: 20; display: grid; gap: var(--space-2); padding: var(--space-4); background: var(--surface); color: var(--fg); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow); }
+.dialog label { display: grid; gap: 4px; font-size: var(--text-sm); color: var(--fg-muted); }
+.engine { padding: 1px 6px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--fg-muted); font: 500 var(--text-xs) var(--sans); }
+.version { color: var(--fg-dim); font: var(--text-xs) var(--mono); }
+/* 좁은 화면에서는 잘려서 읽을 수 없으므로 숨긴다(같은 위치가 사이드바에 강조 표시됨) */
+@media (max-width: 1400px) { .crumb { display: none; } }

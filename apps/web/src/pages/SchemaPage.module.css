@@ -1,0 +1,2 @@
+.page { display: flex; flex-direction: column; min-height: 100%; }
+.message { padding: var(--space-6); color: var(--fg-muted); }

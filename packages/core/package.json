@@ -1,0 +1,20 @@
+{
+  "name": "@tdm/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:mysql": "docker compose -f docker-compose.test.yml up -d --wait && MYSQL_IT=1 vitest run test/mysql.int.test.ts",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.src.json"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "mysql2": "^3.24.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

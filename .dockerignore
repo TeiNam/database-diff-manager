@@ -1,0 +1,17 @@
+**/node_modules
+**/dist
+.git
+.github
+.superpowers
+.playwright-mcp
+docs
+samples
+bin
+data
+**/data
+*.db
+*.db-wal
+*.db-shm
+mysql.txt
+**/.DS_Store
+.code-review-graph

@@ -1,0 +1,10 @@
+/* Database : shop */
+CREATE TABLE `chat_log` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `create_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`,`create_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=5 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50100 PARTITION BY RANGE (((year(`create_at`) * 100) + month(`create_at`)))
+(PARTITION p202510 VALUES LESS THAN (202511) ENGINE = InnoDB,
+ PARTITION p202511 VALUES LESS THAN (202512) ENGINE = InnoDB,
+ PARTITION pmax VALUES LESS THAN MAXVALUE ENGINE = InnoDB) */;

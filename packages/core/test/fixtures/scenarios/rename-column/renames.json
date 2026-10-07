@@ -1,0 +1,4 @@
+[
+  { "kind": "column", "table": "member", "from": "nick", "to": "nickname" },
+  { "kind": "index", "table": "member", "from": "ix_old", "to": "ix_email" }
+]

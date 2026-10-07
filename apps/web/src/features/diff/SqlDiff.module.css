@@ -1,0 +1,18 @@
+.diff { width: 100%; border-collapse: collapse; table-layout: fixed; font: var(--code)/var(--code-lh) var(--mono); }
+.colNo { width: 44px; }
+.colSign { width: 18px; }
+.diff td { padding: 0; vertical-align: top; }
+.no { text-align: right; padding-right: 10px !important; color: var(--fg-dim); user-select: none; }
+.sign { text-align: center; color: var(--fg-dim); user-select: none; }
+.code { white-space: pre-wrap; word-break: break-all; padding-right: 10px !important; }
+.divider { border-right: 1px solid var(--border); }
+.del { background: var(--del-bg); } .del.no { background: var(--del-line); } .del.sign { color: var(--del); }
+.add { background: var(--add-bg); } .add.no { background: var(--add-line); } .add.sign { color: var(--add); }
+.same { background: transparent; }
+.empty { background: var(--muted) !important; opacity: 0.55; }
+.hunk td { background: var(--accent-bg); color: var(--fg-muted); padding: 3px 10px !important; }
+.fold td { background: var(--muted); text-align: center; }
+.fold button { width: 100%; border: 0; background: transparent; color: var(--accent); font: var(--text-xs) var(--sans); padding: 3px; }
+.fold button:hover { background: var(--accent-bg); }
+:global(.wordDel) { background: var(--del-word); border-radius: 2px; }
+:global(.wordAdd) { background: var(--add-word); border-radius: 2px; }

@@ -1,0 +1,6 @@
+-- [~] TABLE t1
+ALTER TABLE `t1`
+  MODIFY COLUMN `b` int DEFAULT NULL AFTER `c`;
+
+-- [~] VIEW v_a
+CREATE OR REPLACE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `v_a` AS select `t1`.`a` AS `a`,`t1`.`c` AS `c` from `t1`;

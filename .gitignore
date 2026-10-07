@@ -1,0 +1,15 @@
+.superpowers/
+.DS_Store
+node_modules/
+dist/
+*.db
+*.db-wal
+*.db-shm
+mysql.txt
+data/
+
+# 로컬 샘플 정의서 (테스트는 packages/core/test/fixtures 사본을 사용)
+samples/
+.playwright-mcp/
+bin/
+.code-review-graph/

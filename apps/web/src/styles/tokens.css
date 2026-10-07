@@ -1,0 +1,42 @@
+/* 승인 시안(2026-10-07-ui-mockup.html)의 토큰 */
+:root,
+[data-theme='dark'] {
+  --bg: #0f172a; --surface: #111a2e; --card: #1b2336; --muted: #272f42;
+  --border: #2a3550; --border-strong: #475569;
+  --fg: #f8fafc; --fg-muted: #94a3b8; --fg-dim: #64748b;
+  --accent: #38bdf8; --accent-bg: rgba(56, 189, 248, 0.12);
+  --add: #22c55e; --add-bg: rgba(34, 197, 94, 0.13); --add-line: rgba(34, 197, 94, 0.22); --add-word: rgba(34, 197, 94, 0.4);
+  --del: #f87171; --del-bg: rgba(248, 113, 113, 0.12); --del-line: rgba(248, 113, 113, 0.22); --del-word: rgba(248, 113, 113, 0.4);
+  --mod: #fbbf24; --mod-bg: rgba(251, 191, 36, 0.12);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --backdrop: rgba(2, 6, 23, 0.6);
+  color-scheme: dark;
+}
+
+[data-theme='light'] {
+  --bg: #f8fafc; --surface: #ffffff; --card: #ffffff; --muted: #f1f5f9;
+  --border: #e2e8f0; --border-strong: #cbd5e1;
+  --fg: #0f172a; --fg-muted: #475569; --fg-dim: #64748b;
+  --accent: #0369a1; --accent-bg: rgba(3, 105, 161, 0.08);
+  --add: #15803d; --add-bg: rgba(21, 128, 61, 0.08); --add-line: #dcfce7; --add-word: #bbf7d0;
+  --del: #b91c1c; --del-bg: rgba(185, 28, 28, 0.07); --del-line: #fee2e2; --del-word: #fecaca;
+  --mod: #b45309; --mod-bg: rgba(180, 83, 9, 0.08);
+  --shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+  --backdrop: rgba(15, 23, 42, 0.4);
+  color-scheme: light;
+}
+
+:root {
+  --sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --text: 13px;
+  --text-sm: 12px;
+  --text-xs: 11px;
+  --code: 12px;
+  --code-lh: 20px;
+  --radius: 6px;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-6: 24px;
+  --topbar-h: 48px;
+  --sidebar-w: 272px;
+  --duration: 150ms;
+}
