@@ -38,14 +38,14 @@ td-export 사용법은 [table-define-exporter](https://github.com/TeiNam/table-d
 ## Docker로 실행
 
 ```bash
-docker compose -f docker/compose.yaml up -d --build      # http://localhost:3000
+docker compose -f docker/compose.yaml up -d --build      # http://127.0.0.1:3000 (이 호스트에서만)
 docker compose -f docker/compose.yaml exec -it app \
   node --import tsx src/cli/create-admin.ts admin               # 최초 관리자 (비밀번호 프롬프트)
 ```
 
 - 데이터(SQLite)는 `tdm-data` 볼륨의 `/data`에 저장됩니다.
 - 빌드된 이미지는 GHCR에도 올라갑니다: `docker pull ghcr.io/teinam/database-diff-manager:latest`
-- compose 파일은 HTTP 직접 접속용으로 `COOKIE_SECURE=false`를 둡니다. HTTPS 리버스 프록시 뒤에서 운영하면 이 값을 지우고, 필요하면 `TRUST_PROXY`를 설정하세요.
+- compose 파일은 포트를 `127.0.0.1`에만 열고, 이 호스트에서 HTTP로 직접 접속하도록 `COOKIE_SECURE=false`를 둡니다. LAN에 열려면 HTTPS 리버스 프록시를 앞에 두고 `COOKIE_SECURE`를 지운 뒤(기본 `true`), 필요하면 `TRUST_PROXY`를 설정하세요.
 
 ## 로컬 실행 (Node.js 22.13+)
 
@@ -91,9 +91,9 @@ npm run test:mysql -w @tdm/core   # 생성 DDL을 MySQL 8.0/8.4 컨테이너에�
 
 ## CI
 
-`main` 브랜치에 푸시할 때마다 GitHub Actions가 타입 검사·테스트·빌드를 거친 뒤 제품 버전을 올려 `vX.Y.N` 태그와 GitHub Release를 만들고, 그 버전을 붙인 Docker 이미지(`linux/amd64`, `linux/arm64`)를 GHCR에 올립니다. 문서(`*.md`, `docs/`)만 바뀐 푸시에는 실행하지 않습니다.
+`main` 브랜치에 푸시할 때마다 GitHub Actions가 타입 검사·테스트·빌드를 거친 뒤 제품 버전을 계산해 그 버전을 붙인 Docker 이미지(`linux/amd64`, `linux/arm64`)를 GHCR에 올리고, 마지막에 `vX.Y.N` 태그와 GitHub Release를 만듭니다. 같은 커밋을 다시 실행하면 그 커밋의 태그를 재사용하고, `latest`는 그 커밋이 아직 `main`의 HEAD일 때만 옮깁니다. 다른 브랜치에서 `workflow_dispatch`로 실행하면 테스트만 돕니다. 문서(`*.md`, `docs/`)만 바뀐 푸시에는 실행하지 않습니다.
 
-**버전 규칙**: `major.minor`는 `apps/web/package.json`에서 가져오고, 패치 번호는 같은 `vX.Y.*` 태그 중 가장 큰 값 + 1입니다(처음은 0). 계산은 `scripts/next-version.mjs`가 합니다. 마이너·메이저를 올리려면 `apps/web/package.json`의 version을 바꾸면 됩니다. 상단·푸터에 보이는 버전은 빌드 때 넣은 값(`APP_VERSION`)이고, 로컬 빌드는 `X.Y.Z-dev`로 표시됩니다. `v*` 태그를 직접 푸시하면 새 버전을 만들지 않고 그 태그 버전으로 이미지만 빌드합니다.
+**버전 규칙**: `major.minor`는 `apps/web/package.json`에서 가져오고, 패치 번호는 같은 `vX.Y.*` 태그 중 가장 큰 값 + 1입니다(처음은 0). 계산은 `scripts/next-version.mjs`가 합니다. 마이너·메이저를 올리려면 `apps/web/package.json`의 version을 바꾸면 됩니다. 상단·푸터에 보이는 버전은 빌드 때 넣은 값(`APP_VERSION`)이고, 로컬 빌드는 `X.Y.Z-dev`로 표시됩니다. `v*` 태그를 직접 푸시하면(형식은 `vX.Y.Z`) 새 버전을 만들지 않고 그 태그 버전으로 이미지를 빌드하며, Release가 없으면 만듭니다.
 
 ---
 

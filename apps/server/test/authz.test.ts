@@ -105,6 +105,13 @@ describe('POST /api/migrations 본문 크기와 권한 순서', () => {
   });
 });
 
+describe('PUT /api/diff/renames 권한 순서', () => {
+  it('익명이 깨진 JSON 본문을 보내도 400 이 아니라 401 (본문 파싱 전에 거절)', async () => {
+    const res = await app.inject({ method: 'PUT', url: '/api/diff/renames', headers: { ...CSRF_ONLY, 'content-type': 'application/json' }, payload: '{ not json' });
+    expect(res.statusCode).toBe(401);
+  });
+});
+
 describe.each(CASES)('$method $url', (c) => {
   it(`익명 ${c.anon}`, async () => expect((await call(c, CSRF_ONLY)).statusCode).toBe(c.anon));
   it(`viewer ${c.viewer}`, async () => expectStatus((await call(c, viewer)).statusCode, c.viewer));

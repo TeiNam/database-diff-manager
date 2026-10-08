@@ -13,7 +13,7 @@ export function MigrationRevisions({ from, to, isAdmin }: { from: number; to: nu
   return (
     <>
       <table className={s.table} aria-label="전환 매핑 리비전">
-        <thead><tr><th>리비전</th><th>파일</th><th>룰</th><th>업로드</th><th>메모</th><th /></tr></thead>
+        <thead><tr><th>리비전</th><th>파일</th><th>룰</th><th>업로드</th><th>메모</th><th><span className="visually-hidden">동작</span></th></tr></thead>
         <tbody>
           {list.data.map((m) => (
             <tr key={m.id}>

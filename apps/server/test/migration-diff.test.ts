@@ -50,12 +50,30 @@ describe('diff 에 DMS 매핑 반영', () => {
     expect(renames.filter((r) => r.source === 'dms')).toHaveLength(10);
   });
 
-  it('역방향 비교에는 적용하지 않는다', async () => {
+  it('역방향(To-Be → As-Is) 비교에는 매핑을 뒤집어 rename 으로 반영하고, 정방향은 그대로다', async () => {
     const s = await setup();
+    const reverseBefore = await s.getDiff(s.toBe.versionId, s.asIs.versionId);
+    expect(reverseBefore.ddl).toContain('DROP TABLE `promotion`');
     await s.upload();
+    const forward = await s.getDiff();
     const reverse = await s.getDiff(s.toBe.versionId, s.asIs.versionId);
-    expect(reverse.renames).toEqual([]);
-    expect(tableOps(reverse)).toContain('drop:promotion');
+
+    expect(tableOps(reverse)).toEqual(['add:tb_tmp_bak', 'drop:audit_log', 'rename:tb_cust', 'rename:tb_prm', 'rename:tb_prm_cnd']);
+    expect(reverse.renames).toHaveLength(11);
+    expect(reverse.renames.every((r: { source: string }) => r.source === 'dms')).toBe(true);
+    expect(reverse.renames[0]).toEqual({ kind: 'table', from: 'customer', to: 'tb_cust', source: 'dms' });
+    expect(reverse.diff.ignoredRenames).toEqual([]);
+    expect(reverse.ddl).toContain('RENAME TABLE `promotion` TO `tb_prm`');
+    for (const t of ['customer', 'promotion', 'promotion_condition']) expect(reverse.ddl).not.toContain(`DROP TABLE \`${t}\``);
+    for (const c of ['promotion_id', 'promotion_name', 'created_at', 'customer_id', 'customer_name', 'condition_seq', 'condition_value']) {
+      expect(reverse.ddl).not.toContain(`DROP COLUMN \`${c}\``);
+    }
+    // remove-column 은 역방향에서 ADD COLUMN 이 된다 (diff 에 맡긴다)
+    expect(reverse.ddl).toMatch(/ADD COLUMN `max_dc_cnt`/);
+
+    expect(forward.ddl).toContain('RENAME TABLE `tb_prm` TO `promotion`');
+    expect(tableOps(forward)).toEqual(['add:audit_log', 'drop:tb_tmp_bak', 'rename:customer', 'rename:promotion', 'rename:promotion_condition']);
+    expect(forward.renames[0]).toEqual({ kind: 'table', from: 'tb_cust', to: 'customer', source: 'dms' });
   });
 });
 

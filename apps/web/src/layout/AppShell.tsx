@@ -32,7 +32,7 @@ export function AppShell() {
       <Topbar me={me.data} />
       <div className={s.body} style={{ '--sidebar-w': `${sidebar.width}px` } as CSSProperties}>
         <Sidebar />
-        <SidebarResizer width={sidebar.width} onChange={sidebar.setWidth} onReset={sidebar.reset} />
+        <SidebarResizer width={sidebar.width} onChange={sidebar.setWidth} onCommit={sidebar.saveWidth} onReset={sidebar.reset} />
         <main className={s.main} id="main">
           <Outlet />
         </main>

@@ -24,7 +24,8 @@ function toManualRenames(submitted: RenameMapping[], dms: RenameMapping[]): Rena
 }
 
 export function diffRoutes(app: FastifyInstance, ctx: AppContext): void {
-  app.addHook('preHandler', requireLogin);
+  // 본문을 읽기 전(onRequest)에 로그인을 확인한다. 익명 요청이 본문 파싱·검증까지 가지 않도록
+  app.addHook('onRequest', requireLogin);
 
   app.get('/', async (req) => {
     const { base, target } = DiffQuery.parse(req.query);
@@ -33,7 +34,7 @@ export function diffRoutes(app: FastifyInstance, ctx: AppContext): void {
 
   app.put('/renames', async (req) => {
     const { base, target, renames } = RenamesBody.parse(req.body);
-    const inputs = loadDiffInputs(ctx.db, base, target); // 버전이 없으면 여기서 404
+    const inputs = loadDiffInputs(ctx.db, ctx.cache, base, target); // 버전이 없으면 여기서 404
     replaceRenames(ctx.db, base, target, toManualRenames(renames, inputs.dms), req.user!.id);
     return computeDiff(ctx.db, ctx.cache, base, target, inputs);
   });

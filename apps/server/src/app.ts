@@ -18,16 +18,13 @@ import { uploadRoutes } from './routes/uploads';
 import { userRoutes } from './routes/users';
 import { versionRoutes } from './routes/versions';
 import { registerWeb } from './static';
-import { DiffCache } from './services/diff-service';
+import { AppCache } from './services/cache';
 
 export interface AppContext {
   db: Db;
   config: Config;
-  cache: DiffCache;
+  cache: AppCache;
 }
-
-// diff 캐시에 보관하는 최대 항목 수
-const DIFF_CACHE_SIZE = 50;
 
 // '/api' 자체와 '/api?x=1' 도 API 영역으로 본다 (SPA 폴백 대상이 아니다)
 const isApiUrl = (url: string) => url === '/api' || /^\/api[/?]/.test(url);
@@ -61,7 +58,7 @@ export async function buildApp(deps: { db: Db; config: Config }, opts: { logger?
     // 런타임은 홉 수(number)도 받지만 Fastify 타입 정의에는 빠져 있어 좁혀서 넘긴다
     trustProxy: (deps.config.trustProxy ?? false) as string | boolean,
   });
-  const ctx: AppContext = { ...deps, cache: new DiffCache(DIFF_CACHE_SIZE) };
+  const ctx: AppContext = { ...deps, cache: new AppCache() };
   await app.register(helmet, helmetOptions(deps.config));
   await app.register(cookie);
   await app.register(rateLimit, { global: false, hook: 'preHandler' });

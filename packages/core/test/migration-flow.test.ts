@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { diffSchemas } from '../src/diff';
 import { type DmsMapping, parseDmsMapping } from '../src/dms-mapping';
-import { buildMigrationFlow, toRenameMappings } from '../src/migration-flow';
+import { buildMigrationFlow, toRenameMappings, toReverseRenameMappings } from '../src/migration-flow';
 import { parseSqlDump } from '../src/parse-dump';
 import { fixture } from './helpers';
 
@@ -116,6 +116,31 @@ describe('toRenameMappings', () => {
     const promotion = d.tables.find((t) => t.name === 'promotion')!;
     expect(promotion.columns.map((c) => [c.op, c.oldName, c.name])).toEqual([
       ['rename', 'prm_id', 'promotion_id'], ['rename', 'prm_nm', 'promotion_name'], ['drop', undefined, 'max_dc_cnt'], ['rename', 'reg_dt', 'created_at'],
+    ]);
+  });
+});
+
+describe('toReverseRenameMappings (역방향: To-Be → As-Is)', () => {
+  const reverse = toReverseRenameMappings(mapping, asIs, toBe);
+
+  it('정방향 rename 을 뒤집고, 컬럼 매핑의 table 은 역방향 TARGET(As-Is) 테이블명이다', () => {
+    expect(reverse).toEqual(toRenameMappings(mapping, asIs, toBe).map((r) => {
+      const asIsTable = r.kind === 'column' ? { tb_cust: 'customer', tb_prm: 'promotion', tb_prm_cnd: 'promotion_condition' } : {};
+      const table = Object.entries(asIsTable).find(([, toBeName]) => toBeName === r.table)?.[0];
+      return r.kind === 'column' ? { kind: 'column', table, from: r.to, to: r.from } : { kind: 'table', from: r.to, to: r.from };
+    }));
+  });
+
+  it('적용하면 되돌리기 diff 가 DROP 없이 rename 을 낸다 (매핑 대상)', () => {
+    const d = diffSchemas(toBe, asIs, reverse);
+    expect(d.tables.map((t) => `${t.op}:${t.oldName ?? ''}>${t.name}`).sort()).toEqual([
+      'add:>tb_tmp_bak', 'drop:>audit_log',
+      'rename:customer>tb_cust', 'rename:promotion>tb_prm', 'rename:promotion_condition>tb_prm_cnd',
+    ]);
+    expect(d.ignoredRenames).toEqual([]);
+    const prm = d.tables.find((t) => t.name === 'tb_prm')!;
+    expect(prm.columns.map((c) => [c.op, c.oldName, c.name])).toEqual([
+      ['rename', 'promotion_id', 'prm_id'], ['rename', 'promotion_name', 'prm_nm'], ['rename', 'created_at', 'reg_dt'], ['add', undefined, 'max_dc_cnt'],
     ]);
   });
 });

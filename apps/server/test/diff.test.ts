@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DiffCache } from '../src/services/diff-service';
+import { LruCache } from '../src/services/cache';
 import { loggedInApp, multipart, SAMPLE_SQL, sampleText } from './helpers';
 
 type App = Awaited<ReturnType<typeof loggedInApp>>;
@@ -104,9 +104,9 @@ describe('삭제 후 diff 캐시', () => {
   });
 });
 
-describe('DiffCache', () => {
+describe('LruCache', () => {
   it('가장 오래 쓰지 않은 항목부터 버린다', () => {
-    const cache = new DiffCache(2);
+    const cache = new LruCache<never>(2);
     const v = (n: number) => ({ ddl: String(n) }) as never;
     cache.set('a', v(1));
     cache.set('b', v(2));

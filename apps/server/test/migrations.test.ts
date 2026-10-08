@@ -54,6 +54,31 @@ describe('POST /api/migrations', () => {
   });
 });
 
+describe('POST /api/migrations: 다중 스키마 파일', () => {
+  const other = (id: number) => ({ 'rule-type': 'transformation', 'rule-id': String(id), 'rule-name': String(id), 'rule-target': 'table',
+    'object-locator': { 'schema-name': 'other', 'table-name': 'tb_prm' }, 'rule-action': 'rename', value: 'wrong' });
+  const withOtherFirst = () => {
+    const json = JSON.parse(dmsFixture('mapping.json'));
+    return JSON.stringify({ rules: [other(900), ...json.rules] });
+  };
+
+  it('다른 스키마 룰이 앞에 있어도 BASE Schema(legacy) 룰을 쓴다', async () => {
+    const s = await setup();
+    const res = await post(s, s.admin, body(s, { source: withOtherFirst() }));
+    expect(res.statusCode).toBe(201);
+    expect(res.json().warnings.map((w: { ruleId: string }) => w.ruleId)).toEqual(['900', '50']);
+    const flow = await s.app.inject({ method: 'GET', url: `/api/migration-flow?base=${s.asIs.versionId}&target=${s.toBe.versionId}`, headers: s.viewer });
+    expect(flow.json().flow.totals).toMatchObject({ inScope: 3, verified: 2 });
+  });
+
+  it('여러 스키마가 있는데 BASE Schema 룰이 하나도 없으면 400', async () => {
+    const s = await setup();
+    const source = JSON.stringify({ rules: [other(1), { ...other(2), 'object-locator': { 'schema-name': 'third', 'table-name': 't' } }] });
+    const res = await post(s, s.admin, body(s, { source }));
+    expect([res.statusCode, res.json().error]).toEqual([400, "매핑에 'legacy' 스키마 룰이 없습니다"]);
+  });
+});
+
 describe('원문·삭제·연쇄 삭제', () => {
   it('원문을 그대로 내려받고, 삭제하면 그 리비전만 빠진다', async () => {
     const s = await setup();

@@ -6,9 +6,11 @@ services:
       dockerfile: docker/Dockerfile
     image: ghcr.io/teinam/database-diff-manager:latest
     ports:
-      - "3000:3000"
+      # 기본은 이 호스트에서만 접속한다(127.0.0.1). LAN 에 열 때는 앞의 127.0.0.1: 을 지우기보다
+      # HTTPS 리버스 프록시를 앞에 두고, 아래 COOKIE_SECURE 줄을 지워 Secure 쿠키를 쓰기를 권장한다
+      - "127.0.0.1:3000:3000"
     environment:
-      # HTTPS 리버스 프록시 뒤에서 운영하면 이 줄을 지운다(기본 true). HTTP 로 직접 접속할 때만 false
+      # 평문 HTTP 로 직접 접속할 때만 false (기본 true). HTTPS 리버스 프록시 뒤에서 운영하면 이 줄을 지운다
       COOKIE_SECURE: "false"
       # 프록시 뒤라면 홉 수나 프록시 IP 를 지정한다 (apps/server/README.md 참고)
       # TRUST_PROXY: "1"

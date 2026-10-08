@@ -2,6 +2,7 @@ import type { ColumnFlowStatus, MigrationFlow, TableFlow } from '@tdm/core';
 import { Fragment, useMemo, useState } from 'react';
 import { Icon } from '../../components/Icon';
 import { FLOW_FILTERS, filterFlowTables, type FlowFilter } from '../../lib/migration-filter';
+import { handleRadioKeys } from '../../lib/radio-group';
 import { StatusBadge, statusLabel } from './StatusBadge';
 import s from './migration.module.css';
 
@@ -52,6 +53,8 @@ function ColumnTable({ table }: { table: TableFlow }) {
   );
 }
 
+const FILTER_IDS = FLOW_FILTERS.map(([id]) => id);
+
 function Toolbar({ filter, query, shown, total, onFilter, onQuery }: {
   filter: FlowFilter; query: string; shown: number; total: number; onFilter: (f: FlowFilter) => void; onQuery: (q: string) => void;
 }) {
@@ -59,9 +62,10 @@ function Toolbar({ filter, query, shown, total, onFilter, onQuery }: {
     <div className={s.toolbar}>
       <input type="search" className={s.search} placeholder="As-Is·To-Be 테이블·컬럼 검색" aria-label="전환 표 검색"
         value={query} onChange={(e) => onQuery(e.target.value)} />
-      <div className={s.seg} role="radiogroup" aria-label="전환 표 필터">
+      <div className={s.seg} role="radiogroup" aria-label="전환 표 필터" onKeyDown={(e) => handleRadioKeys(e, FILTER_IDS, filter, onFilter)}>
         {FLOW_FILTERS.map(([id, label]) => (
-          <button key={id} type="button" role="radio" aria-checked={filter === id} className={filter === id ? s.on : undefined} onClick={() => onFilter(id)}>{label}</button>
+          <button key={id} type="button" role="radio" aria-checked={filter === id} tabIndex={filter === id ? 0 : -1}
+            className={filter === id ? s.on : undefined} onClick={() => onFilter(id)}>{label}</button>
         ))}
       </div>
       <span className={s.meta} role="status">{shown} / {total} 테이블</span>

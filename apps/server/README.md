@@ -17,7 +17,7 @@ npm run dev -w @tdm/server                          # http://127.0.0.1:3000
 | `HOST` | `127.0.0.1` | Bind address |
 | `PORT` | `3000` | Port |
 | `DATA_DIR` | `./data` | Location of the SQLite file (`tdm.db`) |
-| `COOKIE_SECURE` | `true` | Set to `false` only when developing over HTTP. If you access the server through an address other than localhost, the Secure cookie is not sent. When `false`, HSTS and `upgrade-insecure-requests` are also disabled |
+| `COOKIE_SECURE` | `true` | Set to `false` only for plain-HTTP access (local development, or `docker/compose.yaml`, which binds to `127.0.0.1`). Keep `true` behind an HTTPS reverse proxy, which is the recommended way to expose the server on a LAN. If you access the server through an address other than localhost, the Secure cookie is not sent. When `false`, HSTS and `upgrade-insecure-requests` are also disabled |
 | `WEB_DIST` | `<cwd>/../web/dist` | Location of the built web app (`apps/web/dist`). Running `npm start` from the repository root works with the default. After rebuilding the web app, restart the server for the change to take effect |
 | `TRUST_PROXY` | `false` | Scope in which `X-Forwarded-For` is trusted behind a reverse proxy. `true`/`false`, a hop count (e.g. `1`), or a comma-separated list of IPs/CIDRs (e.g. `10.0.0.0/8,127.0.0.1`) |
 

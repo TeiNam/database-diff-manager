@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { describe, expect, it } from 'vitest';
-import { queryKeys, useDeleteDatabase, useDeleteMigration, useDeleteSchema, useDeleteVersion, useUploadMigration } from '../src/api/hooks';
+import { DIFF_STALE_MS, queryKeys, useDeleteDatabase, useDeleteMigration, useDeleteSchema, useDeleteVersion, useDiff, useMigrationFlow, useUploadMigration } from '../src/api/hooks';
 import { mockApi } from './render';
 
 // 삭제된 id 를 SQLite 가 다시 쓸 수 있어, 지운 버전·스키마·객체 이력 캐시가 남으면 새 데이터 대신 옛 내용이 보인다
@@ -62,5 +62,22 @@ describe('전환 매핑 훅의 캐시 정리', () => {
     result.current.mutate({ id: 7, confirmName: 'shop' });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(KEYS.map((k) => client.getQueryData(k))).toEqual([undefined, undefined, undefined]);
+  });
+});
+
+// 다른 사용자가 바꾼 전환 매핑·rename 이 반영되도록 diff·전환 표는 30초가 지나면 다시 받는다
+describe('diff·전환 표 신선도', () => {
+  it.each([
+    ['diff', (): { isSuccess: boolean } => useDiff(11, 12), queryKeys.diff(11, 12)],
+    ['migration-flow', (): { isSuccess: boolean } => useMigrationFlow(11, 12), queryKeys.migrationFlow(11, 12)],
+  ] as const)('%s 의 staleTime 은 30초', async (_label, useHook, key) => {
+    mockApi({ '/api/diff?base=11&target=12': {}, '/api/migration-flow?base=11&target=12': { mapping: null } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(useHook, { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const observer = client.getQueryCache().find({ queryKey: key })!.observers[0];
+    expect(observer.options.staleTime).toBe(DIFF_STALE_MS);
+    expect(DIFF_STALE_MS).toBe(30_000);
   });
 });
