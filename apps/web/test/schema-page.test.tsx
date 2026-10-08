@@ -60,4 +60,17 @@ describe('SchemaPage', () => {
     renderWithProviders(<SchemaPage />, { route: `${ROUTE}?base=11&target=12&tab=summary`, path: '/db/:dbId/schema/:schemaId' });
     expect(await screen.findByText(/일부 속성.*비교되지 않았습니다/)).toBeInTheDocument();
   });
+
+  it('전환 탭: 누르면 tab=migration 이 되고 전환 탭 본문을 그린다', async () => {
+    mockApi({
+      '/api/schemas/7/versions': [V(12, 2), V(11, 1)],
+      '/api/diff?base=11&target=12': response(),
+      '/api/migration-flow?base=11&target=12': { mapping: null },
+      '/api/auth/me': { id: 1, username: 'viewer', role: 'viewer' },
+    });
+    renderWithProviders(<SchemaPage />, { route: `${ROUTE}?base=11&target=12&tab=summary`, path: '/db/:dbId/schema/:schemaId' });
+    await userEvent.setup().click(await screen.findByRole('tab', { name: '전환' }));
+    expect(screen.getByTestId('location')).toHaveTextContent('tab=migration');
+    expect(await screen.findByText(/같은 Schema 의 버전끼리는/)).toBeInTheDocument();
+  });
 });

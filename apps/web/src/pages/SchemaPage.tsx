@@ -6,6 +6,7 @@ import { DdlTab } from '../features/diff/DdlTab';
 import { DiffTab } from '../features/diff/DiffTab';
 import { RenameBanner } from '../features/diff/RenameBanner';
 import { SummaryTab } from '../features/diff/SummaryTab';
+import { MigrationTab } from '../features/migration/MigrationTab';
 import { useSchemaContext, type Tab } from '../hooks/useSchemaContext';
 import s from './SchemaPage.module.css';
 
@@ -33,12 +34,13 @@ export function SchemaPage() {
   return (
     <section className={s.page} aria-label="스키마 비교">
       <Tabs<Tab> value={ctx.tab} onChange={(tab) => set({ tab })}
-        items={[{ id: 'summary', label: '요약', badge: changed }, { id: 'diff', label: '객체 diff' }, { id: 'ddl', label: 'DDL' }]} />
+        items={[{ id: 'summary', label: '요약', badge: changed }, { id: 'diff', label: '객체 diff' }, { id: 'ddl', label: 'DDL' }, { id: 'migration', label: '전환' }]} />
       {diff.data.diff.partial && <Banner tone="warn">{PARTIAL_MESSAGE}</Banner>}
       <RenameBanner data={diff.data} />
       {ctx.tab === 'summary' && <SummaryTab data={diff.data} onOpen={(kind, name) => set({ tab: 'diff', obj: name, kind })} />}
       {ctx.tab === 'diff' && <DiffTab data={diff.data} />}
       {ctx.tab === 'ddl' && <DdlTab data={diff.data} />}
+      {ctx.tab === 'migration' && <MigrationTab data={diff.data} />}
     </section>
   );
 }

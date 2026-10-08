@@ -1,7 +1,9 @@
 import { useCallback, useLayoutEffect, useRef } from 'react';
 import { useLocation, useMatch, useNavigate, useSearchParams } from 'react-router';
 
-export type Tab = 'summary' | 'diff' | 'ddl';
+export type Tab = 'summary' | 'diff' | 'ddl' | 'migration';
+
+const TABS: readonly string[] = ['summary', 'diff', 'ddl', 'migration'];
 
 export const positive = (v: string | null | undefined) => {
   const n = Number(v);
@@ -38,7 +40,7 @@ export function useSchemaContext() {
     schemaId: positive(match?.params.schemaId),
     base: positive(params.get('base')),
     target: positive(params.get('target')),
-    tab: (tab === 'summary' || tab === 'ddl' ? tab : 'diff') as Tab,
+    tab: (tab !== null && TABS.includes(tab) ? tab : 'diff') as Tab,
     obj: params.get('obj') ?? undefined,
     objKind: (params.get('kind') === 'view' ? 'view' : 'table') as 'table' | 'view',
     mode: (params.get('mode') === 'grid' ? 'grid' : 'sql') as 'sql' | 'grid',
