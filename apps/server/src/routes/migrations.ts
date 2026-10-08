@@ -7,7 +7,7 @@ import { MAX_UPLOAD_BYTES, MIGRATION_BODY_LIMIT } from '../limits';
 import { getSchema } from '../repos/catalog';
 import { deleteMigration, getMigrationSource, listMigrations } from '../repos/migrations';
 import { IdParams, NoteSchema, SafeFilename } from '../schemas';
-import { uploadMigration } from '../services/migration-service';
+import { computeMigrationFlow, uploadMigration } from '../services/migration-service';
 
 const Id = z.coerce.number().int().positive();
 const UploadBody = z.object({
@@ -18,6 +18,7 @@ const UploadBody = z.object({
   note: NoteSchema.optional(),
 });
 const PairQuery = z.object({ from: Id, to: Id });
+const FlowQuery = z.object({ base: Id, target: Id });
 
 export function migrationRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.post('/migrations', { preHandler: requireAdmin, bodyLimit: MIGRATION_BODY_LIMIT }, async (req, reply) => {
@@ -43,5 +44,10 @@ export function migrationRoutes(app: FastifyInstance, ctx: AppContext): void {
     deleteMigration(ctx.db, IdParams.parse(req.params).id);
     ctx.cache.clear();
     return { ok: true };
+  });
+
+  app.get('/migration-flow', { preHandler: requireLogin }, async (req) => {
+    const { base, target } = FlowQuery.parse(req.query);
+    return computeMigrationFlow(ctx.db, base, target);
   });
 }

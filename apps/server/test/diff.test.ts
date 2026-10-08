@@ -57,7 +57,7 @@ describe('PUT /api/diff/renames', () => {
     expect(saved.json().ddl).toContain('RENAME TABLE `members` TO `member`');
 
     const reloaded = (await ctx.app.inject({ method: 'GET', url: `/api/diff?base=${v1}&target=${v2}`, headers: ctx.viewer })).json();
-    expect(reloaded.renames).toEqual([{ kind: 'table', from: 'members', to: 'member' }]);
+    expect(reloaded.renames).toEqual([{ kind: 'table', from: 'members', to: 'member', source: 'manual' }]);
 
     const cleared = await ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.viewer, payload: { base: v1, target: v2, renames: [] } });
     expect(cleared.json().diff.tables.map((t: { op: string }) => t.op)).toEqual(['drop', 'add']);

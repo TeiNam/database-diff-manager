@@ -1,8 +1,13 @@
-import { DmsParseError, parseDmsMapping, type DmsMapping, type DmsWarning } from '@tdm/core';
+import { buildMigrationFlow, DmsParseError, parseDmsMapping, type DmsMapping, type DmsWarning, type MigrationFlow } from '@tdm/core';
 import type { Db } from '../db/connection';
 import { AppError } from '../errors';
 import { getSchema } from '../repos/catalog';
-import { addMigration, type MigrationMeta } from '../repos/migrations';
+import { addMigration, latestMigration, type MigrationMeta } from '../repos/migrations';
+import { getVersionMeta, loadVersion } from '../repos/versions';
+
+export type MigrationFlowResponse =
+  | { mapping: null }
+  | { mapping: MigrationMeta; flow: MigrationFlow; warnings: DmsWarning[] };
 
 export interface MigrationUpload {
   fromSchemaId: number;
@@ -43,4 +48,16 @@ export function uploadMigration(db: Db, input: MigrationUpload): { migration: Mi
   const { mapping, warnings } = parseOrReject(input.source);
   const migration = addMigration(db, { ...input, ruleCount: mapping.ruleCount });
   return { migration, warnings: [...schemaNameWarnings(mapping, from.name, to.name), ...warnings] };
+}
+
+// BASE 버전의 Schema → TARGET 버전의 Schema 쌍에 걸린 최신 리비전만 쓴다 (역방향에는 적용하지 않는다)
+export function computeMigrationFlow(db: Db, baseId: number, targetId: number): MigrationFlowResponse {
+  const base = getVersionMeta(db, baseId);
+  const target = getVersionMeta(db, targetId);
+  const latest = latestMigration(db, base.schemaId, target.schemaId);
+  if (!latest) return { mapping: null };
+  const { source, ...meta } = latest;
+  const { mapping, warnings } = parseDmsMapping(source);
+  const flow = buildMigrationFlow(loadVersion(db, baseId).model, loadVersion(db, targetId).model, mapping);
+  return { mapping: meta, flow, warnings: [...schemaNameWarnings(mapping, base.schemaName, target.schemaName), ...warnings] };
 }
