@@ -148,12 +148,13 @@ export function usePatchUser() {
 export const useObjectHistory = (id?: number) =>
   useQuery({ queryKey: queryKeys.objectHistory(id), queryFn: () => api<ObjectHistory>(`/objects/${id}/history`), enabled: id !== undefined });
 
-// 전환 매핑은 바뀔 수 있지만, 바꾸는 쪽(올리기·삭제)이 캐시를 무효화하므로 그 전까지 다시 받을 필요가 없다
-export const useMigrationFlow = (base?: number, target?: number) =>
+// 전환 매핑은 바뀔 수 있지만, 바꾸는 쪽(올리기·삭제)이 캐시를 무효화하므로 그 전까지 다시 받을 필요가 없다.
+// enabled=false(같은 Schema 끼리 비교 등)면 요청하지 않는다
+export const useMigrationFlow = (base?: number, target?: number, enabled = true) =>
   useQuery({
     queryKey: queryKeys.migrationFlow(base, target),
     queryFn: () => api<MigrationFlowResponse>(`/migration-flow?base=${base}&target=${target}`),
-    enabled: base !== undefined && target !== undefined,
+    enabled: enabled && base !== undefined && target !== undefined,
     staleTime: Infinity,
   });
 

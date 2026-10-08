@@ -13,6 +13,16 @@ function Name({ value }: { value?: string }) {
   return value ? <span className={s.name}>{value}</span> : <span className={s.dim}>—</span>;
 }
 
+// 컬럼 행이 있는 테이블만 펼칠 수 있다. 없으면(제외·To-Be 전용 등) 화살표 없이 이름만 보여 준다
+function TableCell({ table, isOpen, onToggle }: { table: TableFlow; isOpen: boolean; onToggle: () => void }) {
+  if (table.columns.length === 0) return <span className={s.plain}><Name value={table.asIs} /></span>;
+  return (
+    <button type="button" className={s.expand} aria-expanded={isOpen} aria-label={`${tableName(table)} 컬럼 ${isOpen ? '접기' : '펼치기'}`} onClick={onToggle}>
+      <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} />{tableName(table)}
+    </button>
+  );
+}
+
 // "이름변경 3 · 컬럼삭제 1" (동일 컬럼은 세지 않는다)
 function columnSummary(t: TableFlow): string {
   if (t.columns.length === 0) return '';
@@ -24,7 +34,6 @@ function columnSummary(t: TableFlow): string {
 }
 
 function ColumnTable({ table }: { table: TableFlow }) {
-  if (table.columns.length === 0) return <p className={s.meta}>비교할 컬럼이 없습니다</p>;
   return (
     <table className={s.inner} aria-label={`${tableName(table)} 컬럼 매핑`}>
       <thead><tr><th>As-Is 컬럼</th><th>타입</th><th>To-Be 컬럼</th><th>타입</th><th>상태</th></tr></thead>
@@ -79,11 +88,7 @@ export function MigrationTable({ flow }: { flow: MigrationFlow }) {
               return (
                 <Fragment key={key}>
                   <tr>
-                    <td>
-                      <button type="button" className={s.expand} aria-expanded={isOpen} aria-label={`${tableName(t)} 컬럼 ${isOpen ? '접기' : '펼치기'}`} onClick={() => toggle(key)}>
-                        <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} />{t.asIs ?? '—'}
-                      </button>
-                    </td>
+                    <td><TableCell table={t} isOpen={isOpen} onToggle={() => toggle(key)} /></td>
                     <td><Name value={t.toBe} /></td>
                     <td><StatusBadge status={t.status} /></td>
                     <td className={s.meta}>{columnSummary(t)}</td>

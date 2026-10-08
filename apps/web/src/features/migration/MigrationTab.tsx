@@ -12,7 +12,7 @@ import s from './migration.module.css';
 function Warnings({ warnings }: { warnings: DmsWarning[] }) {
   if (warnings.length === 0) return null;
   return (
-    <Banner tone="warn" label="전환 매핑 경고">
+    <Banner tone="warn" label="전환 매핑 경고" className={s.flush}>
       <details>
         <summary>경고 {warnings.length}건 — 반영하지 않은 룰과 이름 불일치</summary>
         <ul className={s.warnings}>
@@ -26,7 +26,8 @@ function Warnings({ warnings }: { warnings: DmsWarning[] }) {
 // 전환 탭: BASE 버전 Schema(As-Is) → TARGET 버전 Schema(To-Be) 쌍의 최신 매핑을 표로 보여 준다
 export function MigrationTab({ data }: { data: DiffResponse }) {
   const me = useMe();
-  const flow = useMigrationFlow(data.base.id, data.target.id);
+  // 같은 Schema 끼리는 매핑이 걸릴 수 없으므로 전환 표를 요청하지 않는다
+  const flow = useMigrationFlow(data.base.id, data.target.id, data.base.schemaId !== data.target.schemaId);
   const [uploading, setUploading] = useState(false);
   const [showRevisions, setShowRevisions] = useState(false);
   const isAdmin = me.data?.role === 'admin';

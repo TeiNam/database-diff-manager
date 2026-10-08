@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DmsParseError, isSelected, likeMatch, MAX_DMS_RULES, parseDmsMapping } from '../src/dms-mapping';
+import { compileSelection, DmsParseError, likeMatch, MAX_DMS_RULES, parseDmsMapping } from '../src/dms-mapping';
 import { fixture } from './helpers';
 
 // 룰 하나를 DMS 형식으로 만든다 (object-locator 의 schema-name 기본값 legacy)
@@ -72,20 +72,20 @@ describe('selection', () => {
   });
 
   it('룰이 없으면 전부 대상, exclude 가 include 보다 우선', () => {
-    expect(isSelected(parse([]).mapping, 'any')).toBe(true);
+    expect(compileSelection(parse([]).mapping)('any')).toBe(true);
     const { mapping } = parse([sel(1, 'tb_%'), sel(2, 'tb_tmp%', 'exclude')]);
-    expect(['tb_prm', 'tb_tmp_bak', 'audit'].map((t) => isSelected(mapping, t))).toEqual([true, false, false]);
+    expect(['tb_prm', 'tb_tmp_bak', 'audit'].map((t) => compileSelection(mapping)(t))).toEqual([true, false, false]);
   });
 
   it('exclude 만 있으면 나머지는 전부 대상', () => {
     const { mapping } = parse([sel(1, 'tb_tmp%', 'exclude')]);
-    expect(['tb_prm', 'TB_TMP_BAK'].map((t) => isSelected(mapping, t))).toEqual([true, false]);
+    expect(['tb_prm', 'TB_TMP_BAK'].map((t) => compileSelection(mapping)(t))).toEqual([true, false]);
   });
 
   it('table-name 이 없는 selection 은 % 로 본다', () => {
     const { mapping } = parse([rule(1, { 'rule-type': 'selection', 'object-locator': { 'schema-name': 'legacy' }, 'rule-action': 'include' })]);
     expect(mapping.selection.include).toEqual(['%']);
-    expect(isSelected(mapping, 'x')).toBe(true);
+    expect(compileSelection(mapping)('x')).toBe(true);
   });
 
   it('% 가 많은 패턴도 긴 이름에서 바로 끝난다', () => {

@@ -26,7 +26,12 @@ interface Preview {
 async function readPreview(file: File): Promise<Preview | string> {
   if (file.name.length > MAX_FILENAME || /[/\\]/.test(file.name)) return `파일명이 ${MAX_FILENAME}자를 넘거나 / \\ 문자를 포함합니다`;
   if (file.size > MAX_BYTES) return '파일이 너무 큽니다 (최대 20MB)';
-  const source = await file.text();
+  let source: string;
+  try {
+    source = await file.text();
+  } catch {
+    return '파일을 읽지 못했습니다';
+  }
   try {
     return { filename: file.name, source, ...parseDmsMapping(source) };
   } catch (e) {
@@ -84,11 +89,14 @@ export function MigrationUploadDialog({ from, to, onClose }: { from: SchemaRef; 
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
   const dialogRef = useRef<HTMLDivElement>(null);
+  const pickSeq = useRef(0); // 연속 선택 시 마지막에 고른 파일만 반영한다 (먼저 고른 파일이 늦게 읽혀도 무시)
   useDialogFocus(dialogRef, onClose);
 
   const pick = async (file: File | undefined) => {
     if (!file) return;
+    const seq = ++pickSeq.current;
     const result = await readPreview(file);
+    if (seq !== pickSeq.current) return;
     upload.reset();
     setPreview(typeof result === 'string' ? undefined : result);
     setError(typeof result === 'string' ? `${file.name.slice(0, 40)}: ${result}` : '');

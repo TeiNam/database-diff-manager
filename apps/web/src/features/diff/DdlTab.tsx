@@ -57,8 +57,12 @@ export function DdlTab({ data }: { data: DiffResponse }) {
   const ctx = useSchemaContext();
   const b = data.base.versionNo;
   const t = data.target.versionNo;
-  const forward = `v${b} → v${t}`;
-  const backward = `v${t} → v${b}`;
+  // Schema 가 다른 버전끼리면(전환 비교) 버전 번호만으로는 헷갈리므로 Schema 이름을 붙인다
+  const isCrossSchema = data.base.schemaId !== data.target.schemaId;
+  const baseLabel = isCrossSchema ? `${data.base.schemaName} v${b}` : `v${b}`;
+  const targetLabel = isCrossSchema ? `${data.target.schemaName} v${t}` : `v${t}`;
+  const forward = `${baseLabel} → ${targetLabel}`;
+  const backward = `${targetLabel} → ${baseLabel}`;
   return (
     <section aria-label="DDL">
       <div className={s.bar}>

@@ -20,6 +20,8 @@ const WARNING = { ruleId: '50', code: 'unsupported', message: 'column / convert-
 const FLOW_URL = '/api/migration-flow?base=11&target=12';
 const me = (role: 'admin' | 'viewer') => ({ '/api/auth/me': { id: 1, username: role, role } });
 const rowButtons = () => screen.getAllByRole('button', { name: /컬럼 (펼치기|접기)$/ });
+// 전환 표의 테이블 행 첫 칸 (As-Is 이름, 없으면 —)
+const firstCells = () => within(screen.getByRole('table', { name: '전환 표' })).getAllByRole('row').slice(1).map((r) => r.querySelector('td')!.textContent);
 
 describe('MigrationTab: 매핑 없음', () => {
   it('안내 문구와 admin 에게 [매핑 올리기], 누르면 대화상자', async () => {
@@ -38,10 +40,12 @@ describe('MigrationTab: 매핑 없음', () => {
   });
 
   it('같은 Schema 의 버전끼리는 안내만 한다', async () => {
-    mockApi({ ...me('admin'), '/api/migration-flow?base=11&target=12': { mapping: null } });
+    const calls = mockApi({ ...me('admin'), '/api/migration-flow?base=11&target=12': { mapping: null } });
     renderWithProviders(<MigrationTab data={data(2)} />);
     expect(await screen.findByText(/같은 Schema 의 버전끼리는/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '매핑 올리기' })).not.toBeInTheDocument();
+    await waitFor(() => expect(calls.some((c) => c.url === '/api/auth/me')).toBe(true));
+    expect(calls.some((c) => c.url.startsWith('/api/migration-flow'))).toBe(false);
   });
 });
 
@@ -62,13 +66,13 @@ describe('MigrationTab: 매핑 있음', () => {
     mockApi(routes('viewer'));
     renderWithProviders(<MigrationTab data={data()} />);
     await screen.findByRole('table', { name: '전환 표' });
-    expect(rowButtons()).toHaveLength(5);
+    expect(firstCells()).toHaveLength(5);
     const user = userEvent.setup();
     const filters = screen.getByRole('radiogroup', { name: '전환 표 필터' });
     await user.click(within(filters).getByRole('radio', { name: '문제' }));
     expect(rowButtons().map((b) => b.textContent)).toEqual(['tb_cust']);
     await user.click(within(filters).getByRole('radio', { name: '신규' }));
-    expect(rowButtons()).toHaveLength(2);
+    expect(firstCells()).toHaveLength(2);
     await user.click(within(filters).getByRole('radio', { name: '전체' }));
     await user.type(screen.getByRole('searchbox', { name: '전환 표 검색' }), 'cnd_val');
     expect(rowButtons().map((b) => b.textContent)).toEqual(['tb_prm_cnd']);
@@ -86,6 +90,15 @@ describe('MigrationTab: 매핑 있음', () => {
     expect(within(inner).getByText('max_dc_cnt').closest('tr')).toHaveTextContent('컬럼삭제');
     expect(within(inner).getByText('reg_dt').closest('tr')).toHaveTextContent('created_at');
     expect(screen.getByRole('button', { name: 'tb_prm 컬럼 접기' })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('컬럼 행이 없는 테이블(제외·To-Be 전용)은 펼치기 버튼 없이 이름만', async () => {
+    mockApi(routes('viewer'));
+    renderWithProviders(<MigrationTab data={data()} />);
+    await screen.findByRole('table', { name: '전환 표' });
+    expect(rowButtons().map((b) => b.textContent)).toEqual(['tb_cust', 'tb_prm', 'tb_prm_cnd']);
+    expect(firstCells()).toEqual(['tb_cust', 'tb_prm', 'tb_prm_cnd', 'tb_tmp_bak', '—']);
+    expect(screen.queryByRole('button', { name: /tb_tmp_bak|audit_log/ })).not.toBeInTheDocument();
   });
 
   it('리비전 목록: 원본 링크, admin 은 삭제', async () => {

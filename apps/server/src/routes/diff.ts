@@ -1,20 +1,18 @@
-import type { RenameMapping } from '@tdm/core';
+import { MAX_DMS_RULES, type RenameMapping } from '@tdm/core';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../app';
 import { requireLogin } from '../auth/plugin';
 import { AppError } from '../errors';
 import { replaceRenames } from '../repos/renames';
-import { loadVersion } from '../repos/versions';
 import { RenameMappingSchema } from '../schemas';
-import { computeDiff, dmsRenamesFor, latestMigrationFor } from '../services/diff-service';
+import { computeDiff, loadDiffInputs, renameKey } from '../services/diff-service';
 
 const VersionId = z.coerce.number().int().positive();
 const DiffQuery = z.object({ base: VersionId, target: VersionId });
 const MAX_RENAMES = 500;
-const MAX_DMS_RULES = 20_000; // DMS 에서 나온 rename 을 그대로 되돌려 보내는 클라이언트를 받아 주기 위한 여유
+// MAX_DMS_RULES 만큼 여유: DMS 에서 나온 rename 을 그대로 되돌려 보내는 클라이언트를 받아 준다
 const RenamesBody = DiffQuery.extend({ renames: z.array(RenameMappingSchema).max(MAX_RENAMES + MAX_DMS_RULES) });
-const renameKey = (r: RenameMapping) => `${r.kind}:${r.table ?? ''}:${r.from}`;
 
 // DMS 에서 온 rename(kind, table, from, to 가 모두 같은 것)은 수동 매핑으로 저장하지 않는다
 function toManualRenames(submitted: RenameMapping[], dms: RenameMapping[]): RenameMapping[] {
@@ -35,9 +33,8 @@ export function diffRoutes(app: FastifyInstance, ctx: AppContext): void {
 
   app.put('/renames', async (req) => {
     const { base, target, renames } = RenamesBody.parse(req.body);
-    const migration = latestMigrationFor(ctx.db, base, target); // 버전이 없으면 여기서 404
-    const dms = migration ? dmsRenamesFor(migration, loadVersion(ctx.db, base).model, loadVersion(ctx.db, target).model) : [];
-    replaceRenames(ctx.db, base, target, toManualRenames(renames, dms), req.user!.id);
-    return computeDiff(ctx.db, ctx.cache, base, target);
+    const inputs = loadDiffInputs(ctx.db, base, target); // 버전이 없으면 여기서 404
+    replaceRenames(ctx.db, base, target, toManualRenames(renames, inputs.dms), req.user!.id);
+    return computeDiff(ctx.db, ctx.cache, base, target, inputs);
   });
 }

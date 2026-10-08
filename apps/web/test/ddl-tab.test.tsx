@@ -42,6 +42,13 @@ describe('DdlTab', () => {
     expect(screen.getByTestId('location')).toHaveTextContent('base=12&target=11');
   });
 
+  it('BASE·TARGET 의 Schema 가 다르면 방향 버튼에 Schema 이름을 붙인다', () => {
+    const data = { ...(DATA as object), base: { id: 11, schemaId: 1, versionNo: 1, schemaName: 'legacy' }, target: { id: 12, schemaId: 2, versionNo: 1, schemaName: 'newapp' } } as never;
+    renderWithProviders(<DdlTab data={data} />, { route: ROUTE, path: '/db/:dbId/schema/:schemaId' });
+    const group = screen.getByRole('radiogroup', { name: 'DDL 방향' });
+    expect(within(group).getAllByRole('radio').map((r) => r.textContent)).toEqual(['legacy v1 → newapp v1', 'newapp v1 → legacy v1']);
+  });
+
   it('문장이 없으면 안내', () => {
     renderWithProviders(<DdlTab data={{ ...(DATA as object), statements: [], ddl: '' } as never} />, { route: ROUTE, path: '/db/:dbId/schema/:schemaId' });
     expect(screen.getByText('적용할 DDL이 없습니다')).toBeInTheDocument();

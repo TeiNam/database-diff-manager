@@ -73,4 +73,30 @@ describe('MigrationUploadDialog', () => {
     await userEvent.setup().keyboard('{Escape}');
     expect(onClose).toHaveBeenCalled();
   });
+  it('파일을 읽지 못하면(file.text() 실패) 오류를 보여 준다', async () => {
+    mockApi({});
+    renderWithProviders(<MigrationUploadDialog from={FROM} to={TO} onClose={() => undefined} />);
+    const file = jsonFile(DMS_JSON, 'broken.json');
+    file.text = () => Promise.reject(new Error('읽기 실패'));
+    await userEvent.setup().upload(screen.getByLabelText('매핑 파일 선택'), file);
+    expect(await screen.findByRole('alert')).toHaveTextContent('broken.json: 파일을 읽지 못했습니다');
+    expect(screen.getByRole('button', { name: '매핑 올리기' })).toBeDisabled();
+  });
+
+  it('연속으로 고르면 마지막에 고른 파일만 반영한다 (먼저 고른 파일이 늦게 읽혀도)', async () => {
+    mockApi({});
+    renderWithProviders(<MigrationUploadDialog from={FROM} to={TO} onClose={() => undefined} />);
+    const user = userEvent.setup();
+    let finishSlow: (text: string) => void = () => undefined;
+    const slow = jsonFile(DMS_JSON, 'slow.json');
+    slow.text = () => new Promise<string>((resolve) => { finishSlow = resolve; });
+    await user.upload(screen.getByLabelText('매핑 파일 선택'), slow);
+    await user.upload(screen.getByLabelText('매핑 파일 선택'), jsonFile(DMS_JSON, 'fast.json'));
+    const preview = await screen.findByRole('region', { name: '미리보기' });
+    expect(preview).toHaveTextContent('fast.json');
+    finishSlow(DMS_JSON);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByRole('region', { name: '미리보기' })).toHaveTextContent('fast.json');
+    expect(screen.getByRole('region', { name: '미리보기' })).not.toHaveTextContent('slow.json');
+  });
 });

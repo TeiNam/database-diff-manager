@@ -20,7 +20,7 @@ export function useDialogFocus(dialogRef: RefObject<HTMLElement | null>, onClose
 // Tab 이동을 대화상자 안에서 순환시킨다
 export function trapTab(e: ReactKeyboardEvent<HTMLElement>): void {
   if (e.key !== 'Tab') return;
-  const items = [...e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)')];
+  const items = [...e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), summary')];
   const first = items[0];
   const last = items[items.length - 1];
   if (!first || !last) return;

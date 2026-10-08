@@ -64,12 +64,7 @@ const hasWildcard = (v: string | undefined) => v !== undefined && v.includes('%'
 
 export const MAX_PATTERN_LENGTH = 256;
 
-// '%' 만 와일드카드로 본다 (DMS 와 같다). '_' 는 테이블명에 흔해서 글자 그대로 비교한다. 연속된 %는 하나로 줄인다
-export function likePattern(pattern: string): RegExp {
-  const body = pattern.replace(/%+/g, '%').split('%').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
-  return new RegExp(`^${body}$`, 'i');
-}
-
+// '%' 만 와일드카드로 본다 (DMS 와 같다). '_' 는 테이블명에 흔해서 글자 그대로 비교한다. 연속된 % 는 빈 세그먼트로 건너뛴다
 // 정규식 없이 선형으로 비교한다 (사용자 패턴이라 역추적 폭주를 피한다). 세그먼트는 소문자로 한 번만 만든다
 type Matcher = (name: string) => boolean;
 
@@ -100,17 +95,6 @@ export function compileSelection(mapping: DmsMapping): (table: string) => boolea
   const include = mapping.selection.include.map(compileLike);
   const exclude = mapping.selection.exclude.map(compileLike);
   return (table) => (include.length === 0 || include.some((m) => m(table))) && !exclude.some((m) => m(table));
-}
-
-const compiled = new WeakMap<DmsMapping, (table: string) => boolean>();
-
-export function isSelected(mapping: DmsMapping, table: string): boolean {
-  let fn = compiled.get(mapping);
-  if (!fn) {
-    fn = compileSelection(mapping);
-    compiled.set(mapping, fn);
-  }
-  return fn(table);
 }
 
 export function parseDmsMapping(text: string): { mapping: DmsMapping; warnings: DmsWarning[] } {

@@ -3,6 +3,8 @@
 .headTitle { font: 600 var(--text-sm) var(--mono); }
 .meta { color: var(--fg-muted); font-size: var(--text-sm); }
 .spacer { flex: 1; }
+/* .wrap 이 이미 좌우 padding 을 주므로 Banner 의 기본 바깥 여백을 없애 다른 요소와 좌우를 맞춘다 */
+.wrap .flush { margin: 0; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .search { height: 28px; min-width: 240px; padding: 0 var(--space-2); border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--bg); color: var(--fg); font: var(--text-sm) var(--mono); }
 .seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius); overflow: hidden; }
@@ -21,6 +23,8 @@
 .name { font-family: var(--mono); }
 .dim { color: var(--fg-dim); }
 .expand { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: transparent; color: var(--fg); font: var(--text-sm) var(--mono); cursor: pointer; }
+/* 펼치기 버튼의 화살표(14px)+간격(4px) 만큼 들여 이름 열을 맞춘다 */
+.plain { display: inline-block; padding-left: calc(14px + 4px); }
 .columns > td { background: var(--surface); }
 .inner { width: 100%; border-collapse: collapse; font-size: var(--text-xs); }
 .inner th, .inner td { padding: 4px 8px; text-align: left; border-top: 1px solid var(--border); }
