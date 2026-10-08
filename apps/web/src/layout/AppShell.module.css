@@ -1,4 +1,10 @@
 .shell { display: grid; grid-template-rows: var(--topbar-h) 1fr auto; height: 100%; }
-.body { display: grid; grid-template-columns: var(--sidebar-w) 1fr; min-height: 0; }
+.body { position: relative; display: grid; grid-template-columns: var(--sidebar-w) 1fr; min-height: 0; }
+/* 사이드바 오른쪽 경계 위에 겹쳐 놓는 너비 조절 핸들 */
+.resizer { position: absolute; top: 0; bottom: 0; left: calc(var(--sidebar-w) - 3px); width: 6px; z-index: 2; cursor: col-resize; touch-action: none; }
+.resizer::after { content: ''; position: absolute; top: 0; bottom: 0; left: 2px; width: 2px; background: transparent; transition: background-color 150ms; }
+.resizer:hover::after, .resizer:focus-visible::after, .dragging::after { background: var(--accent); }
+.resizer:focus-visible { outline: none; }
+.body:has(.dragging) { cursor: col-resize; user-select: none; }
 .main { min-width: 0; min-height: 0; overflow: auto; background: var(--bg); }
 .loading { padding: var(--space-6); color: var(--fg-muted); }
