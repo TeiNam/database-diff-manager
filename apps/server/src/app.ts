@@ -12,6 +12,7 @@ import { JSON_BODY_LIMIT, MAX_UPLOAD_BYTES, MAX_UPLOAD_FILES } from './limits';
 import { authRoutes } from './routes/auth';
 import { catalogRoutes } from './routes/databases';
 import { diffRoutes } from './routes/diff';
+import { migrationRoutes } from './routes/migrations';
 import { objectRoutes } from './routes/objects';
 import { uploadRoutes } from './routes/uploads';
 import { userRoutes } from './routes/users';
@@ -43,6 +44,7 @@ export const ROUTES: [string, RouteModule][] = [
   ['/api', versionRoutes],
   ['/api/diff', diffRoutes],
   ['/api/objects', objectRoutes],
+  ['/api', migrationRoutes],
 ];
 
 // HTTP 모드(cookieSecure=false)에서는 HSTS와 https 승격을 꺼서 평문 배포가 https로 끌려가지 않게 한다

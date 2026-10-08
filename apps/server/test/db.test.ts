@@ -10,9 +10,9 @@ describe('openDb', () => {
     const db = openDb(':memory:');
     const tables = all<{ name: string }>(db, "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").map((r) => r.name);
     expect(tables).toEqual([
-      'databases', 'object_revisions', 'objects', 'rename_mappings', 'schema_versions', 'schemas', 'sessions', 'users', 'version_objects',
+      'databases', 'migration_mappings', 'object_revisions', 'objects', 'rename_mappings', 'schema_versions', 'schemas', 'sessions', 'users', 'version_objects',
     ]);
-    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')?.user_version).toBe(1);
+    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')?.user_version).toBe(2);
     expect(one<{ foreign_keys: number }>(db, 'PRAGMA foreign_keys')?.foreign_keys).toBe(1);
   });
 
@@ -20,7 +20,7 @@ describe('openDb', () => {
     const path = join(tmpdir(), `tdm-${process.pid}-${Date.now()}.db`);
     openDb(path).close();
     const db = openDb(path);
-    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')?.user_version).toBe(1);
+    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')?.user_version).toBe(2);
     db.close();
     for (const suffix of ['', '-wal', '-shm']) rmSync(path + suffix, { force: true });
   });

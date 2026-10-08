@@ -5,7 +5,7 @@ import type { AppContext } from '../app';
 import { requireAdmin } from '../auth/plugin';
 import { AppError } from '../errors';
 import { MAX_UPLOAD_FILES, UPLOAD_BODY_LIMIT } from '../limits';
-import { NameSchema } from '../schemas';
+import { NameSchema, NoteSchema, SafeFilename } from '../schemas';
 import { ingest } from '../services/ingest';
 
 export interface UploadResult {
@@ -17,12 +17,7 @@ export interface UploadResult {
   message?: string;
 }
 
-const SafeFilename = z
-  .string()
-  .min(1)
-  .max(255)
-  .refine((v) => !/[/\\]/.test(v), '파일명에 경로 구분자를 쓸 수 없습니다');
-const FileMetaSchema = z.object({ filename: SafeFilename, databaseName: NameSchema, schemaName: NameSchema, note: z.string().trim().max(500).optional() });
+const FileMetaSchema = z.object({ filename: SafeFilename, databaseName: NameSchema, schemaName: NameSchema, note: NoteSchema.optional() });
 type FileMeta = z.infer<typeof FileMetaSchema>;
 const MetaSchema = z.array(FileMetaSchema).min(1).max(MAX_UPLOAD_FILES);
 

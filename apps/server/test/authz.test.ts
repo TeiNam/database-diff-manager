@@ -51,6 +51,14 @@ const CASES: Case[] = [
 
   { method: 'GET', url: '/api/objects/1/history', anon: 401, viewer: 200, admin: 200 },
   { method: 'GET', url: '/api/objects/abc/history', anon: 401, viewer: 400, admin: 400 },
+
+  { method: 'POST', url: '/api/migrations', payload: {}, anon: 401, viewer: 403, admin: 400 },
+  { method: 'GET', url: '/api/migrations?from=1&to=1', anon: 401, viewer: 200, admin: 200 },
+  { method: 'GET', url: '/api/migrations?from=abc&to=1', anon: 401, viewer: 400, admin: 400 },
+  { method: 'GET', url: '/api/migrations/99999/source', anon: 401, viewer: 404, admin: 404 },
+  { method: 'GET', url: '/api/migrations/abc/source', anon: 401, viewer: 400, admin: 400 },
+  { method: 'DELETE', url: '/api/migrations/abc', anon: 401, viewer: 403, admin: 400 },
+  { method: 'DELETE', url: '/api/migrations/99999', anon: 401, viewer: 403, admin: 404 },
   // 로그아웃은 세션을 지우므로 다른 케이스가 끝난 뒤 마지막에 실행한다
   { method: 'POST', url: '/api/auth/logout', anon: 200, viewer: 200, admin: 200 },
 ];

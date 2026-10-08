@@ -1,12 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from '../app';
 import { requireAdmin, requireLogin } from '../auth/plugin';
+import { attachment } from '../http';
 import { deleteVersion, getSource, listVersions, loadVersion } from '../repos/versions';
 import { IdParams } from '../schemas';
-
-// RFC 5987 filename*: encodeURIComponent가 남기는 '()*도 인코딩한다
-const encodeRfc5987 = (v: string) => encodeURIComponent(v).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-const asciiFallback = (v: string) => v.replace(/[^\x20-\x7e]|["\\%]/g, '_');
 
 export function versionRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get('/schemas/:id/versions', { preHandler: requireLogin }, async (req) => listVersions(ctx.db, IdParams.parse(req.params).id));
@@ -17,7 +14,7 @@ export function versionRoutes(app: FastifyInstance, ctx: AppContext): void {
     const { filename, text } = getSource(ctx.db, IdParams.parse(req.params).id);
     return reply
       .header('content-type', 'text/plain; charset=utf-8')
-      .header('content-disposition', `attachment; filename="${asciiFallback(filename)}"; filename*=UTF-8''${encodeRfc5987(filename)}`)
+      .header('content-disposition', attachment(filename))
       .send(text);
   });
 
