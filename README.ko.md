@@ -93,7 +93,7 @@ npm run test:mysql -w @tdm/core   # 생성 DDL을 MySQL 8.0/8.4 컨테이너에�
 
 `main` 브랜치에 푸시할 때마다 GitHub Actions가 타입 검사·테스트·빌드를 거친 뒤 제품 버전을 계산해 그 버전을 붙인 Docker 이미지(`linux/amd64`, `linux/arm64`)를 GHCR에 올리고, 마지막에 `vX.Y.N` 태그와 GitHub Release를 만듭니다. 같은 커밋을 다시 실행하면 그 커밋의 태그를 재사용하고, `latest`는 그 커밋이 아직 `main`의 HEAD일 때만 옮깁니다. `X.Y` 이미지 태그는 그 버전이 원격 `vX.Y.*` 태그 중 가장 큰 패치일 때만 옮기고, `X.Y.Z`와 짧은 SHA 태그는 항상 올립니다. 원격의 `vX.Y.Z` 태그가 다른 커밋을 가리키면(실패한 잡만 재실행하는 사이 다른 커밋이 그 버전을 먼저 출시한 경우) image·release 잡이 push 전에 실패하니, 워크플로 전체를 다시 실행해 버전을 새로 계산하세요. 다른 브랜치에서 `workflow_dispatch`로 실행하면 테스트만 돕니다. 문서(`*.md`, `docs/`)만 바뀐 푸시에는 실행하지 않습니다.
 
-**버전 규칙**: `major.minor`는 `apps/web/package.json`에서 가져오고, 패치 번호는 같은 `vX.Y.*` 태그 중 가장 큰 값 + 1입니다(처음은 0). 계산은 `scripts/next-version.mjs`가 합니다. 마이너·메이저를 올리려면 `apps/web/package.json`의 version을 바꾸면 됩니다. 상단·푸터에 보이는 버전은 빌드 때 넣은 값(`APP_VERSION`)이고, 로컬 빌드는 `X.Y.Z-dev`로 표시됩니다. `v*` 태그를 직접 푸시하면(형식은 `vX.Y.Z`) 새 버전을 만들지 않고 그 태그 버전으로 이미지를 빌드하며, Release가 없으면 만듭니다.
+**버전 규칙**: `major.minor`는 `apps/web/package.json`에서 가져오고, 패치 번호는 같은 `vX.Y.*` 태그 중 가장 큰 값 + 1입니다(처음은 0). 계산은 `scripts/next-version.mjs`가 합니다. 마이너·메이저를 올리려면 `apps/web/package.json`의 version을 바꾸면 됩니다. 상단·푸터에 보이는 버전은 빌드 때 넣은 값(`APP_VERSION`)이고, 로컬 빌드는 git 태그로 정합니다(`scripts/local-version.mjs`). 태그가 붙은 커밋이면 `0.1.2`, 태그 뒤로 커밋이 3개 더 있으면 `0.1.2-dev+3.44e9b27`(커밋하지 않은 변경이 있으면 끝에 `.dirty`), git이나 태그가 없으면(예: 로컬 `docker compose` 빌드) `<package.json 버전>-dev`로 표시됩니다. `v*` 태그를 직접 푸시하면(형식은 `vX.Y.Z`) 새 버전을 만들지 않고 그 태그 버전으로 이미지를 빌드하며, Release가 없으면 만듭니다.
 
 ---
 
