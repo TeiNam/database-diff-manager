@@ -1,6 +1,6 @@
 # DMS 전환 매핑 — 설계
 
-작성일: 2026-10-08 · 상위 설계: [2026-10-07-table-diff-manager-design.md](2026-10-07-table-diff-manager-design.md)
+작성일: 2026-10-08 · 상위 설계: [2026-10-07-table-diff-manager-design.md](2026-10-07-table-diff-manager-design.md) · 상태: 구현 완료 ([구현 계획](../plans/2026-10-08-dms-migration.md))
 
 ## 1. 목적
 
@@ -139,3 +139,12 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 - 전환 표 CSV·엑셀 내보내기
 - TARGET 버전 없이 매핑만으로 To-Be 스키마 예측
 - 역방향 비교에 매핑 반전 적용
+
+## 구현 중 구체화한 사항
+
+- rename 배너는 수동 rename 만 저장한다. DMS 에서 온 rename 은 수동 매핑으로 덮어쓸 뿐 제거하지 않는다.
+- selection 와일드카드는 `%` 만 지원하며 `_` 는 문자 그대로 취급한다.
+- JSON 본문 한도는 40MB, 그 안의 `source` 는 20MB 이하로 제한한다.
+- 상태가 ok 가 아닌 테이블에는 컬럼 행을 만들지 않는다.
+- 같은 Schema 끼리 비교하면 전환 탭이 안내 문구를 보여 준다.
+- `PUT /diff/renames` 는 DMS 로 계산된 rename 과 같은 항목을 수동 한도(500개) 적용 전에 서버에서 버린다.
