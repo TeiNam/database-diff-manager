@@ -1,6 +1,6 @@
 import { buildApp } from './app';
 import { dbPath, loadConfig } from './config';
-import { openDb } from './db/connection';
+import { closeDb, openDb } from './db/connection';
 
 const config = loadConfig();
 const db = openDb(dbPath(config));
@@ -9,7 +9,7 @@ const app = await buildApp({ db, config });
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     app.close().finally(() => {
-      db.close();
+      closeDb(db);
       process.exit(0);
     });
   });

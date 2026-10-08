@@ -104,17 +104,24 @@ export function loadVersion(db: Db, id: number): VersionDetail {
 }
 
 export function getSource(db: Db, id: number): { filename: string; text: string } {
-  const r = one<{ source_filename: string; source_text: string }>(db, 'SELECT source_filename, source_text FROM schema_versions WHERE id = ?', id);
+  const r = one<{ source_filename: string; source_text: string }>(db, `
+    SELECT v.source_filename, src.source_text FROM schema_versions v JOIN schema_version_sources src ON src.version_id = v.id WHERE v.id = ?`, id);
   if (!r) throw NOT_FOUND();
   return { filename: r.source_filename, text: r.source_text };
 }
 
-// 스냅샷이 서로 독립이라 다른 버전에는 영향이 없다. 어떤 버전도 참조하지 않는 리비전·객체를 정리한다
+// 스냅샷이 서로 독립이라 다른 버전에는 영향이 없다. 지운 버전이 쓰던 리비전·객체 중 더 이상 참조되지 않는 것만 정리한다
+// 순서: 버전(→ version_objects·원문 연쇄 삭제) → 고아 리비전 → 리비전이 남지 않은 객체 (FK 가 남은 참조를 막는다)
 export function deleteVersion(db: Db, id: number): void {
-  getVersionMeta(db, id);
+  const { schemaId } = getVersionMeta(db, id);
   tx(db, () => {
+    const links = all<{ object_id: number; revision_id: number }>(db, 'SELECT object_id, revision_id FROM version_objects WHERE version_id = ?', id);
+    const revisionIds = JSON.stringify(links.map((l) => Number(l.revision_id)));
+    const objectIds = JSON.stringify(links.map((l) => Number(l.object_id)));
     run(db, 'DELETE FROM schema_versions WHERE id = ?', id);
-    run(db, 'DELETE FROM object_revisions WHERE id NOT IN (SELECT revision_id FROM version_objects)');
-    run(db, 'DELETE FROM objects WHERE id NOT IN (SELECT object_id FROM object_revisions)');
+    run(db, `DELETE FROM object_revisions WHERE id IN (SELECT value FROM json_each(?))
+               AND NOT EXISTS (SELECT 1 FROM version_objects vo WHERE vo.revision_id = object_revisions.id)`, revisionIds);
+    run(db, `DELETE FROM objects WHERE schema_id = ? AND id IN (SELECT value FROM json_each(?))
+               AND NOT EXISTS (SELECT 1 FROM object_revisions r WHERE r.object_id = objects.id)`, schemaId, objectIds);
   });
 }
