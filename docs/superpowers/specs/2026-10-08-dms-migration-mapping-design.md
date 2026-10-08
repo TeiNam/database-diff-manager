@@ -55,22 +55,32 @@ BASE(As-Is)·TARGET(To-Be) 스키마는 지금처럼 각각 업로드하고, 매
 
 전환 매핑은 **Schema 쌍**(As-Is Schema → To-Be Schema)에 붙는다. 같은 쌍에 다시 올리면 리비전이 1 늘고, 최신 리비전이 적용된다. 어느 버전 쌍을 비교하든 BASE 버전의 Schema 가 매핑의 From, TARGET 버전의 Schema 가 To 이면 최신 리비전을 자동 적용한다. 역방향(To → From) 비교에는 그 매핑을 뒤집어 rename 으로 반영한다(되돌리기 DDL 이 DROP TABLE/DROP COLUMN 대신 RENAME 을 쓰도록). 같은 버전 쌍에 정방향 매핑이 있으면 그것이 우선한다. 전환 표(`/migration-flow`)는 정방향 쌍에서만 보여 준다.
 
+처음에는 `002_migration_mappings.sql` 이 원문(`source`)을 같은 테이블에 두고 리비전을 `MAX+1` 로 정했다. 스키마 v3(마이그레이션 003)에서 다음처럼 바꿨다(STRICT).
+
 ```sql
--- 002_migration_mappings.sql
-CREATE TABLE migration_mappings (
+CREATE TABLE migration_mappings (          -- 메타만
   id INTEGER PRIMARY KEY,
   from_schema_id INTEGER NOT NULL REFERENCES schemas(id) ON DELETE CASCADE,
   to_schema_id INTEGER NOT NULL REFERENCES schemas(id) ON DELETE CASCADE,
   revision INTEGER NOT NULL,
   filename TEXT NOT NULL,
-  source TEXT NOT NULL,          -- DMS JSON 원문
   rule_count INTEGER NOT NULL,
   note TEXT,
   uploaded_by INTEGER NOT NULL REFERENCES users(id),
   uploaded_at TEXT NOT NULL,
   UNIQUE (from_schema_id, to_schema_id, revision),
   CHECK (from_schema_id <> to_schema_id)
-);
+) STRICT;
+CREATE TABLE migration_mapping_sources (   -- DMS JSON 원문 (최대 20MB) 분리
+  migration_id INTEGER PRIMARY KEY REFERENCES migration_mappings(id) ON DELETE CASCADE,
+  source TEXT NOT NULL
+) STRICT;
+CREATE TABLE migration_pairs (             -- 쌍별 다음 리비전 번호 (지운 리비전 번호를 재사용하지 않는다)
+  from_schema_id INTEGER NOT NULL REFERENCES schemas(id) ON DELETE CASCADE,
+  to_schema_id INTEGER NOT NULL REFERENCES schemas(id) ON DELETE CASCADE,
+  next_revision INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (from_schema_id, to_schema_id)
+) STRICT;
 ```
 
 Schema·Database 를 지우면 연쇄 삭제된다.
@@ -99,27 +109,27 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 
 ### apps/server
 
-- 마이그레이션 `002_migration_mappings.sql` (3절)
-- `repos/migrations.ts`: 추가(리비전 계산), 목록, 최신 조회, 원문, 삭제
+- 마이그레이션 `002_migration_mappings.sql` (3절), 스키마 v3 에서 `003_schema_v3.sql` 로 원문·리비전 카운터 분리
+- `repos/migrations.ts`: 추가(`migration_pairs` 카운터로 리비전 발급), 목록, 최신 조회, 원문, 삭제
 - 라우트 (`/api`, 상태 변경은 `X-Requested-With: tdm` 필요)
 
 | 메서드 | 경로 | 권한 | 설명 |
 |---|---|---|---|
-| POST | `/migrations` | admin | JSON 본문 `{ fromSchemaId, toSchemaId, filename, source, note? }`. 파싱 실패·From Schema 룰 없음은 400, 경고는 응답에 포함 |
+| POST | `/migrations` | admin, dba | JSON 본문 `{ fromSchemaId, toSchemaId, filename, source, note? }`. 파싱 실패·From Schema 룰 없음은 400, 경고는 응답에 포함 |
 | GET | `/migrations?from=&to=` | 로그인 | 쌍의 리비전 목록(원문 제외) |
 | GET | `/migrations/:id/source` | 로그인 | 원문 다운로드 |
-| DELETE | `/migrations/:id` | admin | 리비전 삭제 |
+| DELETE | `/migrations/:id` | admin, dba | 리비전 삭제 |
 | GET | `/migration-flow?base=&target=` | 로그인 | 적용 매핑 메타 + `MigrationFlow` + 파싱 경고. 매핑이 없으면 `{ mapping: null }` |
 
 - 업로드 본문은 JSON 이고 크기 상한은 기존 업로드 상한(20MB)과 같다.
 - `computeDiff`: 쌍의 최신 매핑이 있으면 `toRenameMappings` 결과와 수동 매핑을 합쳐(수동 우선) `diffSchemas` 에 넘긴다. 정방향 매핑이 없고 역쌍(TARGET → BASE) 매핑이 있으면 뒤집은 rename 을 쓴다(`source: 'dms'`). 캐시 키에 매핑 방향·id 를 넣고, 매핑 추가·삭제와 버전·Schema·Database 삭제 시 캐시를 비운다. 응답의 `renames` 항목에 `source: 'dms' | 'manual'` 을 붙인다.
 - 매핑 캐시: diff 요청마다 원문(최대 20MB)을 읽지 않도록 캐시 키용으로는 최신 매핑 id 만 조회하고(`latestMigrationId`), 원문은 캐시 miss 때만 읽는다. 파싱 결과(mapping + warnings)는 매핑 id, 전환 표는 매핑 id + As-Is·To-Be 버전 id 를 키로 diff 캐시와 같은 LRU 에 둔다. `GET /diff`·`PUT /diff/renames`·`GET /migration-flow` 가 함께 쓰고, diff 캐시와 같은 시점에 비운다.
-- `/diff` 라우트(`PUT /diff/renames` 포함)는 로그인을 `onRequest` 에서 확인한다(본문 파싱 전 401).
+- `/diff` 라우트는 로그인을 `onRequest` 에서 확인한다(본문 파싱 전 401). `PUT /diff/renames` 는 admin·dba 만 할 수 있고 이 권한도 `onRequest` 에서 확인한다(viewer 는 본문 파싱 전 403).
 
 ### apps/web
 
 - diff 화면에 **전환** 탭 추가 (요약 / 객체 diff / DDL / 전환). URL `tab=migration`.
-- 매핑이 없으면 안내 문구와, admin 에게 **매핑 올리기** 버튼.
+- 매핑이 없으면 안내 문구와, admin·dba 에게 **매핑 올리기** 버튼.
 - 올리기 대화상자: JSON 파일 1개, 브라우저에서 `parseDmsMapping` 으로 미리보기(룰 수, action 별 수, 경고, 파일의 schema 이름과 현재 BASE/TARGET Schema 이름 비교). 메모 입력. 기존 UploadDialog 의 포커스 트랩·검증 패턴을 따른다.
 - 전환 표: 헤더에 파일명·리비전·룰 수·검증 수(통과/전체), 리비전 선택은 하지 않고 최신만 표시(목록·삭제는 헤더 메뉴). 검색(As-Is·To-Be 테이블·컬럼명), 필터(전체 / 이름변경 / 컬럼삭제 / 문제 / 신규), 테이블 행 펼치면 컬럼 매핑(As-Is 이름·타입 → To-Be 이름·타입, 상태 배지).
 - 객체 diff·DDL 은 rename 반영이 자동이다. 기존 rename 배너에 출처(DMS / 수동)를 표시한다.
@@ -135,7 +145,7 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 
 - 픽스처: 실제 샘플을 3개 테이블 분량으로 줄이고 이름을 가린 `packages/core/test/fixtures/dms/` (JSON + As-Is/To-Be SQL). 전체 샘플 파일은 로컬에 있을 때만 도는 테스트(`samples/dms` 존재 시)로 룰 수와 경고 0을 확인한다.
 - core: action 별 파싱, 미지원 action 경고, 중복 rename, selection 와일드카드·exclude, 대소문자 무시 매칭, `toRenameMappings`(To-Be 테이블명 치환), `buildMigrationFlow` 상태별 사례, 반영 후 `diffSchemas` 에서 drop+add 대신 rename 이 나오는지.
-- server: 권한(anon 401 / viewer 403 / admin), 리비전 증가, flow API, diff 에 DMS rename 반영과 수동 우선, 역방향 매핑 반전(RENAME, DROP 없음), Schema 삭제 시 연쇄 삭제, 캐시 무효화.
+- server: 권한(anon 401 / viewer 403 / dba·admin), 리비전 증가, flow API, diff 에 DMS rename 반영과 수동 우선, 역방향 매핑 반전(RENAME, DROP 없음), Schema 삭제 시 연쇄 삭제, 캐시 무효화.
 - web: 전환 탭 렌더, 매핑 없음 안내, 필터·검색·펼치기, 업로드 대화상자 미리보기·권한.
 
 ## 7. 범위 밖

@@ -46,17 +46,18 @@ All paths are under `/api`. Requests that change state must include the `X-Reque
 | POST | `/auth/login`, `/auth/logout` · GET `/auth/me` | — / logged in |
 | GET·POST·PATCH | `/users[/:id]` | admin |
 | GET | `/tree`, `/schemas/:id`, `/schemas/:id/versions` | logged in |
-| POST·PATCH·DELETE | `/databases[/:id]` (`confirmName` required for deletion) | admin |
-| DELETE | `/schemas/:id` (`confirmName` required; cascades to versions and object history) | admin |
-| POST | `/uploads` (multipart: `meta` JSON + `files`) | admin |
+| POST·PATCH·DELETE | `/databases[/:id]` (`confirmName` required for deletion) | admin, dba |
+| DELETE | `/schemas/:id` (`confirmName` required; cascades to versions and object history) | admin, dba |
+| POST | `/uploads` (multipart: `meta` JSON + `files`) | admin, dba |
 | GET | `/versions/:id`, `/versions/:id/source` | logged in |
-| DELETE | `/versions/:id` | admin |
-| GET | `/diff?base=&target=` · PUT `/diff/renames` | logged in |
+| DELETE | `/versions/:id` | admin, dba |
+| GET | `/diff?base=&target=` | logged in |
+| PUT | `/diff/renames` | admin, dba |
 | GET | `/objects/:id/history` | logged in |
-| POST | `/migrations` (JSON: `fromSchemaId`, `toSchemaId`, `filename`, `source`, `note?`; returns parse warnings) · DELETE `/migrations/:id` | admin |
+| POST | `/migrations` (JSON: `fromSchemaId`, `toSchemaId`, `filename`, `source`, `note?`; returns parse warnings) · DELETE `/migrations/:id` | admin, dba |
 | GET | `/migrations?from=&to=`, `/migrations/:id/source`, `/migration-flow?base=&target=` | logged in |
 
-`PUT /diff/renames` (saves rename mappings) is open to all logged-in users, including viewers. This is the policy set in the design document.
+Roles: `admin` (everything, including account management), `dba` (every data change), `viewer` (read-only). `PUT /diff/renames` (saves rename mappings) requires admin or dba; the role is checked in `onRequest`, before the body is parsed, so a viewer gets 403 without the body being read. Saving renames for the same version on both sides returns 400.
 
 A migration mapping belongs to a Schema pair (As-Is → To-Be). Uploading again for the same pair adds a revision, and the latest revision is applied automatically whenever the BASE version belongs to the From Schema and the TARGET version to the To Schema (never in the reverse direction). Renames in `GET /diff` carry `source: 'dms' | 'manual'`. `PUT /diff/renames` saves manual renames only: entries identical to a DMS-derived rename are dropped on the server before the 500-entry limit is applied.
 

@@ -22,7 +22,7 @@ A team web tool for managing MySQL schema definitions exported with [td-export](
 - **DDL generation**: ALTER/CREATE/DROP for tables, columns, indexes, foreign keys, views, and partitions, plus the reverse (rollback) direction. Renames are mapped in the UI.
 - **DB migration mapping**: upload an AWS DMS table-mapping JSON for an As-Is → To-Be Schema pair. The Migration (전환) tab shows table and column correspondence with a status for each, and the same mapping is applied as renames to the object diff and DDL. Manual rename mappings still win for the same object.
 - **History**: version history, per-object change history, original file download.
-- **Accounts**: admin/viewer roles. Dark and light themes.
+- **Accounts**: admin / dba / viewer roles. Dark and light themes.
 
 ## Input files
 
@@ -75,13 +75,15 @@ The command refuses to overwrite an existing file. To restore, stop the server, 
 
 ## Permissions
 
-| Action | admin | viewer |
-|---|---|---|
-| Browse, compare, copy/download DDL | ✓ | ✓ |
-| Save rename mappings (affects everyone's diff results) | ✓ | ✓ |
-| Upload; delete versions, Schemas, Databases | ✓ | — |
-| Upload or delete DMS migration mappings | ✓ | — |
-| Manage accounts | ✓ | — |
+| Action | admin | dba | viewer |
+|---|---|---|---|
+| Browse, compare, copy/download DDL | ✓ | ✓ | ✓ |
+| Save rename mappings (affects everyone's diff results) | ✓ | ✓ | — |
+| Upload; create, edit, delete Databases; delete versions and Schemas | ✓ | ✓ | — |
+| Upload or delete DMS migration mappings | ✓ | ✓ | — |
+| Manage accounts | ✓ | — | — |
+
+viewers are read-only: rename candidates are shown, but only a dba or admin can apply or remove them.
 
 Deleting a Schema or Database requires typing its name, and removes every version and object history below it.
 

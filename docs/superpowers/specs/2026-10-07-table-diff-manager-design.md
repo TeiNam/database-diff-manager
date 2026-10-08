@@ -12,7 +12,7 @@
 2. **GitHub 스타일 diff 화면**: SQL 모드(기본)와 표 모드 모두 좌측 BASE, 우측 TARGET
 3. **차이를 만드는 DDL**: BASE를 TARGET으로 바꾸는 MySQL 8.0 문법 DDL. 화면에 보여주고 복사·다운로드만 지원하며, 앱이 직접 실행하지 않는다.
 
-팀 공용 서버로 운영한다. 자체 계정과 `admin` / `viewer` 두 역할을 둔다.
+팀 공용 서버로 운영한다. 자체 계정과 `admin`(전부 + 계정 관리) / `dba`(데이터 변경 전부) / `viewer`(읽기 전용) 세 역할을 둔다. (2026-10-08 개정: 처음에는 admin/viewer 두 역할이었고 viewer 도 rename 을 저장할 수 있었다)
 
 ### 비목표 (YAGNI)
 
@@ -253,38 +253,31 @@ interface Statement {
 
 ### 5.1 SQLite 스키마
 
-```sql
-CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin','viewer')), disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
-CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  expires_at TEXT NOT NULL);
-CREATE TABLE databases (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT, created_at TEXT NOT NULL);
-CREATE TABLE schemas (id INTEGER PRIMARY KEY, database_id INTEGER NOT NULL REFERENCES databases(id) ON DELETE CASCADE,
-  name TEXT NOT NULL, UNIQUE (database_id, name));
-CREATE TABLE schema_versions (id INTEGER PRIMARY KEY, schema_id INTEGER NOT NULL REFERENCES schemas(id) ON DELETE CASCADE,
-  version_no INTEGER NOT NULL, source_format TEXT NOT NULL CHECK (source_format IN ('sql','md')),
-  source_filename TEXT NOT NULL, source_text TEXT NOT NULL, source_sha256 TEXT NOT NULL, model_hash TEXT NOT NULL,
-  note TEXT, uploaded_by INTEGER NOT NULL REFERENCES users(id), uploaded_at TEXT NOT NULL,
-  UNIQUE (schema_id, version_no));
-CREATE TABLE objects (id INTEGER PRIMARY KEY, schema_id INTEGER NOT NULL REFERENCES schemas(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL CHECK (kind IN ('table','view')), name TEXT NOT NULL, UNIQUE (schema_id, kind, name));
-CREATE TABLE object_revisions (id INTEGER PRIMARY KEY, object_id INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
-  revision_no INTEGER NOT NULL, content_hash TEXT NOT NULL, model_json TEXT NOT NULL, fidelity TEXT NOT NULL,
-  parse_error TEXT, UNIQUE (object_id, revision_no));
-CREATE TABLE version_objects (version_id INTEGER NOT NULL REFERENCES schema_versions(id) ON DELETE CASCADE,
-  revision_id INTEGER NOT NULL REFERENCES object_revisions(id), PRIMARY KEY (version_id, revision_id));
-CREATE TABLE rename_mappings (id INTEGER PRIMARY KEY, base_version_id INTEGER NOT NULL REFERENCES schema_versions(id) ON DELETE CASCADE,
-  target_version_id INTEGER NOT NULL REFERENCES schema_versions(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL CHECK (kind IN ('table','column','index')), table_name TEXT, old_name TEXT NOT NULL, new_name TEXT NOT NULL,
-  created_by INTEGER NOT NULL REFERENCES users(id), UNIQUE (base_version_id, target_version_id, kind, table_name, old_name));
-CREATE INDEX ix_versions_uploaded ON schema_versions (schema_id, uploaded_at);
-CREATE INDEX ix_revisions_object ON object_revisions (object_id, revision_no);
-```
+현재 스키마는 마이그레이션 003(스키마 v3, `apps/server/src/db/migrations/003_schema_v3.sql`)이 만든다. 001(초기)·002(DMS 매핑)는 이력으로 남아 있고, 003 이 테이블을 다시 만든다. 요점만 적는다(전체 DDL 은 003 파일 참고).
 
-- `PRAGMA journal_mode=WAL`, `foreign_keys=ON`을 켠다.
+| 테이블 | 핵심 컬럼·제약 |
+|---|---|
+| `users` | `username TEXT COLLATE NOCASE UNIQUE`, `role CHECK IN ('admin','dba','viewer')`, `disabled INTEGER CHECK IN (0,1)` |
+| `sessions` | `token_hash` PK, `user_id` FK CASCADE, 인덱스 `ix_sessions_user`·`ix_sessions_expires` |
+| `databases` | `name UNIQUE` |
+| `schemas` | `UNIQUE (database_id, name)`, `next_version_no` (다음 버전 번호 카운터) |
+| `schema_versions` | 메타만. `UNIQUE (schema_id, version_no)`, `UNIQUE (id, schema_id)` (복합 FK 대상) |
+| `schema_version_sources` | `version_id` PK·FK CASCADE, `source_text` (원문 분리) |
+| `objects` | `UNIQUE (schema_id, kind, name)`, `UNIQUE (id, schema_id)`, `next_revision_no` (다음 리비전 번호 카운터) |
+| `object_revisions` | 메타 컬럼 뒤 마지막에 `model_json`. `UNIQUE (object_id, revision_no)`, `UNIQUE (id, object_id)`, 커버링 인덱스 `ix_revisions_history (object_id, revision_no, fidelity, parse_error)` |
+| `version_objects` | `(version_id, schema_id, object_id, revision_id)`, PK `(version_id, object_id)`. FK `(version_id, schema_id)` → `schema_versions(id, schema_id)` CASCADE, `(object_id, schema_id)` → `objects(id, schema_id)`, `(revision_id, object_id)` → `object_revisions(id, object_id)` |
+| `rename_mappings` | `CHECK ((kind='table') = (table_name IS NULL))`, `CHECK (base_version_id <> target_version_id)`, `ux_renames (base, target, kind, coalesce(table_name,''), old_name)`, `ix_renames_target` |
+
+- 모든 테이블은 `STRICT` 다. 저장소 코드는 정확한 타입을 쓴다(불리언은 0/1 정수).
+- `version_objects` 의 복합 FK 와 PK 로 "버전당 객체 하나에 리비전 하나", "버전·객체·리비전이 같은 Schema·같은 객체 소속" 을 DB 가 강제한다.
+- 버전 번호·리비전 번호는 `MAX+1` 이 아니라 카운터(`schemas.next_version_no`, `objects.next_revision_no`)를 같은 트랜잭션 안에서 올려 받는다. 최신 버전을 지우고 다시 올려도 지운 번호를 재사용하지 않는다(캐시·링크 혼동 방지).
+- 원문은 `schema_version_sources` 에 보존한다. 목록·메타 조회는 원문 테이블을 조인하지 않는다. 파서를 개선하면 재파싱으로 모델을 다시 만들 수 있다.
+- 버전 삭제는 그 버전이 쓰던 리비전·객체 가운데 더 이상 참조되지 않는 것만 정리한다(전역 anti-join 을 하지 않는다).
+- 연결 설정: `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`, `synchronous=NORMAL`, `journal_size_limit=64MB`. 종료할 때 `PRAGMA optimize`.
 - 업로드 1건(버전 + 리비전 + 매핑)은 트랜잭션 하나로 처리한다.
-- 마이그레이션은 `PRAGMA user_version` 기반 순차 SQL 파일로 관리한다.
-- `source_text`에 원문을 보존한다. 파서를 개선하면 재파싱으로 모델을 다시 만들 수 있다.
+- 마이그레이션은 `PRAGMA user_version` 기반 순차 SQL 파일로 관리한다. 첫 줄이 `-- foreign_keys: off` 인 파일은 트랜잭션 밖에서 외래 키를 끄고 실행한 뒤 `PRAGMA foreign_key_check` 로 검증하고, 끝나면 `VACUUM` 한다. DB 의 `user_version` 이 앱이 아는 최신보다 크면 기동을 거부한다.
+- 003 은 사용자 계정을 보존하고(대소문자만 다른 이름은 먼저 만든 것만), 세션과 업로드 데이터를 비운다.
+- 백업은 `VACUUM INTO` 로 하는 `npm run backup -w @tdm/server -- <경로>` 를 쓴다. 실행 중에 `.db` 만 복사하면 `-wal` 의 최근 커밋이 빠질 수 있다.
 
 ### 5.2 API
 
@@ -295,14 +288,14 @@ CREATE INDEX ix_revisions_object ON object_revisions (object_id, revision_no);
 | GET | `/api/auth/me` | 로그인 | |
 | GET/POST/PATCH | `/api/users` | admin | 계정 생성·역할 변경·비활성화·비밀번호 재설정 |
 | GET | `/api/tree` | 로그인 | Database → Schema 목록 + 스키마별 최신 버전 번호 |
-| POST/PATCH/DELETE | `/api/databases[/:id]` | admin | 삭제 시 확인용으로 이름 입력 필요 |
+| POST/PATCH/DELETE | `/api/databases[/:id]` | admin, dba | 삭제 시 확인용으로 이름 입력 필요 |
 | GET | `/api/schemas/:id/versions` | 로그인 | 버전 이력(업로더, 메모, 변경 객체 수) |
-| POST | `/api/uploads` | admin | multipart: 파일 1~N개 + 파일별 `{databaseId, schemaName, note}`. 파일별 결과를 반환한다 |
+| POST | `/api/uploads` | admin, dba | multipart: 파일 1~N개 + 파일별 `{databaseId, schemaName, note}`. 파일별 결과를 반환한다 |
 | GET | `/api/versions/:id` | 로그인 | 버전 메타 + 모델 + 객체 목록(객체 id, 리비전 번호) |
 | GET | `/api/versions/:id/source` | 로그인 | 원본 파일 다운로드 |
-| DELETE | `/api/versions/:id` | admin | 버전만 삭제한다. 스냅샷이 서로 독립이라 다른 버전은 영향 없음. 고아 리비전은 정리 |
+| DELETE | `/api/versions/:id` | admin, dba | 버전만 삭제한다. 스냅샷이 서로 독립이라 다른 버전은 영향 없음. 고아 리비전은 정리 |
 | GET | `/api/diff?base=&target=` | 로그인 | `SchemaDiff` + 적용된 rename 매핑 + `Statement[]` + 양쪽 프린터 텍스트 |
-| PUT | `/api/diff/renames` | 로그인(viewer 포함) | rename 매핑 저장/해제 (base, target, 목록) |
+| PUT | `/api/diff/renames` | admin, dba | rename 매핑 저장/해제 (base, target, 목록) |
 | GET | `/api/objects/:id/history` | 로그인 | 리비전 목록과 각 리비전이 처음 나온 버전 |
 
 - **업로드 처리 흐름**
@@ -350,7 +343,7 @@ CREATE INDEX ix_revisions_object ON object_revisions (object_id, revision_no);
 ### 6.2 화면 구조 (Layout B)
 
 ```
-┌ 상단바: 로고 · Database › Schema · [BASE v3 ▾] ⇄ [TARGET v5 ▾] · 버전 이력 · 업로드(admin) · 테마 · 사용자 ┐
+┌ 상단바: 로고 · Database › Schema · [BASE v3 ▾] ⇄ [TARGET v5 ▾] · 버전 이력 · 업로드(admin·dba) · 테마 · 사용자 ┐
 ├ 좌측 트리 ─────────┬ 탭: 요약 | 객체 diff | DDL ──────────────────────────────────────────────┤
 │ 검색, [전체|변경]  │ 요약: 통계 카드 4개 + 변경 객체 표                                       │
 │ ▾ prod-db-01       │ 객체 diff: 변경 객체를 GitHub "Files changed"처럼 세로로 나열             │
@@ -368,7 +361,7 @@ CREATE INDEX ix_revisions_object ON object_revisions (object_id, revision_no);
 - **화면 목록**
   - 로그인
   - 메인(위 구조)
-  - 버전 이력: 스키마 버전 타임라인. 각 버전의 변경 객체 수, 원본 다운로드, 삭제(admin)
+  - 버전 이력: 스키마 버전 타임라인. 각 버전의 변경 객체 수, 원본 다운로드, 삭제(admin·dba)
   - 객체 이력: 리비전 목록. 인접 리비전 diff로 바로 이동
   - 업로드 모달: 드래그앤드롭 다중 파일. 파일별 감지된 Database/Schema 수정, 미리보기 경고, 메모 입력
   - 계정 관리(admin)
@@ -383,7 +376,7 @@ CREATE INDEX ix_revisions_object ON object_revisions (object_id, revision_no);
 | 객체 하나 파싱 실패 | 해당 객체를 `parseError`로 저장하고 경고 표시. diff는 원문 텍스트로만, DDL은 수동 확인 주석 |
 | 왕복(print∘parse) 불일치 | 업로드 경고. 화면에 "원문 보기" 제공 |
 | 동일 내용 재업로드 | 파일 결과 `duplicate`. "v5와 동일" 안내 |
-| 동시 업로드로 version_no 충돌 | 트랜잭션 안에서 `MAX+1`, UNIQUE 위반 시 1회 재시도 |
+| 동시 업로드로 version_no 충돌 | `BEGIN IMMEDIATE` 트랜잭션 안에서 `schemas.next_version_no` 카운터를 올려 받는다 (쓰기가 직렬화되어 충돌하지 않고, 지운 번호도 재사용하지 않는다) |
 | 세션 만료 | 401 → 로그인 화면, 원래 URL로 복귀 |
 | 서버 오류 | 사용자에게는 일반 메시지와 요청 ID, 로그에는 상세 |
 
@@ -401,7 +394,7 @@ CREATE INDEX ix_revisions_object ON object_revisions (object_id, revision_no);
   - **골든 테스트**: `base.sql` + `target.sql` → `expected.ddl` 쌍. 시나리오는 컬럼 추가/삭제/타입 변경/순서 변경, 인덱스 추가/삭제/변경/rename/가시성, FK 추가/삭제, 테이블 추가/삭제/rename, 뷰 변경, 파티션, 옵션.
   - **MD**: MD 파싱 결과가 같은 스키마 SQL 파싱 결과와, MD가 알 수 없는 속성을 빼면 일치하는지 확인.
 - **DDL 실증 테스트 (`npm run test:mysql`, CI 별도 job)**: MySQL 8.0과 8.4 컨테이너에 base를 적용하고 → 생성된 DDL을 실행하고 → `SHOW CREATE TABLE` 결과를 파싱해 target 모델과 같은지 비교한다. 이게 DDL 정확성의 최종 확인이다.
-- **server**: `fastify.inject`로 인증·권한 경계(viewer의 업로드 403), 업로드 → 버전/리비전 생성, 중복 업로드 duplicate 결과, 버전 삭제 후 리비전 정리를 확인한다.
+- **server**: `fastify.inject`로 인증·권한 경계(anon/viewer/dba/admin 표, viewer 의 업로드·rename 저장 403), 업로드 → 버전/리비전 생성, 중복 업로드 duplicate 결과, 버전 삭제 후 리비전 정리를 확인한다.
 - **web**: Playwright 스모크 1개(로그인 → 업로드 2회 → diff 확인 → DDL 복사)와 Dark/Light 스크린샷.
 
 ## 9. 구현 순서 (계획 단계에서 세분화)
@@ -419,7 +412,7 @@ CREATE INDEX ix_revisions_object ON object_revisions (object_id, revision_no);
 |---|---|
 | 입력 포맷 | SQL = 원본(full), MD = 보조(partial) |
 | 버전 단위 | 스키마 단위. 객체 리비전은 내용 변경 시에만 증가 |
-| 사용 형태 | 팀 공용 서버, 자체 계정 admin/viewer |
+| 사용 형태 | 팀 공용 서버, 자체 계정 admin/dba/viewer |
 | rename | 기본 DROP+ADD. 후보를 표시하고 사용자가 매핑 |
 | 대상 버전 | MySQL 8.0 / 8.4 (`RENAME COLUMN`, `RENAME INDEX`, `ALTER INDEX … VISIBLE` 사용) |
 | 스택 | Node 22 + TS, Fastify, node:sqlite, React + Vite |

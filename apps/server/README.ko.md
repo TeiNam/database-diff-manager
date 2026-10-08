@@ -46,17 +46,18 @@ nginx·ALB 같은 리버스 프록시 뒤에 두면 모든 요청의 소켓 주�
 | POST | `/auth/login`, `/auth/logout` · GET `/auth/me` | — / 로그인 |
 | GET·POST·PATCH | `/users[/:id]` | admin |
 | GET | `/tree`, `/schemas/:id`, `/schemas/:id/versions` | 로그인 |
-| POST·PATCH·DELETE | `/databases[/:id]` (삭제 시 `confirmName` 필요) | admin |
-| DELETE | `/schemas/:id` (`confirmName` 필요, 버전·객체 이력까지 연쇄 삭제) | admin |
-| POST | `/uploads` (multipart: `meta` JSON + `files`) | admin |
+| POST·PATCH·DELETE | `/databases[/:id]` (삭제 시 `confirmName` 필요) | admin, dba |
+| DELETE | `/schemas/:id` (`confirmName` 필요, 버전·객체 이력까지 연쇄 삭제) | admin, dba |
+| POST | `/uploads` (multipart: `meta` JSON + `files`) | admin, dba |
 | GET | `/versions/:id`, `/versions/:id/source` | 로그인 |
-| DELETE | `/versions/:id` | admin |
-| GET | `/diff?base=&target=` · PUT `/diff/renames` | 로그인 |
+| DELETE | `/versions/:id` | admin, dba |
+| GET | `/diff?base=&target=` | 로그인 |
+| PUT | `/diff/renames` | admin, dba |
 | GET | `/objects/:id/history` | 로그인 |
-| POST | `/migrations` (JSON: `fromSchemaId`, `toSchemaId`, `filename`, `source`, `note?`, 파싱 경고를 함께 돌려줌) · DELETE `/migrations/:id` | admin |
+| POST | `/migrations` (JSON: `fromSchemaId`, `toSchemaId`, `filename`, `source`, `note?`, 파싱 경고를 함께 돌려줌) · DELETE `/migrations/:id` | admin, dba |
 | GET | `/migrations?from=&to=`, `/migrations/:id/source`, `/migration-flow?base=&target=` | 로그인 |
 
-`PUT /diff/renames`(rename 매핑 저장)는 viewer를 포함한 로그인 사용자 모두에게 열려 있습니다. 설계서에서 정한 정책입니다.
+역할: `admin`(계정 관리 포함 전부), `dba`(데이터 변경 전부), `viewer`(읽기 전용). `PUT /diff/renames`(rename 매핑 저장)는 admin·dba 만 할 수 있으며, 권한은 본문을 파싱하기 전(`onRequest`)에 확인하므로 viewer 는 본문을 읽기 전에 403 을 받습니다. BASE 와 TARGET 이 같은 버전이면 400 입니다.
 
 전환 매핑은 Schema 쌍(As-Is → To-Be)에 붙습니다. 같은 쌍에 다시 올리면 리비전이 늘고, BASE 버전이 From Schema, TARGET 버전이 To Schema 에 속하면 최신 리비전이 자동 적용됩니다(역방향에는 적용하지 않음). `GET /diff` 의 `renames` 항목에는 `source: 'dms' | 'manual'` 이 붙습니다. `PUT /diff/renames` 는 수동 rename 만 저장하며, DMS 에서 온 rename 과 같은 항목은 500개 한도를 적용하기 전에 서버가 거릅니다.
 

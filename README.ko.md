@@ -22,7 +22,7 @@
 - **DDL 생성**: 테이블·컬럼·인덱스·FK·뷰·파티션 변경을 ALTER/CREATE/DROP으로 만들고, 반대 방향(되돌리기) DDL도 함께 제공합니다. rename은 화면에서 매핑합니다.
 - **DB 전환 매핑**: As-Is → To-Be Schema 쌍에 AWS DMS table-mapping JSON 을 올리면, 전환 탭에 테이블·컬럼 대응과 상태를 보여 주고 같은 매핑을 rename 으로 객체 diff·DDL 에 반영합니다. 같은 대상에 대한 수동 rename 매핑이 우선합니다.
 - **이력**: 버전 이력, 객체별 변경 이력, 원본 파일 다운로드.
-- **계정**: admin/viewer 두 역할. 다크·라이트 테마.
+- **계정**: admin / dba / viewer 세 역할. 다크·라이트 테마.
 
 ## 입력 파일
 
@@ -75,13 +75,15 @@ npm run backup -w @tdm/server -- ./backup-$(date +%Y%m%d).db
 
 ## 권한
 
-| 작업 | admin | viewer |
-|---|---|---|
-| 조회·비교·DDL 복사/다운로드 | O | O |
-| rename 매핑 저장 (모든 사용자의 diff 결과에 반영) | O | O |
-| 업로드, 버전·Schema·Database 삭제 | O | — |
-| DMS 전환 매핑 올리기·삭제 | O | — |
-| 계정 관리 | O | — |
+| 작업 | admin | dba | viewer |
+|---|---|---|---|
+| 조회·비교·DDL 복사/다운로드 | O | O | O |
+| rename 매핑 저장 (모든 사용자의 diff 결과에 반영) | O | O | — |
+| 업로드, Database 생성·수정·삭제, 버전·Schema 삭제 | O | O | — |
+| DMS 전환 매핑 올리기·삭제 | O | O | — |
+| 계정 관리 | O | — | — |
+
+viewer 는 읽기 전용입니다. rename 후보는 보이지만 처리·해제는 dba 나 admin 만 할 수 있습니다.
 
 Schema·Database 삭제는 이름을 직접 입력해야 진행되며, 그 아래 모든 버전과 객체 이력이 함께 지워집니다.
 
