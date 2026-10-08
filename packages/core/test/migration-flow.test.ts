@@ -252,4 +252,24 @@ describe('컬럼 삭제와 rename 이 같은 이름에서 겹칠 때', () => {
     expect(stmts[0].notes?.join('\n')).toContain('a→b');
     expect(stmts[0].sql).toContain('-- [수동 확인 필요]');
   });
+
+  it('이름 충돌 테이블은 FK 삭제·추가·테이블 rename 까지 실행 문장을 남기지 않고, 다른 테이블은 그대로 실행 SQL 이다', () => {
+    const parent = 'CREATE TABLE `p` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n';
+    const child = (name: string, cols: string[], fkCol: string) => `CREATE TABLE \`${name}\` (\n  \`id\` int NOT NULL,\n${cols.map((c) => `  \`${c}\` int NOT NULL,`).join('\n')}\n` +
+      `  PRIMARY KEY (\`id\`),\n  KEY \`fk\` (\`${fkCol}\`),\n  CONSTRAINT \`fk\` FOREIGN KEY (\`${fkCol}\`) REFERENCES \`p\` (\`id\`)\n) ENGINE=InnoDB;\n`;
+    const before = parseSqlDump(parent + child('t', ['a', 'b'], 'a') + table('u', ['id', 'x'])).model;
+    const after = parseSqlDump(parent + child('t2', ['b', 'c'], 'c') + table('u', ['id', 'y'])).model;
+    // 연쇄 rename a→b, b→c 는 순서로 풀 수 없어 이름 충돌이 된다
+    const d = diffSchemas(before, after, [
+      { kind: 'table', from: 't', to: 't2' },
+      { kind: 'column', table: 't2', from: 'a', to: 'b' }, { kind: 'column', table: 't2', from: 'b', to: 'c' },
+    ]);
+    expect(d.ignoredRenames.map((r) => r.reason)).toEqual(['이름 충돌', '이름 충돌']);
+    const stmts = generateDdl(d);
+    const forT = stmts.filter((x) => x.object === 't2');
+    expect(forT.length).toBeGreaterThan(2); // FK 삭제·rename·ALTER·FK 추가
+    expect(forT.filter((x) => !x.comment)).toEqual([]);
+    expect(forT.every((x) => x.sql.startsWith('-- [수동 확인 필요]') && x.notes?.some((n) => n.includes('a→b')))).toBe(true);
+    expect(stmts.filter((x) => x.object === 'u').map((x) => x.comment)).toEqual([false]);
+  });
 });

@@ -39,12 +39,8 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
   for (const d of altered) if (d.op === 'rename') table(d, sqlBody(`RENAME TABLE ${q(d.oldName!)} TO ${q(d.name)}`));
   // 4. 테이블 생성 (FK는 8단계에서)
   for (const d of diff.tables) if (d.op === 'add') table(d, createTable(d.to!));
-  // 5·6. 테이블 변경, 파티션 (컬럼 rename 이 이름 충돌로 빠진 테이블은 값 대응이 어긋나므로 수동 확인으로)
-  const conflicts = columnConflicts(diff);
-  for (const d of altered) for (const body of conflictGuard(d.name, alterStatements(d), conflicts.get(d.name))) table(d, body);
-  for (const [name, notes] of conflicts) {
-    if (!altered.some((d) => d.name === name)) out.push({ object: name, kind: 'table', op: 'modify', ...conflictGuard(name, [], notes)[0] });
-  }
+  // 5·6. 테이블 변경, 파티션
+  for (const d of altered) for (const body of alterStatements(d)) table(d, body);
   // 7. 테이블 삭제
   for (const d of diff.tables) if (d.op === 'drop') table(d, sqlBody(`DROP TABLE ${q(d.name)}`));
   // 8. FK 추가
@@ -60,7 +56,7 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
       ? commentBody(`-- [수동 확인 필요] ${v.name}: 파싱할 수 없는 뷰입니다. 원문을 확인하세요`)
       : sqlBody(printView(v.to!, { orReplace: true })));
   }
-  return out;
+  return guardConflicts(out, columnConflicts(diff));
 }
 
 export function renderDdl(stmts: Statement[], partial = false): string {
@@ -92,12 +88,21 @@ function columnConflicts(diff: SchemaDiff): Map<string, string[]> {
   return out;
 }
 
-// 충돌이 있으면 실행할 SQL 을 남기지 않는다: 실행 문장은 주석 처리하고, 문장이 없으면 안내 문장 하나를 만든다
-function conflictGuard(table: string, bodies: StatementBody[], notes: string[] | undefined): StatementBody[] {
-  if (!notes) return bodies;
-  const reason = `${table}: 컬럼 rename 이름 충돌 — 값 대응을 확인해 직접 작성하세요`;
-  if (!bodies.length) return [{ ...commentBody(`-- [수동 확인 필요] ${reason}`), notes }];
-  return bodies.map((b) => (b.comment ? b : manualBody(reason, b.sql, [...(b.notes ?? []), ...notes])));
+// 컬럼 rename 이 이름 충돌로 빠진 테이블은 값 대응이 어긋나므로 그 테이블의 모든 문장(FK 삭제·추가, 테이블 rename,
+// ALTER, 파티션)을 실행하지 않는 수동 확인 문장으로 바꾼다. 그 테이블 문장이 하나도 없으면 안내 문장 하나를 만든다
+function guardConflicts(stmts: Statement[], conflicts: Map<string, string[]>): Statement[] {
+  if (!conflicts.size) return stmts;
+  const reason = (table: string) => `${table}: 컬럼 rename 이름 충돌 — 값 대응을 확인해 직접 작성하세요`;
+  const guarded = stmts.map((st) => {
+    const notes = st.kind === 'table' ? conflicts.get(st.object) : undefined;
+    if (!notes || st.comment) return st;
+    return { ...st, ...manualBody(reason(st.object), st.sql, [...(st.notes ?? []), ...notes]) };
+  });
+  const covered = new Set(stmts.filter((st) => st.kind === 'table').map((st) => st.object));
+  const extra = [...conflicts].filter(([name]) => !covered.has(name)).map(([name, notes]): Statement => (
+    { object: name, kind: 'table', op: 'modify', ...commentBody(`-- [수동 확인 필요] ${reason(name)}`), notes }
+  ));
+  return [...guarded, ...extra];
 }
 
 function sortViews(views: ViewDiff[]): ViewDiff[] {
