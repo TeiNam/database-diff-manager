@@ -45,8 +45,12 @@ nginx·ALB 같은 리버스 프록시 뒤에 두면 모든 요청의 소켓 주�
 | DELETE | `/versions/:id` | admin |
 | GET | `/diff?base=&target=` · PUT `/diff/renames` | 로그인 |
 | GET | `/objects/:id/history` | 로그인 |
+| POST | `/migrations` (JSON: `fromSchemaId`, `toSchemaId`, `filename`, `source`, `note?`, 파싱 경고를 함께 돌려줌) · DELETE `/migrations/:id` | admin |
+| GET | `/migrations?from=&to=`, `/migrations/:id/source`, `/migration-flow?base=&target=` | 로그인 |
 
 `PUT /diff/renames`(rename 매핑 저장)는 viewer를 포함한 로그인 사용자 모두에게 열려 있습니다. 설계서에서 정한 정책입니다.
+
+전환 매핑은 Schema 쌍(As-Is → To-Be)에 붙습니다. 같은 쌍에 다시 올리면 리비전이 늘고, BASE 버전이 From Schema, TARGET 버전이 To Schema 에 속하면 최신 리비전이 자동 적용됩니다(역방향에는 적용하지 않음). `GET /diff` 의 `renames` 항목에는 `source: 'dms' | 'manual'` 이 붙습니다. `PUT /diff/renames` 는 수동 rename 만 저장하며, DMS 에서 온 rename 과 같은 항목은 500개 한도를 적용하기 전에 서버가 거릅니다.
 
 ## 테스트
 

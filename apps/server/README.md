@@ -45,8 +45,12 @@ All paths are under `/api`. Requests that change state must include the `X-Reque
 | DELETE | `/versions/:id` | admin |
 | GET | `/diff?base=&target=` · PUT `/diff/renames` | logged in |
 | GET | `/objects/:id/history` | logged in |
+| POST | `/migrations` (JSON: `fromSchemaId`, `toSchemaId`, `filename`, `source`, `note?`; returns parse warnings) · DELETE `/migrations/:id` | admin |
+| GET | `/migrations?from=&to=`, `/migrations/:id/source`, `/migration-flow?base=&target=` | logged in |
 
 `PUT /diff/renames` (saves rename mappings) is open to all logged-in users, including viewers. This is the policy set in the design document.
+
+A migration mapping belongs to a Schema pair (As-Is → To-Be). Uploading again for the same pair adds a revision, and the latest revision is applied automatically whenever the BASE version belongs to the From Schema and the TARGET version to the To Schema (never in the reverse direction). Renames in `GET /diff` carry `source: 'dms' | 'manual'`. `PUT /diff/renames` saves manual renames only: entries identical to a DMS-derived rename are dropped on the server before the 500-entry limit is applied.
 
 ## Testing
 

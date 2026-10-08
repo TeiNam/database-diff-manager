@@ -1,7 +1,7 @@
 import type { RenameMapping } from '@tdm/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from './client';
-import type { DiffResponse, Me, ObjectHistory, Role, SchemaInfo, TreeDatabase, UploadMeta, UploadResult, User, VersionDetail, VersionSummary } from './types';
+import type { DiffResponse, Me, MigrationFlowResponse, MigrationMeta, MigrationUploadInput, MigrationUploadResult, ObjectHistory, Role, SchemaInfo, TreeDatabase, UploadMeta, UploadResult, User, VersionDetail, VersionSummary } from './types';
 
 export const queryKeys = {
   me: ['me'] as const,
@@ -12,6 +12,8 @@ export const queryKeys = {
   diff: (base?: number, target?: number) => ['diff', base, target] as const,
   users: ['users'] as const,
   objectHistory: (id?: number) => ['object-history', id] as const,
+  migrationFlow: (base?: number, target?: number) => ['migration-flow', base, target] as const,
+  migrations: (from?: number, to?: number) => ['migrations', from, to] as const,
 };
 
 export function useMe() {
@@ -90,7 +92,7 @@ export function useUpload() {
 }
 
 // 삭제된 id 는 SQLite 가 다시 쓸 수 있다 → id 로 캐시한 내용이 남으면 새 객체 자리에 옛 내용이 보인다
-const CATALOG_CACHE_KEYS = [['versions'], ['version'], ['schema'], ['object-history'], ['diff']] as const;
+const CATALOG_CACHE_KEYS = [['versions'], ['version'], ['schema'], ['object-history'], ['diff'], ['migration-flow'], ['migrations']] as const;
 
 export function useDeleteVersion() {
   const client = useQueryClient();
@@ -103,6 +105,7 @@ export function useDeleteVersion() {
       client.removeQueries({ queryKey: queryKeys.version(id) });
       client.removeQueries({ queryKey: ['object-history'] });
       client.removeQueries({ queryKey: ['diff'] });
+      client.removeQueries({ queryKey: ['migration-flow'] });
     },
   });
 }
@@ -144,3 +147,35 @@ export function usePatchUser() {
 
 export const useObjectHistory = (id?: number) =>
   useQuery({ queryKey: queryKeys.objectHistory(id), queryFn: () => api<ObjectHistory>(`/objects/${id}/history`), enabled: id !== undefined });
+
+// 전환 매핑은 바뀔 수 있지만, 바꾸는 쪽(올리기·삭제)이 캐시를 무효화하므로 그 전까지 다시 받을 필요가 없다.
+// enabled=false(같은 Schema 끼리 비교 등)면 요청하지 않는다
+export const useMigrationFlow = (base?: number, target?: number, enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.migrationFlow(base, target),
+    queryFn: () => api<MigrationFlowResponse>(`/migration-flow?base=${base}&target=${target}`),
+    enabled: enabled && base !== undefined && target !== undefined,
+    staleTime: Infinity,
+  });
+
+export const useMigrations = (from: number, to: number, enabled: boolean) =>
+  useQuery({ queryKey: queryKeys.migrations(from, to), queryFn: () => api<MigrationMeta[]>(`/migrations?from=${from}&to=${to}`), enabled });
+
+// 쌍의 최신 매핑이 바뀌면 diff(rename 반영)·전환 표·리비전 목록이 모두 달라진다
+const MIGRATION_DEPENDENT_KEYS = [['diff'], ['migration-flow'], ['migrations']] as const;
+
+function useMigrationMutation<T, R>(fn: (input: T) => Promise<R>) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      for (const queryKey of MIGRATION_DEPENDENT_KEYS) client.invalidateQueries({ queryKey });
+    },
+  });
+}
+
+export const useUploadMigration = () =>
+  useMigrationMutation((input: MigrationUploadInput) => api<MigrationUploadResult>('/migrations', { method: 'POST', json: input }));
+
+export const useDeleteMigration = () =>
+  useMigrationMutation((id: number) => api<{ ok: true }>(`/migrations/${id}`, { method: 'DELETE' }));

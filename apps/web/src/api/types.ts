@@ -1,5 +1,5 @@
 // apps/server 응답과 같은 모양을 유지한다 (서버 타입은 node 의존성이 있어 직접 import 하지 않는다)
-import type { ParseWarning, RenameMapping, SchemaDiff, SchemaModel, SourceFormat, Statement } from '@tdm/core';
+import type { DmsWarning, MigrationFlow, ParseWarning, RenameMapping, SchemaDiff, SchemaModel, SourceFormat, Statement } from '@tdm/core';
 
 export type Role = 'admin' | 'viewer';
 
@@ -74,8 +74,12 @@ export interface DiffResponse {
   diff: SchemaDiff;
   statements: Statement[];
   ddl: string;
-  renames: RenameMapping[];
+  renames: SourcedRename[];
 }
+
+// diff 에 적용된 rename 의 출처: DMS 전환 매핑 또는 화면에서 넣은 수동 매핑. 출처가 없으면 수동으로 본다
+export type RenameSource = 'dms' | 'manual';
+export type SourcedRename = RenameMapping & { source?: RenameSource };
 
 export interface UploadMeta {
   filename: string;
@@ -96,4 +100,33 @@ export interface UploadResult {
 export interface ObjectHistory {
   object: { id: number; kind: 'table' | 'view'; name: string; schemaId: number };
   revisions: { revisionNo: number; fidelity: string; parseError: string | null; firstVersion: { id: number; versionNo: number; uploadedAt: string } }[];
+}
+
+export interface MigrationMeta {
+  id: number;
+  fromSchemaId: number;
+  toSchemaId: number;
+  revision: number;
+  filename: string;
+  ruleCount: number;
+  note: string | null;
+  uploadedBy: string;
+  uploadedAt: string;
+}
+
+export type MigrationFlowResponse =
+  | { mapping: null }
+  | { mapping: MigrationMeta; flow: MigrationFlow; warnings: DmsWarning[] };
+
+export interface MigrationUploadInput {
+  fromSchemaId: number;
+  toSchemaId: number;
+  filename: string;
+  source: string;
+  note?: string;
+}
+
+export interface MigrationUploadResult {
+  migration: MigrationMeta;
+  warnings: DmsWarning[];
 }

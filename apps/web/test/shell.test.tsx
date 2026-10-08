@@ -166,6 +166,24 @@ describe('VersionPicker 보강', () => {
     expect(target).toHaveValue('99');
   });
 
+  it('목록에 없는 BASE 는 diff 응답의 메타로 "Schema 이름 v버전 · 날짜" 를 보여 준다', async () => {
+    const meta = (id: number, schemaId: number, schemaName: string, versionNo: number, uploadedAt: string) => ({
+      id, schemaId, schemaName, versionNo, uploadedAt, databaseId: 3, databaseName: 'prod-db-01', sourceFormat: 'sql', sourceFilename: 'x.sql', note: null, uploadedBy: 'admin',
+    });
+    const empty = { tables: [], views: [] };
+    mockApi({
+      ...API,
+      '/api/diff?base=50&target=12': {
+        base: meta(50, 9, 'legacy', 3, '2026-09-30T00:00:00Z'), target: meta(12, 7, 'shop', 2, '2026-10-02T00:00:00Z'),
+        baseModel: empty, targetModel: empty, diff: { partial: false, tables: [], views: [], ignoredRenames: [], renameCandidates: [] }, statements: [], ddl: '', renames: [],
+      },
+    });
+    renderApp('/db/3/schema/7?base=50&target=12');
+    const base = await screen.findByLabelText('BASE 버전');
+    expect(await within(base).findByRole('option', { name: 'legacy v3 · 2026-09-30' })).toBeInTheDocument();
+    expect(base).toHaveValue('50');
+  });
+
   it('base/target이 없으면 비활성 안내 옵션을 보여 준다', async () => {
     mockApi(API);
     renderApp('/db/3/schema/7');

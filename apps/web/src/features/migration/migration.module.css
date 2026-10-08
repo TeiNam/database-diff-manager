@@ -1,0 +1,45 @@
+.wrap { display: grid; gap: var(--space-3); padding: var(--space-4); align-content: start; }
+.head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); font-size: var(--text-sm); }
+.headTitle { font: 600 var(--text-sm) var(--mono); }
+.meta { color: var(--fg-muted); font-size: var(--text-sm); }
+.spacer { flex: 1; }
+/* .wrap 이 이미 좌우 padding 을 주므로 Banner 의 기본 바깥 여백을 없애 다른 요소와 좌우를 맞춘다 */
+.wrap .flush { margin: 0; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.search { height: 28px; min-width: 240px; padding: 0 var(--space-2); border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--bg); color: var(--fg); font: var(--text-sm) var(--mono); }
+.seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius); overflow: hidden; }
+.seg button { height: 28px; padding: 0 var(--space-3); border: 0; border-left: 1px solid var(--border); background: var(--card); color: var(--fg-muted); font-size: var(--text-sm); }
+.seg button:first-child { border-left: 0; }
+.seg .on { background: var(--accent-bg); color: var(--fg); }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--card); color: var(--fg); font-size: var(--text-sm); text-decoration: none; }
+.btn:hover { background: var(--muted); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.danger { color: var(--del); }
+.error { color: var(--del); font-size: var(--text-sm); margin: 0; }
+.table { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--card); font-size: var(--text-sm); }
+.table th { text-align: left; font-weight: 500; color: var(--fg-muted); background: var(--muted); padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.table td { padding: 6px 10px; border-top: 1px solid var(--border); vertical-align: middle; }
+.table tbody tr:first-child td { border-top: 0; }
+.name { font-family: var(--mono); }
+.dim { color: var(--fg-dim); }
+.expand { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: transparent; color: var(--fg); font: var(--text-sm) var(--mono); cursor: pointer; }
+/* 펼치기 버튼의 화살표(14px)+간격(4px) 만큼 들여 이름 열을 맞춘다 */
+.plain { display: inline-block; padding-left: calc(14px + 4px); }
+.columns > td { background: var(--surface); }
+.inner { width: 100%; border-collapse: collapse; font-size: var(--text-xs); }
+.inner th, .inner td { padding: 4px 8px; text-align: left; border-top: 1px solid var(--border); }
+.inner th { color: var(--fg-muted); font-weight: 500; }
+.badge { display: inline-block; padding: 0 6px; border-radius: 9px; font-size: var(--text-xs); line-height: 18px; white-space: nowrap; }
+.ok { color: var(--add); background: var(--add-bg); }
+.rename { color: var(--accent); background: var(--accent-bg); }
+.del { color: var(--del); background: var(--del-bg); }
+.warn { color: var(--mod); background: var(--mod-bg); }
+.muted { color: var(--fg-muted); background: var(--muted); }
+.empty { display: grid; gap: var(--space-3); justify-items: center; padding: var(--space-6); border: 1px dashed var(--border-strong); border-radius: var(--radius); color: var(--fg-muted); text-align: center; }
+.emptyText { margin: 0; padding: var(--space-6); color: var(--fg-muted); }
+.warnings { margin: var(--space-2) 0 0; padding-left: var(--space-4); max-height: 200px; overflow: auto; font: var(--text-xs) var(--mono); }
+.preview { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); font-size: var(--text-sm); }
+.counts { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 4px var(--space-3); margin: 0; padding: 0; list-style: none; }
+.counts b { font-family: var(--mono); }
+.checks { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.noteLabel { display: grid; gap: 2px; font-size: var(--text-xs); color: var(--fg-muted); }

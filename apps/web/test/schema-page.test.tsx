@@ -60,4 +60,37 @@ describe('SchemaPage', () => {
     renderWithProviders(<SchemaPage />, { route: `${ROUTE}?base=11&target=12&tab=summary`, path: '/db/:dbId/schema/:schemaId' });
     expect(await screen.findByText(/일부 속성.*비교되지 않았습니다/)).toBeInTheDocument();
   });
+
+  it('전환 탭: 누르면 tab=migration 이 되고 전환 탭 본문을 그린다', async () => {
+    mockApi({
+      '/api/schemas/7/versions': [V(12, 2), V(11, 1)],
+      '/api/diff?base=11&target=12': response(),
+      '/api/migration-flow?base=11&target=12': { mapping: null },
+      '/api/auth/me': { id: 1, username: 'viewer', role: 'viewer' },
+    });
+    renderWithProviders(<SchemaPage />, { route: `${ROUTE}?base=11&target=12&tab=summary`, path: '/db/:dbId/schema/:schemaId' });
+    await userEvent.setup().click(await screen.findByRole('tab', { name: '전환' }));
+    expect(screen.getByTestId('location')).toHaveTextContent('tab=migration');
+    expect(await screen.findByText(/같은 Schema 의 버전끼리는/)).toBeInTheDocument();
+  });
+
+  it('적용된 rename 에 출처를 표시하고, 해제는 수동 매핑만 다시 저장한다', async () => {
+    const dms = { kind: 'table', from: 'members', to: 'member', source: 'dms' };
+    const manual = { kind: 'column', table: 'orders', from: 'x', to: 'y', source: 'manual' };
+    const calls = mockApi({
+      '/api/schemas/7/versions': [V(12, 2), V(11, 1)],
+      '/api/diff?base=11&target=12': { ...response(), renames: [dms, manual] },
+      'PUT /api/diff/renames': () => response(),
+    });
+    renderWithProviders(<SchemaPage />, { route: `${ROUTE}?base=11&target=12&tab=summary`, path: '/db/:dbId/schema/:schemaId' });
+    const manualBanner = await screen.findByRole('region', { name: '적용된 이름 변경' });
+    expect(manualBanner).toHaveTextContent(/수동\s*orders\.x → y/);
+    const dmsBanner = screen.getByRole('region', { name: 'DMS 매핑에서 적용된 이름 변경' });
+    expect(dmsBanner).toHaveTextContent('이름 변경 1건');
+    expect(within(dmsBanner).queryByRole('button', { name: '해제' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '이름 변경 후보' })).not.toBeInTheDocument(); // DMS 로 이미 적용된 후보는 다시 묻지 않는다
+    await userEvent.setup().click(within(manualBanner).getByRole('button', { name: '해제' }));
+    await waitFor(() => expect(calls.some((c) => c.url === '/api/diff/renames')).toBe(true));
+    expect(JSON.parse(String(calls.find((c) => c.url === '/api/diff/renames')!.init.body)).renames).toEqual([]);
+  });
 });

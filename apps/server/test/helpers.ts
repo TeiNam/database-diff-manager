@@ -64,3 +64,8 @@ export function multipart(fields: Record<string, string>, files: { filename: str
   chunks.push(Buffer.from(`--${boundary}--\r\n`));
   return { payload: Buffer.concat(chunks), headers: { 'content-type': `multipart/form-data; boundary=${boundary}` } };
 }
+
+// DMS 전환 매핑 픽스처 (core 테스트와 공유): mapping.json, as-is.sql, to-be.sql
+export function dmsFixture(name: 'mapping.json' | 'as-is.sql' | 'to-be.sql'): string {
+  return readFileSync(fileURLToPath(new URL(`../../../packages/core/test/fixtures/dms/${name}`, import.meta.url)), 'utf8');
+}

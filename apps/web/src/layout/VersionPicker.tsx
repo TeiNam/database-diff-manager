@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { useTree, useVersions } from '../api/hooks';
-import type { VersionSummary } from '../api/types';
+import { useDiff, useTree, useVersions } from '../api/hooks';
+import type { VersionMeta, VersionSummary } from '../api/types';
 import { Icon } from '../components/Icon';
 import { useSchemaContext } from '../hooks/useSchemaContext';
 import { formatDate } from '../lib/format';
@@ -8,11 +8,18 @@ import s from './Topbar.module.css';
 
 const OTHER = 'other';
 const label = (v: VersionSummary) => `v${v.versionNo} · ${formatDate(v.uploadedAt)} · ${v.uploadedBy}${v.note ? ` · ${v.note}` : ''}`;
+// 이 Schema 목록에 없는 버전: diff 응답의 base/target 메타로 "legacy v3 · 2026-09-30", 아직 모르면 id 로 표시한다
+const otherLabel = (id: number, metas: (VersionMeta | undefined)[]) => {
+  const meta = metas.find((m) => m?.id === id);
+  return meta ? `${meta.schemaName} v${meta.versionNo} · ${formatDate(meta.uploadedAt)}` : `다른 스키마의 버전 #${id}`;
+};
 
 // BASE/TARGET 버전 선택. BASE는 "다른 Database/Schema와 비교…"로 다른 스키마의 버전도 고를 수 있다
 export function VersionPicker({ schemaId }: { schemaId: number }) {
   const ctx = useSchemaContext();
   const versions = useVersions(schemaId);
+  const diff = useDiff(ctx.base, ctx.target); // 페이지와 같은 쿼리라 추가 요청은 없다
+  const metas = [diff.data?.base, diff.data?.target];
   const [otherOpen, setOtherOpen] = useState(false);
   const baseRef = useRef<HTMLSelectElement>(null);
   const closeOther = () => {
@@ -28,7 +35,7 @@ export function VersionPicker({ schemaId }: { schemaId: number }) {
         <select ref={baseRef} className={s.select} aria-label="BASE 버전" value={ctx.base ?? ''}
           onChange={(e) => (e.target.value === OTHER ? setOtherOpen(true) : ctx.set({ base: e.target.value }))}>
           {ctx.base === undefined && <option value="" disabled>버전 선택…</option>}
-          {ctx.base && !known.has(ctx.base) && <option value={ctx.base}>다른 스키마의 버전 #{ctx.base}</option>}
+          {ctx.base && !known.has(ctx.base) && <option value={ctx.base}>{otherLabel(ctx.base, metas)}</option>}
           {versions.data.map((v) => <option key={v.id} value={v.id}>{label(v)}</option>)}
           <option value={OTHER}>다른 Database/Schema와 비교…</option>
         </select>
@@ -41,7 +48,7 @@ export function VersionPicker({ schemaId }: { schemaId: number }) {
         <span className={s.tag}>TARGET</span>
         <select className={s.select} aria-label="TARGET 버전" value={ctx.target ?? ''} onChange={(e) => ctx.set({ target: e.target.value })}>
           {ctx.target === undefined && <option value="" disabled>버전 선택…</option>}
-          {ctx.target && !known.has(ctx.target) && <option value={ctx.target}>다른 스키마의 버전 #{ctx.target}</option>}
+          {ctx.target && !known.has(ctx.target) && <option value={ctx.target}>{otherLabel(ctx.target, metas)}</option>}
           {versions.data.map((v) => <option key={v.id} value={v.id}>{label(v)}</option>)}
         </select>
       </label>
