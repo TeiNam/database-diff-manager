@@ -28,7 +28,7 @@ A team web tool for managing MySQL schema definitions exported with [td-export](
 
 | Item | Details |
 |---|---|
-| Supported versions | td-export 0.1.15 – 0.1.30 (output format is detected per file) |
+| Supported versions | td-export 0.1.15 – 0.1.36, MySQL output (format is detected per file; MySQL output is unchanged from 0.1.30 to 0.1.36) |
 | Formats | `.sql` (recommended, lossless), `.md` (partially lossy — flagged in the UI) |
 | Name suggestion | `schema(host).sql` → Database `host`; `schema(host_port).sql` (0.1.30) → Database `host:port`. If a Database with the older `host_port` name already exists, that one is selected |
 | DMS mapping | AWS DMS table-mapping JSON: `selection` include/exclude (`%` wildcard), `transformation` rename of schema/table/column, and `remove-column`. Other actions are listed as warnings and not applied. Up to 20,000 rules, 20MB |

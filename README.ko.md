@@ -28,7 +28,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| 지원 버전 | td-export 0.1.15 ~ 0.1.30 (파일마다 출력 형식을 판별) |
+| 지원 버전 | td-export 0.1.15 ~ 0.1.36의 MySQL 출력 (파일마다 형식을 판별, 0.1.30 ~ 0.1.36 사이 MySQL 출력은 같음) |
 | 형식 | `.sql`(권장, 손실 없음), `.md`(일부 정보 손실 — 화면에 표시) |
 | 이름 제안 | `schema(host).sql` → Database `host`, `schema(host_port).sql`(0.1.30) → Database `host:port`. 예전 방식 이름(`host_port`)의 Database가 이미 있으면 그쪽을 고릅니다 |
 | DMS 매핑 | AWS DMS table-mapping JSON: `selection` include/exclude(`%` 와일드카드), `transformation` 의 schema·table·column rename, `remove-column`. 그 밖의 action 은 경고로만 보여 주고 반영하지 않습니다. 룰 20,000개·20MB 까지 |

@@ -97,6 +97,7 @@ interface SchemaModel { name: string; tables: Table[]; views: View[] }
 ### 4.2 SQL 파서 (`parseSqlDump`)
 
 - **입력**: td-export SQL 파일. `/* Database : x */` 헤더 뒤에 `/* Table : t */` + DDL이 반복된다. DDL은 `SHOW CREATE TABLE` 원문이다.
+  - td-export 0.1.31 ~ 0.1.36의 변경은 PostgreSQL 출력뿐이고 MySQL SQL·MD 출력은 0.1.30과 바이트 단위로 같다(0.1.36으로 같은 DB를 다시 뽑아 확인, 뷰는 테이블 뒤로 오지만 이 샘플에는 뷰가 없음). 파서는 문장 순서에 의존하지 않는다.
   - td-export 0.1.30+는 맨 앞에 `SET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;`, 맨 끝에 `SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;`를 붙인다. `SET`으로 시작하는 문장은 경고 없이 건너뛴다. 단 `;`가 빠져 뒤의 `CREATE`가 같은 문장에 붙었으면(같은 줄이든 다음 줄이든, 문자열·주석 밖의 `CREATE` 토큰이면) 건너뛰지 않고 `parse-error`로 남긴다. 그 밖의 CREATE가 아닌 문장은 계속 `parse-error` 경고를 낸다.
 - **분할**: 따옴표·백틱·괄호 깊이를 인식하는 토크나이저로 문장(`;`)과 최상위 쉼표를 나눈다. 줄 단위로 나누지 않는다. COMMENT 문자열 안의 쉼표나 개행이 있어도 깨지지 않게 하기 위해서다.
 - **CREATE TABLE 해석 범위**
