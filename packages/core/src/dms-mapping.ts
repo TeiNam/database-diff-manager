@@ -97,19 +97,21 @@ export function compileSelection(mapping: DmsMapping): (table: string) => boolea
   return (table) => (include.length === 0 || include.some((m) => m(table))) && !exclude.some((m) => m(table));
 }
 
-export function parseDmsMapping(text: string): { mapping: DmsMapping; warnings: DmsWarning[] } {
+export interface ParseDmsOptions {
+  // As-Is 스키마 이름(BASE Schema). 지정하면 그 스키마(대소문자 무시)의 룰만 쓴다
+  fromSchema?: string;
+}
+
+export function parseDmsMapping(text: string, opts: ParseDmsOptions = {}): { mapping: DmsMapping; warnings: DmsWarning[] } {
   const rules = readRules(text);
   const warnings: DmsWarning[] = [];
+  // 길이 검사를 통과한 룰만 남긴다. 그래야 거대한 schema-name 이 fromSchema 로 뽑혀 매 룰 비교에 쓰이지 않는다
   const parsed = rules.map((raw, i) => toRule(raw, i, warnings)).filter((r): r is Rule => r !== undefined);
-  const fromSchema = parsed.find((r) => !hasWildcard(r.schema))?.schema ?? '%';
+  const fromSchema = resolveFromSchema(parsed, opts.fromSchema);
   const builder = new MappingBuilder(fromSchema, warnings);
   for (const rule of parsed) {
-    if (tooLong(rule.schema, rule.table, rule.column)) {
-      warnings.push({ ruleId: rule.id, code: 'invalid', message: `이름은 ${MAX_PATTERN_LENGTH}자까지만 지원합니다` });
-      continue;
-    }
     if (!likeMatch(rule.schema, fromSchema)) {
-      warnings.push({ ruleId: rule.id, code: 'invalid', message: `다른 스키마(${rule.schema})의 룰은 반영하지 않습니다` });
+      warnings.push({ ruleId: rule.id, code: 'invalid', message: `다른 스키마(${clip(rule.schema)})의 룰은 반영하지 않습니다` });
       continue;
     }
     builder.add(rule);
@@ -117,6 +119,24 @@ export function parseDmsMapping(text: string): { mapping: DmsMapping; warnings: 
   return { mapping: builder.build(rules.length), warnings };
 }
 
+const nonWildcardSchemas = (rules: Rule[]) => rules.map((r) => r.schema).filter((s) => !hasWildcard(s));
+
+// 지정 이름이 없으면 첫 non-wildcard schema-name(모두 와일드카드면 %).
+// 지정 이름이 있으면 그 스키마에 맞는 룰의 표기를 쓰고, 맞는 룰이 없을 때 파일의 스키마가 하나뿐이면 그 스키마로 본다(Schema 이름을 바꿔 올리는 경우)
+function resolveFromSchema(rules: Rule[], wanted: string | undefined): string {
+  const named = nonWildcardSchemas(rules);
+  if (wanted === undefined) return named[0] ?? '%';
+  const exact = named.find((s) => lower(s) === lower(wanted));
+  if (exact !== undefined) return exact;
+  if (rules.some((r) => likeMatch(r.schema, wanted))) return wanted;
+  const distinct = new Set(named.map(lower));
+  if (distinct.size === 1) return named[0];
+  throw new DmsParseError(`매핑에 '${clip(wanted)}' 스키마 룰이 없습니다`);
+}
+
+// 경고 메시지에 넣는 사용자 값은 이 길이로 자른다 (경고 응답이 커지지 않도록)
+const MAX_SHOWN_LENGTH = 64;
+const clip = (v: string) => (v.length > MAX_SHOWN_LENGTH ? `${v.slice(0, MAX_SHOWN_LENGTH)}…` : v);
 const tooLong = (...v: Array<string | undefined>) => v.some((x) => x !== undefined && x.length > MAX_PATTERN_LENGTH);
 
 function readRules(text: string): unknown[] {
@@ -140,17 +160,23 @@ function toRule(raw: unknown, index: number, warnings: DmsWarning[]): Rule | und
   const type = str(r['rule-type']);
   const action = str(r['rule-action']);
   const schema = str(locator?.['schema-name']);
+  const ruleId = clip(id);
   if (!type || !action || !schema) {
-    warnings.push({ ruleId: id, code: 'invalid', message: 'rule-type·rule-action·object-locator.schema-name 이 필요합니다' });
+    warnings.push({ ruleId, code: 'invalid', message: 'rule-type·rule-action·object-locator.schema-name 이 필요합니다' });
     return undefined;
   }
-  return {
+  const rule: Rule = {
     id, type, action, schema,
     target: str(r['rule-target']),
     table: str(locator?.['table-name']),
     column: str(locator?.['column-name']),
     value: str(r.value),
   };
+  if (tooLong(rule.id, rule.type, rule.action, rule.target, rule.schema, rule.table, rule.column, rule.value)) {
+    warnings.push({ ruleId, code: 'invalid', message: `이름·값은 ${MAX_PATTERN_LENGTH}자까지만 지원합니다` });
+    return undefined;
+  }
+  return rule;
 }
 
 // rule-id 가 큰 쪽이 이긴다 (숫자로 비교할 수 없으면 문자열 비교)

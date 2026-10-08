@@ -22,8 +22,8 @@ interface Preview {
   warnings: DmsWarning[];
 }
 
-// 서버와 같은 core 파서로 미리 해석한다 (최종 판정은 서버가 다시 파싱해서 한다)
-async function readPreview(file: File): Promise<Preview | string> {
+// 서버와 같은 core 파서·같은 BASE Schema 이름으로 미리 해석한다 (최종 판정은 서버가 다시 파싱해서 한다)
+async function readPreview(file: File, fromSchema: string): Promise<Preview | string> {
   if (file.name.length > MAX_FILENAME || /[/\\]/.test(file.name)) return `파일명이 ${MAX_FILENAME}자를 넘거나 / \\ 문자를 포함합니다`;
   if (file.size > MAX_BYTES) return '파일이 너무 큽니다 (최대 20MB)';
   let source: string;
@@ -33,7 +33,7 @@ async function readPreview(file: File): Promise<Preview | string> {
     return '파일을 읽지 못했습니다';
   }
   try {
-    return { filename: file.name, source, ...parseDmsMapping(source) };
+    return { filename: file.name, source, ...parseDmsMapping(source, { fromSchema }) };
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
@@ -95,7 +95,7 @@ export function MigrationUploadDialog({ from, to, onClose }: { from: SchemaRef; 
   const pick = async (file: File | undefined) => {
     if (!file) return;
     const seq = ++pickSeq.current;
-    const result = await readPreview(file);
+    const result = await readPreview(file, from.name);
     if (seq !== pickSeq.current) return;
     upload.reset();
     setPreview(typeof result === 'string' ? undefined : result);

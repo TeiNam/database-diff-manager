@@ -53,6 +53,19 @@ describe('MigrationUploadDialog', () => {
     expect(screen.getByRole('button', { name: '매핑 올리기' })).toBeEnabled();
   });
 
+  it('BASE Schema 이름으로 룰을 고른다: 다른 스키마 룰이 앞에 있어도 As-Is 는 BASE 쪽, 해당 룰이 없으면 오류', async () => {
+    mockApi({});
+    const other = (schema: string) => ({ 'rule-type': 'selection', 'rule-id': '900', 'rule-name': '900', 'object-locator': { 'schema-name': schema, 'table-name': 't' }, 'rule-action': 'include' });
+    const mixed = JSON.stringify({ rules: [other('other'), ...JSON.parse(DMS_JSON).rules] });
+    renderWithProviders(<MigrationUploadDialog from={FROM} to={TO} onClose={() => undefined} />);
+    const user = userEvent.setup();
+    await user.upload(screen.getByLabelText('매핑 파일 선택'), jsonFile(mixed));
+    expect(await screen.findByRole('list', { name: 'Schema 이름 확인' })).toHaveTextContent('As-Is: 파일 legacy · Schema legacy — 일치');
+    await user.upload(screen.getByLabelText('매핑 파일 선택'), jsonFile(JSON.stringify({ rules: [other('other'), other('third')] }), 'multi.json'));
+    expect(await screen.findByRole('alert')).toHaveTextContent("multi.json: 매핑에 'legacy' 스키마 룰이 없습니다");
+    expect(screen.getByRole('button', { name: '매핑 올리기' })).toBeDisabled();
+  });
+
   it('서버 오류는 대화상자 안에 보여 주고 닫지 않는다', async () => {
     mockApi({ 'POST /api/migrations': json({ error: '관리자 권한이 필요합니다' }, 403) });
     const onClose = vi.fn();

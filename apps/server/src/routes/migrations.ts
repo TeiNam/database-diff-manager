@@ -49,6 +49,6 @@ export function migrationRoutes(app: FastifyInstance, ctx: AppContext): void {
 
   app.get('/migration-flow', { preHandler: requireLogin }, async (req) => {
     const { base, target } = FlowQuery.parse(req.query);
-    return computeMigrationFlow(ctx.db, base, target);
+    return computeMigrationFlow(ctx.db, ctx.cache, base, target);
   });
 }

@@ -38,16 +38,10 @@ export interface MigrationFlow {
 
 const TABLE_STATUSES: TableFlowStatus[] = ['ok', 'missing-target', 'missing-source', 'excluded', 'unmapped-target'];
 const COLUMN_STATUSES: ColumnFlowStatus[] = ['renamed', 'same', 'removed', 'added', 'dropped', 'missing'];
-const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-
-// 정확히 같은 이름을 먼저, 없으면 대소문자를 무시하고 찾는다
-export function findByName<T extends { name: string }>(items: readonly T[], name: string): T | undefined {
-  return items.find((x) => x.name === name) ?? items.find((x) => eq(x.name, name));
-}
 
 type Resolve<T> = (name: string) => T | undefined;
 
-// findByName 과 같은 결과를 Map 으로 O(1) 에 돌려준다 (같은 이름이 여럿이면 앞의 것)
+// 정확히 같은 이름을 먼저, 없으면 대소문자를 무시해 O(1) 로 찾는다 (같은 이름이 여럿이면 앞의 것)
 function nameIndex<T extends { name: string }>(items: readonly T[]): Resolve<T> {
   const exact = new Map<string, T>();
   const folded = new Map<string, T>();
@@ -108,20 +102,43 @@ export function buildMigrationFlow(base: SchemaModel, target: SchemaModel, mappi
   return { fromSchema: mapping.fromSchema, ...(mapping.toSchema ? { toSchema: mapping.toSchema } : {}), tables: rows, totals: totalsOf(rows) };
 }
 
-// diff 에 넘길 rename 매핑. 이름은 모델의 실제 표기로 맞추고, 컬럼 매핑의 table 은 To-Be 테이블명이다.
-// 전환 표는 대소문자를 무시해 같다고 보지만 diffSchemas 는 구분하므로, 표기만 달라도 rename 으로 넘겨 DROP+ADD 를 막는다
-export function toRenameMappings(mapping: DmsMapping, base: SchemaModel, target: SchemaModel): RenameMapping[] {
-  const out: RenameMapping[] = [];
-  for (const row of buildMigrationFlow(base, target, mapping).tables) {
-    if (row.status !== 'ok') continue;
-    if (row.asIs !== row.toBe) out.push({ kind: 'table', from: row.asIs!, to: row.toBe! });
-    for (const c of row.columns) {
-      const isPaired = c.status === 'renamed' || c.status === 'same';
-      if (isPaired && c.asIs !== c.toBe) out.push({ kind: 'column', table: row.toBe!, from: c.asIs!, to: c.toBe! });
-    }
-  }
-  return out;
+// 전환 표에서 짝이 맞은(ok) 테이블과 그 안의 짝이 맞은 컬럼만 모은다. 표기가 같아도 넘긴다 (호출 쪽이 거른다)
+interface PairedTable {
+  asIs: string;
+  toBe: string;
+  columns: Array<{ asIs: string; toBe: string }>;
 }
+
+const pairedTables = (flow: MigrationFlow): PairedTable[] =>
+  flow.tables.filter((row) => row.status === 'ok').map((row) => ({
+    asIs: row.asIs!,
+    toBe: row.toBe!,
+    columns: row.columns.filter((c) => c.status === 'renamed' || c.status === 'same').map((c) => ({ asIs: c.asIs!, toBe: c.toBe! })),
+  }));
+
+export type RenameDirection = 'forward' | 'reverse';
+
+// 전환 표 → diff 용 rename 매핑. 이름은 모델의 실제 표기로 맞춘다.
+// forward(BASE = As-Is): As-Is → To-Be, 컬럼 매핑의 table 은 TARGET 인 To-Be 테이블명.
+// reverse(BASE = To-Be): To-Be → As-Is 로 뒤집고, 컬럼 매핑의 table 은 TARGET 인 As-Is 테이블명.
+// remove-column 은 역방향에선 ADD COLUMN 이 되므로 따로 넘기지 않고 diff 에 맡긴다.
+// 전환 표는 대소문자를 무시해 같다고 보지만 diffSchemas 는 구분하므로, 표기만 달라도 rename 으로 넘겨 DROP+ADD 를 막는다
+export function flowRenameMappings(flow: MigrationFlow, direction: RenameDirection = 'forward'): RenameMapping[] {
+  const isReverse = direction === 'reverse';
+  return pairedTables(flow).flatMap((t) => {
+    const [from, to] = isReverse ? [t.toBe, t.asIs] : [t.asIs, t.toBe];
+    const columns = t.columns.filter((c) => c.asIs !== c.toBe)
+      .map((c) => ({ kind: 'column' as const, table: to, from: isReverse ? c.toBe : c.asIs, to: isReverse ? c.asIs : c.toBe }));
+    return from !== to ? [{ kind: 'table' as const, from, to }, ...columns] : columns;
+  });
+}
+
+export const toRenameMappings = (mapping: DmsMapping, base: SchemaModel, target: SchemaModel): RenameMapping[] =>
+  flowRenameMappings(buildMigrationFlow(base, target, mapping), 'forward');
+
+// 역방향 비교(BASE = To-Be 모델, TARGET = As-Is 모델)용. 인자는 정방향과 같은 순서(As-Is, To-Be)로 받는다
+export const toReverseRenameMappings = (mapping: DmsMapping, asIs: SchemaModel, toBe: SchemaModel): RenameMapping[] =>
+  flowRenameMappings(buildMigrationFlow(asIs, toBe, mapping), 'reverse');
 
 function tableRow(asIs: Table, index: FlowIndex, consumed: Set<Table>): TableFlow {
   if (!index.isSelected(asIs.name)) return { asIs: asIs.name, status: 'excluded', renamed: false, columns: [] };

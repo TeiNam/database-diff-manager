@@ -64,11 +64,11 @@ export function listMigrations(db: Db, fromSchemaId: number, toSchemaId: number)
   return all<MetaRecord>(db, `${META_SQL} WHERE m.from_schema_id = ? AND m.to_schema_id = ? ORDER BY m.revision DESC`, fromSchemaId, toSchemaId).map(toMeta);
 }
 
-export function latestMigration(db: Db, fromSchemaId: number, toSchemaId: number): (MigrationMeta & { source: string }) | undefined {
-  const r = one<MetaRecord & { source: string }>(db,
-    `SELECT ${META_COLUMNS}, m.source ${FROM} WHERE m.from_schema_id = ? AND m.to_schema_id = ? ORDER BY m.revision DESC LIMIT 1`,
-    fromSchemaId, toSchemaId);
-  return r ? { ...toMeta(r), source: r.source } : undefined;
+// 쌍의 최신 리비전 id 만 본다 (원문은 캐시 miss 때만 getMigrationSource 로 읽는다)
+export function latestMigrationId(db: Db, fromSchemaId: number, toSchemaId: number): number | undefined {
+  const r = one<{ id: number }>(db,
+    'SELECT id FROM migration_mappings WHERE from_schema_id = ? AND to_schema_id = ? ORDER BY revision DESC LIMIT 1', fromSchemaId, toSchemaId);
+  return r ? Number(r.id) : undefined;
 }
 
 export function getMigrationSource(db: Db, id: number): { filename: string; text: string } {

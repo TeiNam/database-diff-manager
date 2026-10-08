@@ -128,3 +128,59 @@ describe('parseDmsMapping: 중복', () => {
     expect(warnings).toEqual(dup('1', '2'));
   });
 });
+
+describe('parseDmsMapping: fromSchema 지정 (다중 스키마)', () => {
+  const inSchema = (id: number, schema: string, table: string, value: string) =>
+    rule(id, { 'rule-type': 'transformation', 'rule-target': 'table', 'object-locator': { 'schema-name': schema, 'table-name': table }, 'rule-action': 'rename', value });
+  const text = JSON.stringify({ rules: [inSchema(1, 'other', 'o1', 'p1'), inSchema(2, 'Legacy', 't1', 'u1'), inSchema(3, 'legacy', 't2', 'u2')] });
+
+  it('지정한 스키마의 룰만 쓴다 (대소문자 무시, 앞에 다른 스키마 룰이 있어도)', () => {
+    const { mapping, warnings } = parseDmsMapping(text, { fromSchema: 'LEGACY' });
+    expect(mapping.tables.map((t) => t.from)).toEqual(['t1', 't2']);
+    expect(mapping.fromSchema).toBe('Legacy');
+    expect(warnings.map((w) => [w.ruleId, w.code])).toEqual([['1', 'invalid']]);
+  });
+
+  it('지정하지 않으면 기존처럼 첫 non-wildcard 스키마를 쓴다', () => {
+    expect(parseDmsMapping(text).mapping.tables.map((t) => t.from)).toEqual(['o1']);
+  });
+
+  it('지정 스키마의 룰이 없고 파일에 여러 스키마가 있으면 DmsParseError', () => {
+    expect(() => parseDmsMapping(text, { fromSchema: 'nope' })).toThrow(new DmsParseError("매핑에 'nope' 스키마 룰이 없습니다"));
+    expect(() => parseDmsMapping(JSON.stringify({ rules: [] }), { fromSchema: 'legacy' })).toThrow(DmsParseError);
+  });
+
+  it('파일의 스키마가 하나뿐이면 이름이 달라도 그 스키마로 본다 (Schema 이름을 바꿔 올리는 경우)', () => {
+    const one = JSON.stringify({ rules: [inSchema(1, 'astore', 't1', 'u1')] });
+    const { mapping } = parseDmsMapping(one, { fromSchema: 'legacy' });
+    expect([mapping.fromSchema, mapping.tables.length]).toEqual(['astore', 1]);
+  });
+});
+
+describe('parseDmsMapping: 길이 상한 (DoS 방지)', () => {
+  const huge = 'x'.repeat(1_000_000);
+
+  it('거대한 schema-name 룰은 fromSchema 후보가 되지 않고 invalid 로 버린다', () => {
+    const rules = [rule(1, { 'rule-type': 'selection', 'object-locator': { 'schema-name': huge, 'table-name': 't' }, 'rule-action': 'include' }),
+      ...Array.from({ length: 2000 }, (_, i) => sel(i + 2, `t${i}`))];
+    const started = Date.now();
+    const { mapping, warnings } = parse(rules);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(mapping.fromSchema).toBe('legacy');
+    expect(mapping.selection.include).toHaveLength(2000);
+    expect(warnings.map((w) => [w.ruleId, w.code])).toEqual([['1', 'invalid']]);
+  });
+
+  it('value·column·rule-id·rule-type 도 길이를 검사하고, 경고 메시지는 짧게 자른다', () => {
+    const { mapping, warnings } = parse([
+      tableRename(1, 't', huge),
+      rule(2, { 'rule-type': 'transformation', 'rule-target': 'column', 'object-locator': { 'schema-name': 'legacy', 'table-name': 't', 'column-name': huge }, 'rule-action': 'rename', value: 'c' }),
+      { ...tableRename(3, 't', 'u'), 'rule-id': huge },
+      rule(4, { 'rule-type': huge, 'object-locator': { 'schema-name': 'legacy' }, 'rule-action': 'x' }),
+    ]);
+    expect(mapping.tables).toEqual([]);
+    expect(mapping.columns).toEqual([]);
+    expect(warnings).toHaveLength(4);
+    for (const w of warnings) expect(w.ruleId.length + w.message.length).toBeLessThan(200);
+  });
+});

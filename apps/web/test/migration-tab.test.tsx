@@ -28,6 +28,7 @@ describe('MigrationTab: 매핑 없음', () => {
     mockApi({ ...me('admin'), [FLOW_URL]: { mapping: null } });
     renderWithProviders(<MigrationTab data={data()} />);
     expect(await screen.findByText(/전환 매핑이 없습니다/)).toBeInTheDocument();
+    expect(screen.getByText(/역방향 비교에는 매핑을 뒤집어 rename 으로 반영합니다/)).toBeInTheDocument();
     await userEvent.setup().click(await screen.findByRole('button', { name: '매핑 올리기' }));
     expect(screen.getByRole('dialog', { name: '전환 매핑 올리기' })).toBeInTheDocument();
   });

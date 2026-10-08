@@ -44,6 +44,7 @@ export function MigrationTab({ data }: { data: DiffResponse }) {
       <div className={s.wrap}>
         <div className={s.empty}>
           <p>{from.name} → {to.name} 쌍에는 전환 매핑이 없습니다. AWS DMS table-mapping JSON 을 올리면 테이블·컬럼 대응을 보여 주고 rename 을 diff 에 반영합니다.</p>
+          <p className={s.meta}>역방향 비교에는 매핑을 뒤집어 rename 으로 반영합니다 ({to.name} → {from.name} 쌍에 매핑이 있으면 이 비교의 DDL 은 DROP 대신 RENAME 을 씁니다).</p>
           {isAdmin && <button type="button" className={s.btn} onClick={() => setUploading(true)}>매핑 올리기</button>}
         </div>
         {dialog}
