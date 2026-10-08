@@ -25,6 +25,8 @@ export function openDb(path: string): Db {
   try {
     db.exec(`${PRAGMAS};`);
     migrate(db);
+    // 오래 떠 있는 서버도 쿼리 통계를 갖도록 기동 시 한 번 (종료 시에도 실행)
+    db.exec('PRAGMA optimize=0x10002');
   } catch (e) {
     db.close();
     throw e;
@@ -62,7 +64,14 @@ export function migrate(db: Db, target = Number.POSITIVE_INFINITY): void {
     rebuilt = applyMigration(db, version, readFileSync(join(MIGRATIONS_DIR, file), 'utf8')) || rebuilt;
   }
   // 테이블을 다시 만들면 빈 페이지가 남으므로 트랜잭션 밖에서 한 번 정리한다
-  if (rebuilt) db.exec('VACUUM');
+  if (rebuilt) {
+    // 디스크 부족 등으로 실패해도 데이터는 이미 커밋됐으므로 기동은 계속한다
+    try {
+      db.exec('VACUUM');
+    } catch (e) {
+      console.warn('마이그레이션 후 VACUUM 실패 (데이터는 정상):', e);
+    }
+  }
 }
 
 // 마이그레이션 하나를 한 트랜잭션으로 적용한다. foreign_keys 를 끄고 실행했으면 true
@@ -89,7 +98,8 @@ export function applyMigration(db: Db, version: number, sql: string): boolean {
   return fkOff;
 }
 
-// 예외가 나면 롤백한다. fn 안에서 트랜잭션이 이미 끝났으면(오류로 자동 롤백 등) ROLLBACK 을 건너뛰어 원래 오류를 그대로 던진다
+// 예외가 나면 롤백하고 원래 오류를 던진다. 트랜잭션이 이미 끝났으면(오류로 자동 롤백 등) ROLLBACK 오류는 무시한다
+// (db.isTransaction 은 Node 22.13 에 없으므로 쓰지 않는다)
 export function tx<T>(db: Db, fn: () => T): T {
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -97,7 +107,11 @@ export function tx<T>(db: Db, fn: () => T): T {
     db.exec('COMMIT');
     return result;
   } catch (e) {
-    if (db.isTransaction) db.exec('ROLLBACK');
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // 이미 롤백됨 — 원래 오류를 가리지 않는다
+    }
     throw e;
   }
 }
