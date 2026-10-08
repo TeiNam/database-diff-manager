@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- 좌측 상단 로고와 같은 비율: 22px 상자·반경 5px·아이콘 14px → 32px 기준으로 확대 -->
+  <style>
+    .box { fill: #0369a1; }
+    .icon { stroke: #f8fafc; }
+    @media (prefers-color-scheme: dark) {
+      .box { fill: #38bdf8; }
+      .icon { stroke: #0f172a; }
+    }
+  </style>
+  <rect class="box" width="32" height="32" rx="7.3" />
+  <g transform="translate(5.8 5.8) scale(0.848)">
+    <path class="icon" d="M7 4 3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+  </g>
+</svg>
