@@ -1,5 +1,6 @@
-# main 푸시·v* 태그에서 테스트 후 Docker 이미지를 빌드해 GHCR 에 올린다.
-# 문서만 바뀐 푸시는 실행하지 않는다(paths-ignore). 태그 푸시에는 경로 필터가 적용되지 않는다.
+# main 푸시마다 테스트 → 제품 버전(vX.Y.N) 태그·Release 생성 → 그 버전으로 Docker 이미지를 빌드해 GHCR 에 올린다.
+# 버전: apps/web/package.json 의 major.minor + (같은 major.minor 의 마지막 태그 패치 + 1). scripts/next-version.mjs 참고.
+# 문서만 바뀐 푸시는 실행하지 않는다(paths-ignore). 사람이 직접 v* 태그를 푸시하면 그 태그 버전으로만 빌드한다.
 name: docker
 
 on:
@@ -13,9 +14,10 @@ on:
       - '.gitignore'
   workflow_dispatch:
 
+# 버전 번호가 순서대로 매겨지도록 같은 ref 의 실행은 취소하지 않고 차례로 돈다
 concurrency:
   group: docker-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -31,8 +33,40 @@ jobs:
       - run: npm test
       - run: npm run build
 
-  image:
+  version:
     needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: v
+        name: 버전 계산 (태그 푸시면 그 태그, 아니면 다음 패치)
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            node scripts/next-version.mjs --self-test
+            version="$(node scripts/next-version.mjs)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "제품 버전: ${version}" >> "$GITHUB_STEP_SUMMARY"
+      - name: 태그와 Release 만들기
+        if: github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          git tag "v${VERSION}" "${GITHUB_SHA}"
+          git push origin "v${VERSION}"
+          gh release create "v${VERSION}" --target "${GITHUB_SHA}" --title "v${VERSION}" --generate-notes
+
+  image:
+    needs: version
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -52,8 +86,8 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},value=v${{ needs.version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ needs.version.outputs.version }}
             type=sha,format=short
       - uses: docker/build-push-action@v6
         with:
@@ -61,6 +95,7 @@ jobs:
           file: docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: APP_VERSION=${{ needs.version.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
