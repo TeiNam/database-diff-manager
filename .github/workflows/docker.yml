@@ -19,10 +19,11 @@ on:
 permissions:
   contents: read
 
-# main·태그 실행을 하나의 그룹으로 묶어 버전 계산·태그 생성이 겹치지 않게 한다.
-# 실행 중인 것은 취소하지 않지만, 대기 실행은 하나만 유지되어 연속 푸시 중 중간 것은 건너뛸 수 있다
+# main·태그 실행만 하나의 그룹으로 묶어 버전 계산·태그 생성이 겹치지 않게 한다.
+# (기능 브랜치 수동 실행은 test 만 돌므로 별도 그룹 — 대기 중인 릴리스 실행을 밀어내지 않게)
+# 실행 중인 것은 취소하지 않지만, 대기 실행은 그룹당 하나만 유지되어 연속 푸시 중 중간 것은 건너뛸 수 있다
 concurrency:
-  group: docker-release
+  group: ${{ (github.ref == 'refs/heads/main' || github.ref_type == 'tag') && 'docker-release' || format('docker-{0}', github.ref) }}
   cancel-in-progress: false
 
 jobs:
@@ -76,13 +77,21 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # latest 판정은 이 잡에서 다시 한다 ("실패한 잡만 재실행" 때 앞선 판정이 낡았을 수 있음)
+      - id: head
+        name: 이 커밋이 지금 origin/main HEAD 인지
+        run: |
+          main_sha="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "${main_sha}" = "${GITHUB_SHA}" ]; then echo "latest=true" >> "$GITHUB_OUTPUT"; else echo "latest=false" >> "$GITHUB_OUTPUT"; fi
       - id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository }}
-          # latest 는 이 커밋이 지금 origin/main HEAD 일 때만 (오래된 run 재실행이 latest 를 되돌리지 않게)
+          # semver 태그가 latest 를 자동으로 붙이지 않게 끈다 (기본 flavor latest=auto)
+          flavor: latest=false
+          # latest 는 이 커밋이 지금 origin/main HEAD 일 때만 (오래된 run 재실행·옛 태그 푸시가 latest 를 되돌리지 않게)
           tags: |
-            type=raw,value=latest,enable=${{ needs.version.outputs.latest == 'true' }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.latest == 'true' && steps.head.outputs.latest == 'true' }}
             type=semver,pattern={{version}},value=v${{ needs.version.outputs.version }}
             type=semver,pattern={{major}}.{{minor}},value=v${{ needs.version.outputs.version }}
             type=sha,format=short
@@ -111,9 +120,14 @@ jobs:
         if: needs.version.outputs.tag_exists != 'true'
         env:
           VERSION: ${{ needs.version.outputs.version }}
+        # "실패한 잡만 재실행" 이면 앞선 시도에서 태그를 이미 푸시했을 수 있어 원격을 다시 확인한다
         run: |
-          git tag "v${VERSION}" "${GITHUB_SHA}"
-          git push origin "v${VERSION}"
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" > /dev/null; then
+            echo "v${VERSION} 태그가 이미 있습니다"
+          else
+            git tag "v${VERSION}" "${GITHUB_SHA}"
+            git push origin "v${VERSION}"
+          fi
       - name: Release 만들기 (이미 있으면 건너뜀)
         env:
           GH_TOKEN: ${{ github.token }}
