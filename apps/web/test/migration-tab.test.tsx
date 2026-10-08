@@ -18,7 +18,7 @@ const data = (baseSchema = 1): DiffResponse => ({
 const MAPPING = { id: 5, fromSchemaId: 1, toSchemaId: 2, revision: 2, filename: 'mapping.json', ruleCount: 19, note: null, uploadedBy: 'admin', uploadedAt: '2026-10-08T00:00:00.000Z' };
 const WARNING = { ruleId: '50', code: 'unsupported', message: 'column / convert-lowercase 룰은 반영하지 않습니다' };
 const FLOW_URL = '/api/migration-flow?base=11&target=12';
-const me = (role: 'admin' | 'viewer') => ({ '/api/auth/me': { id: 1, username: role, role } });
+const me = (role: 'admin' | 'dba' | 'viewer') => ({ '/api/auth/me': { id: 1, username: role, role } });
 const rowButtons = () => screen.getAllByRole('button', { name: /컬럼 (펼치기|접기)$/ });
 // 전환 표의 테이블 행 첫 칸 (As-Is 이름, 없으면 —)
 const firstCells = () => within(screen.getByRole('table', { name: '전환 표' })).getAllByRole('row').slice(1).map((r) => r.querySelector('td')!.textContent);
@@ -31,6 +31,12 @@ describe('MigrationTab: 매핑 없음', () => {
     expect(screen.getByText(/역방향 비교에는 매핑을 뒤집어 rename 으로 반영합니다/)).toBeInTheDocument();
     await userEvent.setup().click(await screen.findByRole('button', { name: '매핑 올리기' }));
     expect(screen.getByRole('dialog', { name: '전환 매핑 올리기' })).toBeInTheDocument();
+  });
+
+  it('dba 에게도 [매핑 올리기] 가 있다', async () => {
+    mockApi({ ...me('dba'), [FLOW_URL]: { mapping: null } });
+    renderWithProviders(<MigrationTab data={data()} />);
+    expect(await screen.findByRole('button', { name: '매핑 올리기' })).toBeInTheDocument();
   });
 
   it('viewer 에게는 올리기 버튼이 없다', async () => {
@@ -51,7 +57,7 @@ describe('MigrationTab: 매핑 없음', () => {
 });
 
 describe('MigrationTab: 매핑 있음', () => {
-  const routes = (role: 'admin' | 'viewer') => ({ ...me(role), [FLOW_URL]: { mapping: MAPPING, flow: fixtureFlow, warnings: [WARNING] } });
+  const routes = (role: 'admin' | 'dba' | 'viewer') => ({ ...me(role), [FLOW_URL]: { mapping: MAPPING, flow: fixtureFlow, warnings: [WARNING] } });
 
   it('헤더(파일·리비전·룰 수·검증 수)와 경고', async () => {
     mockApi(routes('viewer'));
@@ -135,5 +141,21 @@ describe('MigrationTab: 매핑 있음', () => {
     await user.click(within(list).getByRole('button', { name: 'r2 삭제' }));
     await waitFor(() => expect(calls.some((c) => c.url === '/api/migrations/5' && c.init.method === 'DELETE')).toBe(true));
     confirm.mockRestore();
+  });
+
+  it('리비전 목록: dba 는 삭제할 수 있고 viewer 는 원본만 받는다', async () => {
+    const revisions = { '/api/migrations?from=1&to=2': [MAPPING] };
+    mockApi({ ...routes('dba'), ...revisions });
+    const { unmount } = renderWithProviders(<MigrationTab data={data()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: '리비전 목록' }));
+    expect(await screen.findByRole('button', { name: 'r2 삭제' })).toBeInTheDocument();
+    unmount();
+    mockApi({ ...routes('viewer'), ...revisions });
+    renderWithProviders(<MigrationTab data={data()} />);
+    await user.click(await screen.findByRole('button', { name: '리비전 목록' }));
+    const list = await screen.findByRole('table', { name: '전환 매핑 리비전' });
+    expect(within(list).getByRole('link', { name: '원본' })).toBeInTheDocument();
+    expect(within(list).queryByRole('button', { name: 'r2 삭제' })).not.toBeInTheDocument();
   });
 });

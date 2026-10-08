@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../app';
-import { requireAdmin, requireLogin } from '../auth/plugin';
+import { requireEditor, requireLogin } from '../auth/plugin';
 import { createDatabase, deleteDatabase, deleteSchema, getSchema, getTree, updateDatabase } from '../repos/catalog';
 import { IdParams, NameSchema } from '../schemas';
 
@@ -17,21 +17,21 @@ export function catalogRoutes(app: FastifyInstance, ctx: AppContext): void {
 
   app.get('/schemas/:id', { preHandler: requireLogin }, async (req) => getSchema(ctx.db, IdParams.parse(req.params).id));
 
-  app.delete('/schemas/:id', { preHandler: requireAdmin }, async (req) => {
+  app.delete('/schemas/:id', { preHandler: requireEditor }, async (req) => {
     deleteSchema(ctx.db, IdParams.parse(req.params).id, DeleteBody.parse(req.body).confirmName);
     ctx.cache.clear(); // 버전이 연쇄 삭제되므로 diff 캐시를 비운다(rowid 재사용 대비)
     return { ok: true };
   });
 
-  app.post('/databases', { preHandler: requireAdmin }, async (req, reply) => {
+  app.post('/databases', { preHandler: requireEditor }, async (req, reply) => {
     return reply.status(201).send(createDatabase(ctx.db, CreateBody.parse(req.body)));
   });
 
-  app.patch('/databases/:id', { preHandler: requireAdmin }, async (req) => {
+  app.patch('/databases/:id', { preHandler: requireEditor }, async (req) => {
     return updateDatabase(ctx.db, IdParams.parse(req.params).id, PatchBody.parse(req.body));
   });
 
-  app.delete('/databases/:id', { preHandler: requireAdmin }, async (req) => {
+  app.delete('/databases/:id', { preHandler: requireEditor }, async (req) => {
     deleteDatabase(ctx.db, IdParams.parse(req.params).id, DeleteBody.parse(req.body).confirmName);
     ctx.cache.clear(); // 버전이 연쇄 삭제되므로 diff 캐시를 비운다(rowid 재사용 대비)
     return { ok: true };

@@ -2,7 +2,7 @@ import type { ParseWarning } from '@tdm/core';
 import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../app';
-import { requireAdmin } from '../auth/plugin';
+import { requireEditor } from '../auth/plugin';
 import { AppError } from '../errors';
 import { MAX_UPLOAD_FILES, UPLOAD_BODY_LIMIT } from '../limits';
 import { NameSchema, NoteSchema, SafeFilename } from '../schemas';
@@ -45,7 +45,7 @@ function parseMeta(raw: string | undefined): FileMeta[] {
 
 export function uploadRoutes(app: FastifyInstance, ctx: AppContext): void {
   // 파일 크기는 multipart limits(파일당 20MB)로 제한한다. JSON용 기본 bodyLimit(1MB)이 업로드에 걸리지 않도록 라우트 한도를 넓힌다
-  app.post('/', { preHandler: requireAdmin, bodyLimit: UPLOAD_BODY_LIMIT }, async (req) => {
+  app.post('/', { preHandler: requireEditor, bodyLimit: UPLOAD_BODY_LIMIT }, async (req) => {
     if (!req.isMultipart()) throw new AppError(400, 'multipart/form-data 요청이어야 합니다');
     const files = new Map<string, Buffer>();
     let metaRaw: string | undefined;

@@ -106,6 +106,22 @@ describe('상단바', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: /테마/ }));
     expect(document.documentElement.dataset.theme).toBe('light');
   });
+
+  it('dba 에게는 업로드 버튼만 있고 계정 관리 링크는 없다', async () => {
+    mockApi({ ...ME, '/api/auth/me': { id: 3, username: 'park', role: 'dba' } });
+    renderApp('/');
+    expect(await screen.findByText('park')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '업로드' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '계정 관리' })).not.toBeInTheDocument();
+  });
+
+  it('admin 에게는 업로드 버튼과 계정 관리 링크가 있다', async () => {
+    mockApi({ ...ME, '/api/auth/me': { id: 1, username: 'boss', role: 'admin' } });
+    renderApp('/');
+    expect(await screen.findByText('boss')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '업로드' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '계정 관리' })).toBeInTheDocument();
+  });
 });
 
 describe('useSchemaContext.set', () => {

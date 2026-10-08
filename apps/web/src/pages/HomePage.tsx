@@ -1,20 +1,21 @@
 import { useDeleteDatabase, useMe, useTree } from '../api/hooks';
 import { confirmByName } from '../lib/confirm-name';
+import { canEdit } from '../lib/roles';
 import s from './Page.module.css';
 
 export function HomePage() {
   const me = useMe();
-  const isAdmin = me.data?.role === 'admin';
+  const isEditor = canEdit(me.data);
   return (
     <section className={s.page}>
       <h1 className={s.title}>스키마를 선택하세요</h1>
-      <p className={s.empty}>왼쪽 트리에서 Database와 Schema를 고르면 버전 비교 화면이 열립니다. 아직 스키마가 없으면 관리자가 정의서를 업로드해야 합니다.</p>
-      {isAdmin && <DatabaseList />}
+      <p className={s.empty}>왼쪽 트리에서 Database와 Schema를 고르면 버전 비교 화면이 열립니다. 아직 스키마가 없으면 관리자나 DBA 가 정의서를 업로드해야 합니다.</p>
+      {isEditor && <DatabaseList />}
     </section>
   );
 }
 
-// admin 전용: Schema 가 하나도 남지 않은 Database 는 이력 화면이 없으므로 여기서 지운다
+// admin·dba 전용: Schema 가 하나도 남지 않은 Database 는 이력 화면이 없으므로 여기서 지운다
 function DatabaseList() {
   const tree = useTree();
   const remove = useDeleteDatabase();

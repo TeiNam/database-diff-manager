@@ -48,10 +48,13 @@ describe('PUT /api/diff/renames', () => {
     const before = (await ctx.app.inject({ method: 'GET', url: `/api/diff?base=${v1}&target=${v2}`, headers: ctx.viewer })).json();
     expect(before.diff.renameCandidates).toEqual([{ kind: 'table', from: 'members', to: 'member' }]);
 
-    const bad = await ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.viewer, payload: { base: v1, target: v2, renames: [{ kind: 'column', from: 'a', to: 'b' }] } });
+    const denied = await ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.viewer, payload: { base: v1, target: v2, renames: [{ kind: 'table', from: 'members', to: 'member' }] } });
+    expect(denied.statusCode).toBe(403); // viewer 는 읽기 전용
+
+    const bad = await ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.dba, payload: { base: v1, target: v2, renames: [{ kind: 'column', from: 'a', to: 'b' }] } });
     expect(bad.statusCode).toBe(400);
 
-    const saved = await ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.viewer, payload: { base: v1, target: v2, renames: [{ kind: 'table', from: 'members', to: 'member' }] } });
+    const saved = await ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.dba, payload: { base: v1, target: v2, renames: [{ kind: 'table', from: 'members', to: 'member' }] } });
     expect(saved.statusCode).toBe(200);
     expect(saved.json().diff.tables.map((t: { op: string }) => t.op)).toEqual(['rename']);
     expect(saved.json().ddl).toContain('RENAME TABLE `members` TO `member`');
@@ -59,7 +62,7 @@ describe('PUT /api/diff/renames', () => {
     const reloaded = (await ctx.app.inject({ method: 'GET', url: `/api/diff?base=${v1}&target=${v2}`, headers: ctx.viewer })).json();
     expect(reloaded.renames).toEqual([{ kind: 'table', from: 'members', to: 'member', source: 'manual' }]);
 
-    const cleared = await ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.viewer, payload: { base: v1, target: v2, renames: [] } });
+    const cleared = await ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.dba, payload: { base: v1, target: v2, renames: [] } });
     expect(cleared.json().diff.tables.map((t: { op: string }) => t.op)).toEqual(['drop', 'add']);
   });
 });

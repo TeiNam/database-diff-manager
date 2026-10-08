@@ -31,6 +31,12 @@ export async function requireLogin(req: FastifyRequest): Promise<void> {
   if (!req.user) throw new AppError(401, '로그인이 필요합니다');
 }
 
+// 데이터 변경(업로드·삭제·매핑·rename 저장)은 admin·dba 만 한다. viewer 는 읽기 전용
+export async function requireEditor(req: FastifyRequest): Promise<void> {
+  await requireLogin(req);
+  if (req.user!.role !== 'admin' && req.user!.role !== 'dba') throw new AppError(403, '데이터 변경 권한이 필요합니다 (admin·dba)');
+}
+
 export async function requireAdmin(req: FastifyRequest): Promise<void> {
   await requireLogin(req);
   if (req.user!.role !== 'admin') throw new AppError(403, '관리자 권한이 필요합니다');

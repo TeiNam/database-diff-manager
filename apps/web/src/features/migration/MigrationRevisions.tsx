@@ -2,8 +2,8 @@ import { useDeleteMigration, useMigrations } from '../../api/hooks';
 import { formatDateTime } from '../../lib/format';
 import s from './migration.module.css';
 
-// 쌍의 리비전 목록. 최신만 적용되므로 선택은 없고, 원본 다운로드와(admin) 삭제만 한다
-export function MigrationRevisions({ from, to, isAdmin }: { from: number; to: number; isAdmin: boolean }) {
+// 쌍의 리비전 목록. 최신만 적용되므로 선택은 없고, 원본 다운로드와 삭제(admin·dba)만 한다
+export function MigrationRevisions({ from, to, canEdit }: { from: number; to: number; canEdit: boolean }) {
   const list = useMigrations(from, to, true);
   const remove = useDeleteMigration();
   if (list.error) return <p role="alert" className={s.error}>{list.error.message}</p>;
@@ -25,7 +25,7 @@ export function MigrationRevisions({ from, to, isAdmin }: { from: number; to: nu
               <td>
                 <div className={s.toolbar}>
                   <a className={s.btn} href={`/api/migrations/${m.id}/source`} download>원본</a>
-                  {isAdmin && (
+                  {canEdit && (
                     <button type="button" className={`${s.btn} ${s.danger}`} aria-label={`r${m.revision} 삭제`} disabled={remove.isPending}
                       onClick={() => confirmDelete(m.revision) && remove.mutate(m.id)}>삭제</button>
                   )}

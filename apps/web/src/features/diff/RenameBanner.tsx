@@ -1,7 +1,8 @@
 import type { RenameMapping } from '@tdm/core';
-import { useSaveRenames } from '../../api/hooks';
+import { useMe, useSaveRenames } from '../../api/hooks';
 import type { DiffResponse, SourcedRename } from '../../api/types';
 import { Banner } from '../../components/Banner';
+import { canEdit } from '../../lib/roles';
 import s from './diff.module.css';
 
 const describe = (r: RenameMapping) => (r.kind === 'table' ? `${r.from} → ${r.to}` : `${r.table}.${r.from} → ${r.to}`);
@@ -13,7 +14,10 @@ const manualOnly = (renames: SourcedRename[]): RenameMapping[] =>
   renames.filter((r) => !isDms(r)).map(({ source: _source, ...r }) => r);
 
 // rename 후보를 보여 주고, 사용자가 확정하면 (base, target) 쌍에 수동 매핑을 저장한다. 적용된 rename 은 출처(수동/DMS)를 함께 보여 준다
+// 저장·해제는 admin·dba 만 한다. viewer 에게는 읽기 전용으로 보여 준다
 export function RenameBanner({ data }: { data: DiffResponse }) {
+  const me = useMe();
+  const isEditor = canEdit(me.data);
   const save = useSaveRenames();
   const manual = manualOnly(data.renames);
   const dms = data.renames.filter(isDms);
@@ -26,9 +30,10 @@ export function RenameBanner({ data }: { data: DiffResponse }) {
           {candidates.map((c) => (
             <div key={describe(c)} className={s.renameRow}>
               <span><code>{c.kind === 'table' ? c.from : `${c.table}.${c.from}`}</code> 삭제 + <code>{c.to}</code> 추가 → 이름 변경일 수 있습니다</span>
-              <button type="button" className={s.linkBtn} disabled={save.isPending} onClick={() => apply([...manual, c])}>이름 변경으로 처리</button>
+              {isEditor && <button type="button" className={s.linkBtn} disabled={save.isPending} onClick={() => apply([...manual, c])}>이름 변경으로 처리</button>}
             </div>
           ))}
+          {!isEditor && <div className={s.renameRow}>읽기 전용: 이름 변경은 DBA·관리자가 처리할 수 있습니다</div>}
         </Banner>
       )}
       {manual.length > 0 && (
@@ -37,7 +42,7 @@ export function RenameBanner({ data }: { data: DiffResponse }) {
             <div key={describe(r)} className={s.renameRow}>
               <span className={s.source}>수동</span>
               <span>{describe(r)}</span>
-              <button type="button" className={s.linkBtn} disabled={save.isPending} onClick={() => apply(manual.filter((x) => !same(x, r)))}>해제</button>
+              {isEditor && <button type="button" className={s.linkBtn} disabled={save.isPending} onClick={() => apply(manual.filter((x) => !same(x, r)))}>해제</button>}
             </div>
           ))}
         </Banner>
