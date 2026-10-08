@@ -76,4 +76,55 @@ describe('selection', () => {
     const { mapping } = parse([sel(1, 'tb_%'), sel(2, 'tb_tmp%', 'exclude')]);
     expect(['tb_prm', 'tb_tmp_bak', 'audit'].map((t) => isSelected(mapping, t))).toEqual([true, false, false]);
   });
+
+  it('exclude 만 있으면 나머지는 전부 대상', () => {
+    const { mapping } = parse([sel(1, 'tb_tmp%', 'exclude')]);
+    expect(['tb_prm', 'TB_TMP_BAK'].map((t) => isSelected(mapping, t))).toEqual([true, false]);
+  });
+
+  it('table-name 이 없는 selection 은 % 로 본다', () => {
+    const { mapping } = parse([rule(1, { 'rule-type': 'selection', 'object-locator': { 'schema-name': 'legacy' }, 'rule-action': 'include' })]);
+    expect(mapping.selection.include).toEqual(['%']);
+    expect(isSelected(mapping, 'x')).toBe(true);
+  });
+
+  it('% 가 많은 패턴도 긴 이름에서 바로 끝난다', () => {
+    const pattern = Array.from({ length: 60 }, () => 'a').join('%') + '%b';
+    expect(likeMatch(pattern, 'a'.repeat(5000))).toBe(false);
+    expect(likeMatch('a%%%b', 'aXb')).toBe(true);
+  });
+
+  it('너무 긴 패턴의 룰은 invalid 경고로 무시한다', () => {
+    const { mapping, warnings } = parse([sel(1, 'a'.repeat(257))]);
+    expect(mapping.selection.include).toEqual([]);
+    expect(warnings.map((w) => [w.ruleId, w.code])).toEqual([['1', 'invalid']]);
+  });
+});
+
+describe('parseDmsMapping: 중복', () => {
+  const col = (id: number, name: string, value: string) =>
+    rule(id, { 'rule-type': 'transformation', 'rule-target': 'column', 'object-locator': { 'schema-name': 'legacy', 'table-name': 't', 'column-name': name }, 'rule-action': 'rename', value });
+  const rm = (id: number, name: string) =>
+    rule(id, { 'rule-type': 'transformation', 'rule-target': 'column', 'object-locator': { 'schema-name': 'legacy', 'table-name': 't', 'column-name': name }, 'rule-action': 'remove-column' });
+  const schema = (id: number, value: string) =>
+    rule(id, { 'rule-type': 'transformation', 'rule-target': 'schema', 'object-locator': { 'schema-name': 'legacy' }, 'rule-action': 'rename', value });
+  const dup = (loser: string, winner: string) => [{ ruleId: loser, code: 'duplicate', message: `같은 대상의 룰이 겹쳐 rule ${winner} 를 사용합니다` }];
+
+  it('column rename', () => {
+    const { mapping, warnings } = parse([col(2, 'A', 'x'), col(8, 'a', 'y')]);
+    expect(mapping.columns).toEqual([{ ruleId: '8', table: 't', from: 'a', to: 'y' }]);
+    expect(warnings).toEqual(dup('2', '8'));
+  });
+
+  it('remove-column', () => {
+    const { mapping, warnings } = parse([rm(5, 'c'), rm(4, 'C')]);
+    expect(mapping.removedColumns).toEqual([{ ruleId: '5', table: 't', column: 'c' }]);
+    expect(warnings).toEqual(dup('4', '5'));
+  });
+
+  it('schema rename', () => {
+    const { mapping, warnings } = parse([schema(1, 'old'), schema(2, 'new')]);
+    expect(mapping.toSchema).toBe('new');
+    expect(warnings).toEqual(dup('1', '2'));
+  });
 });

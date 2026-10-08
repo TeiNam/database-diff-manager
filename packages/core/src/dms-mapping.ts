@@ -62,19 +62,55 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 const lower = (v: string) => v.toLowerCase();
 const hasWildcard = (v: string | undefined) => v !== undefined && v.includes('%');
 
-// '%' 만 와일드카드로 본다 (DMS 와 같다). '_' 는 테이블명에 흔해서 글자 그대로 비교한다
+export const MAX_PATTERN_LENGTH = 256;
+
+// '%' 만 와일드카드로 본다 (DMS 와 같다). '_' 는 테이블명에 흔해서 글자 그대로 비교한다. 연속된 %는 하나로 줄인다
 export function likePattern(pattern: string): RegExp {
-  const body = pattern.split('%').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+  const body = pattern.replace(/%+/g, '%').split('%').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
   return new RegExp(`^${body}$`, 'i');
 }
 
-export const likeMatch = (pattern: string, name: string): boolean => likePattern(pattern).test(name);
+// 정규식 없이 선형으로 비교한다 (사용자 패턴이라 역추적 폭주를 피한다). 세그먼트는 소문자로 한 번만 만든다
+type Matcher = (name: string) => boolean;
 
-// selection 룰이 없으면 전부 대상, exclude 가 include 보다 우선
+function compileLike(pattern: string): Matcher {
+  const parts = pattern.toLowerCase().split('%');
+  const first = parts[0];
+  const last = parts[parts.length - 1];
+  const middle = parts.slice(1, -1).filter((p) => p !== '');
+  if (parts.length === 1) return (name) => name.toLowerCase() === first;
+  return (raw) => {
+    const name = raw.toLowerCase();
+    if (name.length < first.length + last.length || !name.startsWith(first) || !name.endsWith(last)) return false;
+    let pos = first.length;
+    const end = name.length - last.length;
+    for (const seg of middle) {
+      const at = name.indexOf(seg, pos);
+      if (at < 0 || at + seg.length > end) return false;
+      pos = at + seg.length;
+    }
+    return true;
+  };
+}
+
+export const likeMatch = (pattern: string, name: string): boolean => compileLike(pattern)(name);
+
+// 패턴을 한 번만 컴파일해 두는 판정 함수. selection 룰이 없으면 전부 대상, exclude 가 include 보다 우선
+export function compileSelection(mapping: DmsMapping): (table: string) => boolean {
+  const include = mapping.selection.include.map(compileLike);
+  const exclude = mapping.selection.exclude.map(compileLike);
+  return (table) => (include.length === 0 || include.some((m) => m(table))) && !exclude.some((m) => m(table));
+}
+
+const compiled = new WeakMap<DmsMapping, (table: string) => boolean>();
+
 export function isSelected(mapping: DmsMapping, table: string): boolean {
-  const { include, exclude } = mapping.selection;
-  const included = include.length === 0 || include.some((p) => likeMatch(p, table));
-  return included && !exclude.some((p) => likeMatch(p, table));
+  let fn = compiled.get(mapping);
+  if (!fn) {
+    fn = compileSelection(mapping);
+    compiled.set(mapping, fn);
+  }
+  return fn(table);
 }
 
 export function parseDmsMapping(text: string): { mapping: DmsMapping; warnings: DmsWarning[] } {
@@ -84,6 +120,10 @@ export function parseDmsMapping(text: string): { mapping: DmsMapping; warnings: 
   const fromSchema = parsed.find((r) => !hasWildcard(r.schema))?.schema ?? '%';
   const builder = new MappingBuilder(fromSchema, warnings);
   for (const rule of parsed) {
+    if (tooLong(rule.schema, rule.table, rule.column)) {
+      warnings.push({ ruleId: rule.id, code: 'invalid', message: `이름은 ${MAX_PATTERN_LENGTH}자까지만 지원합니다` });
+      continue;
+    }
     if (!likeMatch(rule.schema, fromSchema)) {
       warnings.push({ ruleId: rule.id, code: 'invalid', message: `다른 스키마(${rule.schema})의 룰은 반영하지 않습니다` });
       continue;
@@ -92,6 +132,8 @@ export function parseDmsMapping(text: string): { mapping: DmsMapping; warnings: 
   }
   return { mapping: builder.build(rules.length), warnings };
 }
+
+const tooLong = (...v: Array<string | undefined>) => v.some((x) => x !== undefined && x.length > MAX_PATTERN_LENGTH);
 
 function readRules(text: string): unknown[] {
   let json: unknown;
