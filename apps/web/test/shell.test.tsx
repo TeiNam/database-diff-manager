@@ -185,8 +185,10 @@ describe('VersionPicker 보강', () => {
   });
 
   it('base/target이 없으면 비활성 안내 옵션을 보여 준다', async () => {
+    // 비교 화면은 버전이 오면 base/target 을 자동으로 채운다(그 전후 타이밍에 따라 결과가 달라짐).
+    // 자동 선택이 없는 버전 이력 화면에서 확인한다
     mockApi(API);
-    renderApp('/db/3/schema/7');
+    renderApp('/db/3/schema/7/history');
     const base = await screen.findByLabelText('BASE 버전');
     expect(base).toHaveValue('');
     expect(within(base).getByRole('option', { name: '버전 선택…' })).toBeDisabled();
