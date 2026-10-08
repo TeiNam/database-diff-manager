@@ -1,5 +1,6 @@
 # main 푸시마다 테스트 → 제품 버전(vX.Y.N) 계산 → 그 버전으로 Docker 이미지를 빌드해 GHCR 에 올림 → 마지막에 태그·Release 생성.
 # 버전 규칙은 scripts/next-version.mjs 참고 (같은 커밋 재실행이면 그 커밋의 태그를 다시 쓴다).
+# image·release 잡은 원격 v<버전> 태그가 다른 커밋을 가리키면 실패한다 (다른 커밋이 먼저 출시한 버전을 덮어쓰지 않게).
 # 문서만 바뀐 푸시는 실행하지 않는다(paths-ignore). 사람이 직접 v* 태그를 푸시하면 그 태그 버전으로 빌드한다.
 # 기능 브랜치에서 workflow_dispatch 로 돌리면 test 잡만 돈다 (정식 태그·Release·이미지를 만들지 않는다).
 name: docker
@@ -77,6 +78,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # "실패한 잡만 재실행" 이면 그사이 다른 커밋이 같은 버전을 출시했을 수 있어 원격 태그를 다시 읽는다.
+      # v<버전> 이 다른 커밋을 가리키면 push 전에 실패하고, :X.Y 는 이 버전이 그 X.Y 의 최신 패치일 때만 붙인다
+      - id: tag
+        name: 버전 태그 검증 · X.Y 태그 판정
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          out="$(node scripts/next-version.mjs --check-tag)" || { echo "${out}"; exit 1; }
+          echo "${out}" >> "$GITHUB_OUTPUT"
       # latest 판정은 이 잡에서 다시 한다 ("실패한 잡만 재실행" 때 앞선 판정이 낡았을 수 있음)
       - id: head
         name: 이 커밋이 지금 origin/main HEAD 인지
@@ -90,10 +100,11 @@ jobs:
           # semver 태그가 latest 를 자동으로 붙이지 않게 끈다 (기본 flavor latest=auto)
           flavor: latest=false
           # latest 는 이 커밋이 지금 origin/main HEAD 일 때만 (오래된 run 재실행·옛 태그 푸시가 latest 를 되돌리지 않게)
+          # X.Y 는 이 버전이 원격 vX.Y.* 중 가장 큰 패치 이상일 때만. X.Y.Z 와 sha 태그는 항상
           tags: |
             type=raw,value=latest,enable=${{ needs.version.outputs.latest == 'true' && steps.head.outputs.latest == 'true' }}
             type=semver,pattern={{version}},value=v${{ needs.version.outputs.version }}
-            type=semver,pattern={{major}}.{{minor}},value=v${{ needs.version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ needs.version.outputs.version }},enable=${{ steps.tag.outputs.minor_latest == 'true' }}
             type=sha,format=short
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
@@ -116,6 +127,10 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: 버전 태그 검증 (다른 커밋에 있으면 중단)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: node scripts/next-version.mjs --check-tag
       - name: 태그 만들기 (이미 있으면 건너뜀)
         if: needs.version.outputs.tag_exists != 'true'
         env:
