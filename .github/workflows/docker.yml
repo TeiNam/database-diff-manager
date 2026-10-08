@@ -1,6 +1,7 @@
-# main 푸시마다 테스트 → 제품 버전(vX.Y.N) 태그·Release 생성 → 그 버전으로 Docker 이미지를 빌드해 GHCR 에 올린다.
-# 버전: apps/web/package.json 의 major.minor + (같은 major.minor 의 마지막 태그 패치 + 1). scripts/next-version.mjs 참고.
-# 문서만 바뀐 푸시는 실행하지 않는다(paths-ignore). 사람이 직접 v* 태그를 푸시하면 그 태그 버전으로만 빌드한다.
+# main 푸시마다 테스트 → 제품 버전(vX.Y.N) 계산 → 그 버전으로 Docker 이미지를 빌드해 GHCR 에 올림 → 마지막에 태그·Release 생성.
+# 버전 규칙은 scripts/next-version.mjs 참고 (같은 커밋 재실행이면 그 커밋의 태그를 다시 쓴다).
+# 문서만 바뀐 푸시는 실행하지 않는다(paths-ignore). 사람이 직접 v* 태그를 푸시하면 그 태그 버전으로 빌드한다.
+# 기능 브랜치에서 workflow_dispatch 로 돌리면 test 잡만 돈다 (정식 태그·Release·이미지를 만들지 않는다).
 name: docker
 
 on:
@@ -14,17 +15,22 @@ on:
       - '.gitignore'
   workflow_dispatch:
 
-# 버전 번호가 순서대로 매겨지도록 같은 ref 의 실행은 취소하지 않고 차례로 돈다
+# 기본은 읽기 전용. 쓰기 권한은 필요한 잡에서만 올린다
+permissions:
+  contents: read
+
+# main·태그 실행을 하나의 그룹으로 묶어 버전 계산·태그 생성이 겹치지 않게 한다.
+# 실행 중인 것은 취소하지 않지만, 대기 실행은 하나만 유지되어 연속 푸시 중 중간 것은 건너뛸 수 있다
 concurrency:
-  group: docker-${{ github.ref }}
+  group: docker-release
   cancel-in-progress: false
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24
           cache: npm
@@ -33,63 +39,54 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # 계산만 한다 (태그는 이미지가 올라간 뒤 release 잡에서 만든다)
   version:
     needs: test
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
       version: ${{ steps.v.outputs.version }}
+      tag_exists: ${{ steps.v.outputs.tag_exists }}
+      latest: ${{ steps.v.outputs.latest }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
       - id: v
-        name: 버전 계산 (태그 푸시면 그 태그, 아니면 다음 패치)
+        name: 버전 계산 (태그 푸시면 그 태그, 이 커밋에 태그가 있으면 재사용, 아니면 다음 패치)
         run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            version="${GITHUB_REF_NAME#v}"
-          else
-            node scripts/next-version.mjs --self-test
-            version="$(node scripts/next-version.mjs)"
-          fi
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "제품 버전: ${version}" >> "$GITHUB_STEP_SUMMARY"
-      - name: 태그와 Release 만들기
-        if: github.ref_type != 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.v.outputs.version }}
-        run: |
-          git tag "v${VERSION}" "${GITHUB_SHA}"
-          git push origin "v${VERSION}"
-          gh release create "v${VERSION}" --target "${GITHUB_SHA}" --title "v${VERSION}" --generate-notes
+          node scripts/next-version.mjs --self-test
+          out="$(node scripts/next-version.mjs --github-output)"
+          echo "${out}" >> "$GITHUB_OUTPUT"
+          printf '제품 버전 계산 결과\n\n```\n%s\n```\n' "${out}" >> "$GITHUB_STEP_SUMMARY"
 
   image:
     needs: version
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository }}
+          # latest 는 이 커밋이 지금 origin/main HEAD 일 때만 (오래된 run 재실행이 latest 를 되돌리지 않게)
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ needs.version.outputs.latest == 'true' }}
             type=semver,pattern={{version}},value=v${{ needs.version.outputs.version }}
             type=semver,pattern={{major}}.{{minor}},value=v${{ needs.version.outputs.version }}
             type=sha,format=short
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: docker/Dockerfile
@@ -100,3 +97,27 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # 이미지가 올라간 뒤에만 태그·Release 를 만든다. 재실행해도 이미 있는 태그·Release 는 건너뛴다
+  release:
+    needs: [version, image]
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: 태그 만들기 (이미 있으면 건너뜀)
+        if: needs.version.outputs.tag_exists != 'true'
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          git tag "v${VERSION}" "${GITHUB_SHA}"
+          git push origin "v${VERSION}"
+      - name: Release 만들기 (이미 있으면 건너뜀)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release view "v${VERSION}" > /dev/null 2>&1 \
+            || gh release create "v${VERSION}" --verify-tag --title "v${VERSION}" --generate-notes

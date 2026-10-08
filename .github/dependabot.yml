@@ -1,0 +1,12 @@
+# 워크플로의 SHA 고정 액션과 npm 의존성을 주마다 확인해 업데이트 PR 을 연다
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
