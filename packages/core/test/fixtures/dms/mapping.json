@@ -1,0 +1,23 @@
+{
+  "rules": [
+    { "rule-type": "selection", "rule-id": "1", "rule-name": "1", "object-locator": { "schema-name": "legacy", "table-name": "tb_prm" }, "rule-action": "include" },
+    { "rule-type": "selection", "rule-id": "2", "rule-name": "2", "object-locator": { "schema-name": "legacy", "table-name": "tb_prm_cnd" }, "rule-action": "include" },
+    { "rule-type": "selection", "rule-id": "3", "rule-name": "3", "object-locator": { "schema-name": "legacy", "table-name": "tb_cust" }, "rule-action": "include" },
+    { "rule-type": "transformation", "rule-id": "10", "rule-name": "10", "rule-target": "table", "object-locator": { "schema-name": "legacy", "table-name": "tb_prm" }, "rule-action": "rename", "value": "promotion" },
+    { "rule-type": "transformation", "rule-id": "11", "rule-name": "11", "rule-target": "table", "object-locator": { "schema-name": "legacy", "table-name": "tb_prm_cnd" }, "rule-action": "rename", "value": "promotion_condition" },
+    { "rule-type": "transformation", "rule-id": "12", "rule-name": "12", "rule-target": "table", "object-locator": { "schema-name": "legacy", "table-name": "tb_cust" }, "rule-action": "rename", "value": "customer" },
+    { "rule-type": "transformation", "rule-id": "20", "rule-name": "20", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "tb_prm", "column-name": "PRM_ID" }, "rule-action": "rename", "value": "promotion_id" },
+    { "rule-type": "transformation", "rule-id": "21", "rule-name": "21", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "tb_prm", "column-name": "PRM_NM" }, "rule-action": "rename", "value": "promotion_name" },
+    { "rule-type": "transformation", "rule-id": "22", "rule-name": "22", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "tb_prm", "column-name": "REG_DT" }, "rule-action": "rename", "value": "created_at" },
+    { "rule-type": "transformation", "rule-id": "23", "rule-name": "23", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "tb_prm_cnd", "column-name": "CND_SEQ" }, "rule-action": "rename", "value": "condition_seq" },
+    { "rule-type": "transformation", "rule-id": "24", "rule-name": "24", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "tb_prm_cnd", "column-name": "PRM_ID" }, "rule-action": "rename", "value": "promotion_id" },
+    { "rule-type": "transformation", "rule-id": "25", "rule-name": "25", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "tb_prm_cnd", "column-name": "CND_VAL" }, "rule-action": "rename", "value": "condition_value" },
+    { "rule-type": "transformation", "rule-id": "26", "rule-name": "26", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "tb_cust", "column-name": "CUST_ID" }, "rule-action": "rename", "value": "customer_id" },
+    { "rule-type": "transformation", "rule-id": "27", "rule-name": "27", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "tb_cust", "column-name": "CUST_NM" }, "rule-action": "rename", "value": "customer_name" },
+    { "rule-type": "transformation", "rule-id": "28", "rule-name": "28", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "tb_cust", "column-name": "CUST_GRD" }, "rule-action": "rename", "value": "customer_grade" },
+    { "rule-type": "transformation", "rule-id": "30", "rule-name": "30", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "tb_prm", "column-name": "MAX_DC_CNT" }, "rule-action": "remove-column" },
+    { "rule-type": "transformation", "rule-id": "31", "rule-name": "31", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "tb_cust", "column-name": "OLD_ADDR" }, "rule-action": "remove-column" },
+    { "rule-type": "transformation", "rule-id": "40", "rule-name": "40", "rule-target": "schema", "object-locator": { "schema-name": "legacy" }, "rule-action": "rename", "value": "newapp" },
+    { "rule-type": "transformation", "rule-id": "50", "rule-name": "50", "rule-target": "column", "object-locator": { "schema-name": "legacy", "table-name": "%", "column-name": "%" }, "rule-action": "convert-lowercase" }
+  ]
+}

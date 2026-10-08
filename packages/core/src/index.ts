@@ -13,3 +13,4 @@ export * from './ddl';
 export * from './partition-ddl';
 export * from './parse-md';
 export * from './suggest';
+export * from './dms-mapping';
