@@ -84,7 +84,7 @@ jobs:
           main_sha="$(git ls-remote origin refs/heads/main | cut -f1)"
           if [ "${main_sha}" = "${GITHUB_SHA}" ]; then echo "latest=true" >> "$GITHUB_OUTPUT"; else echo "latest=false" >> "$GITHUB_OUTPUT"; fi
       - id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
           # semver 태그가 latest 를 자동으로 붙이지 않게 끈다 (기본 flavor latest=auto)
