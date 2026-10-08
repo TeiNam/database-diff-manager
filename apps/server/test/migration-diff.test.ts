@@ -42,7 +42,7 @@ describe('diff 에 DMS 매핑 반영', () => {
   it('같은 대상이면 수동 매핑이 이기고, 출처를 붙인다', async () => {
     const s = await setup();
     await s.upload();
-    const manual = { kind: 'column', table: 'promotion', from: 'reg_dt', to: 'created_at' };
+    const manual = { kind: 'column', table: 'promotion', from: 'reg_dt', to: 'registered_at' };
     const saved = await s.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: s.viewer, payload: { base: s.asIs.versionId, target: s.toBe.versionId, renames: [manual] } });
     const renames = saved.json().renames as { from: string; source: string }[];
     expect(renames).toHaveLength(11);
@@ -77,5 +77,44 @@ describe('GET /api/migration-flow', () => {
     await s.upload();
     const res = await s.app.inject({ method: 'GET', url: `/api/migration-flow?base=${s.toBe.versionId}&target=${s.asIs.versionId}`, headers: s.viewer });
     expect(res.json()).toEqual({ mapping: null });
+  });
+});
+
+describe('PUT /api/diff/renames 와 DMS rename', () => {
+  const put = (s: Awaited<ReturnType<typeof setup>>, renames: unknown[]) =>
+    s.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: s.viewer, payload: { base: s.asIs.versionId, target: s.toBe.versionId, renames } });
+  const strip = (rs: { source: string }[]) => rs.map(({ source: _s, ...r }) => r);
+
+  it('DMS rename 을 되돌려 보내도 수동으로 저장하지 않는다', async () => {
+    const s = await setup();
+    const id = await s.upload();
+    const dms = strip((await s.getDiff()).renames);
+    const manual = { kind: 'column', table: 'promotion', from: 'reg_dt', to: 'registered_at' };
+    const res = await put(s, [...dms, manual]);
+    expect(res.statusCode).toBe(200);
+    const renames = res.json().renames as { from: string; source: string }[];
+    expect(renames.filter((r) => r.source === 'manual')).toEqual([{ ...manual, source: 'manual' }]);
+    expect(renames).toHaveLength(11);
+
+    await s.app.inject({ method: 'DELETE', url: `/api/migrations/${id}`, headers: s.admin });
+    expect((await s.getDiff()).renames).toEqual([{ ...manual, source: 'manual' }]);
+  });
+
+  it('DMS 와 같은 대상이라도 to 가 다르면 수동 override 로 저장한다', async () => {
+    const s = await setup();
+    await s.upload();
+    const override = { kind: 'table', from: 'tb_cust', to: 'customer_x' };
+    const res = await put(s, [override]);
+    expect(res.json().renames.filter((r: { from: string }) => r.from === 'tb_cust')).toEqual([{ ...override, source: 'manual' }]);
+  });
+
+  it('DMS 와 같은 항목을 빼면 수동 500개 초과가 아니고, 진짜 수동 500개 초과는 400', async () => {
+    const s = await setup();
+    await s.upload();
+    const dms = strip((await s.getDiff()).renames);
+    const filler = Array.from({ length: 495 }, (_, i) => ({ kind: 'table', from: `x${i}`, to: `y${i}` }));
+    expect((await put(s, [...dms, ...filler])).statusCode).toBe(200);
+    const many = Array.from({ length: 501 }, (_, i) => ({ kind: 'table', from: `x${i}`, to: `y${i}` }));
+    expect((await put(s, [...dms, ...many])).statusCode).toBe(400);
   });
 });

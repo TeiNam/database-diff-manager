@@ -55,15 +55,25 @@ export function mergeRenames(dms: RenameMapping[], manual: RenameMapping[]): Sou
   ];
 }
 
+type LatestMigration = ReturnType<typeof latestMigration>;
+
+export const latestMigrationFor = (db: Db, baseId: number, targetId: number): LatestMigration =>
+  latestMigration(db, getVersionMeta(db, baseId).schemaId, getVersionMeta(db, targetId).schemaId);
+
+// 최신 전환 매핑에서 나온 rename (매핑이 없으면 빈 배열)
+export function dmsRenamesFor(migration: LatestMigration, baseModel: SchemaModel, targetModel: SchemaModel): RenameMapping[] {
+  return migration ? toRenameMappings(parseDmsMapping(migration.source).mapping, baseModel, targetModel) : [];
+}
+
 export function computeDiff(db: Db, cache: DiffCache, baseId: number, targetId: number): DiffResponse {
   const manual = listRenames(db, baseId, targetId);
-  const migration = latestMigration(db, getVersionMeta(db, baseId).schemaId, getVersionMeta(db, targetId).schemaId);
+  const migration = latestMigrationFor(db, baseId, targetId);
   const key = `${baseId}:${targetId}:${migration?.id ?? 0}:${canonicalJson(manual)}`;
   const cached = cache.get(key);
   if (cached) return cached;
   const base = loadVersion(db, baseId);
   const target = loadVersion(db, targetId);
-  const dms = migration ? toRenameMappings(parseDmsMapping(migration.source).mapping, base.model, target.model) : [];
+  const dms = dmsRenamesFor(migration, base.model, target.model);
   const renames = mergeRenames(dms, manual);
   const diff = diffSchemas(base.model, target.model, renames);
   const statements = generateDdl(diff);
