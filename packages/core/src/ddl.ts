@@ -39,8 +39,12 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
   for (const d of altered) if (d.op === 'rename') table(d, sqlBody(`RENAME TABLE ${q(d.oldName!)} TO ${q(d.name)}`));
   // 4. 테이블 생성 (FK는 8단계에서)
   for (const d of diff.tables) if (d.op === 'add') table(d, createTable(d.to!));
-  // 5·6. 테이블 변경, 파티션
-  for (const d of altered) for (const body of alterStatements(d)) table(d, body);
+  // 5·6. 테이블 변경, 파티션 (컬럼 rename 이 이름 충돌로 빠진 테이블은 값 대응이 어긋나므로 수동 확인으로)
+  const conflicts = columnConflicts(diff);
+  for (const d of altered) for (const body of conflictGuard(d.name, alterStatements(d), conflicts.get(d.name))) table(d, body);
+  for (const [name, notes] of conflicts) {
+    if (!altered.some((d) => d.name === name)) out.push({ object: name, kind: 'table', op: 'modify', ...conflictGuard(name, [], notes)[0] });
+  }
   // 7. 테이블 삭제
   for (const d of diff.tables) if (d.op === 'drop') table(d, sqlBody(`DROP TABLE ${q(d.name)}`));
   // 8. FK 추가
@@ -76,6 +80,24 @@ function createTable(t: Table): StatementBody {
   const sql = printTable({ ...t, columns: columns.map((c) => printable(inheritCollation(c, t))), indexes }, { foreignKeys: false });
   const missing = columns.filter(hasUnknownGenerated).map((c) => c.name);
   return missing.length ? manualBody(generatedReason(t.name, missing), sql, notes) : sqlBody(sql, notes);
+}
+
+// 순서로 풀 수 없는 컬럼 rename (맞바꾸기·연쇄 등 '이름 충돌'로 적용되지 않은 매핑)을 TARGET 테이블별로 모은다
+function columnConflicts(diff: SchemaDiff): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const { mapping: m, reason } of diff.ignoredRenames) {
+    if (m.kind !== 'column' || reason !== '이름 충돌' || m.table === undefined) continue;
+    out.set(m.table, [...(out.get(m.table) ?? []), `컬럼 rename ${m.from}→${m.to} 이 다른 컬럼 이름과 겹쳐 적용하지 못했습니다`]);
+  }
+  return out;
+}
+
+// 충돌이 있으면 실행할 SQL 을 남기지 않는다: 실행 문장은 주석 처리하고, 문장이 없으면 안내 문장 하나를 만든다
+function conflictGuard(table: string, bodies: StatementBody[], notes: string[] | undefined): StatementBody[] {
+  if (!notes) return bodies;
+  const reason = `${table}: 컬럼 rename 이름 충돌 — 값 대응을 확인해 직접 작성하세요`;
+  if (!bodies.length) return [{ ...commentBody(`-- [수동 확인 필요] ${reason}`), notes }];
+  return bodies.map((b) => (b.comment ? b : manualBody(reason, b.sql, [...(b.notes ?? []), ...notes])));
 }
 
 function sortViews(views: ViewDiff[]): ViewDiff[] {

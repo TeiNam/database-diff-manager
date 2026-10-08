@@ -102,19 +102,36 @@ export function buildMigrationFlow(base: SchemaModel, target: SchemaModel, mappi
   return { fromSchema: mapping.fromSchema, ...(mapping.toSchema ? { toSchema: mapping.toSchema } : {}), tables: rows, totals: totalsOf(rows) };
 }
 
-// 전환 표에서 짝이 맞은(ok) 테이블과 그 안의 짝이 맞은 컬럼만 모은다. 표기가 같아도 넘긴다 (호출 쪽이 거른다)
+// 전환 표에서 짝이 맞은(ok) 테이블과 그 안의 짝이 맞은 컬럼만 모은다. 표기가 같아도 넘긴다 (호출 쪽이 거른다).
+// overlap: 이름이 겹쳐도 되는 컬럼 rename — To-Be 이름이 지워질(remove-column) As-Is 컬럼과 같거나,
+// As-Is 이름이 To-Be 신규(added) 컬럼과 같다. 겹친 컬럼은 따로 DROP·ADD 되므로 rename 을 먼저 맞춰야 값이 맞는다
+interface PairedColumn {
+  asIs: string;
+  toBe: string;
+  overlap: boolean;
+}
+
 interface PairedTable {
   asIs: string;
   toBe: string;
-  columns: Array<{ asIs: string; toBe: string }>;
+  columns: PairedColumn[];
+}
+
+const lowerNames = (columns: ColumnFlow[], status: ColumnFlowStatus, pick: (c: ColumnFlow) => string | undefined) =>
+  new Set(columns.filter((c) => c.status === status).map((c) => pick(c)?.toLowerCase()));
+
+function pairedColumns(columns: ColumnFlow[]): PairedColumn[] {
+  const removed = lowerNames(columns, 'removed', (c) => c.asIs);
+  const added = lowerNames(columns, 'added', (c) => c.toBe);
+  return columns.filter((c) => c.status === 'renamed' || c.status === 'same').map((c) => ({
+    asIs: c.asIs!,
+    toBe: c.toBe!,
+    overlap: removed.has(c.toBe!.toLowerCase()) || added.has(c.asIs!.toLowerCase()),
+  }));
 }
 
 const pairedTables = (flow: MigrationFlow): PairedTable[] =>
-  flow.tables.filter((row) => row.status === 'ok').map((row) => ({
-    asIs: row.asIs!,
-    toBe: row.toBe!,
-    columns: row.columns.filter((c) => c.status === 'renamed' || c.status === 'same').map((c) => ({ asIs: c.asIs!, toBe: c.toBe! })),
-  }));
+  flow.tables.filter((row) => row.status === 'ok').map((row) => ({ asIs: row.asIs!, toBe: row.toBe!, columns: pairedColumns(row.columns) }));
 
 export type RenameDirection = 'forward' | 'reverse';
 
@@ -122,13 +139,16 @@ export type RenameDirection = 'forward' | 'reverse';
 // forward(BASE = As-Is): As-Is → To-Be, 컬럼 매핑의 table 은 TARGET 인 To-Be 테이블명.
 // reverse(BASE = To-Be): To-Be → As-Is 로 뒤집고, 컬럼 매핑의 table 은 TARGET 인 As-Is 테이블명.
 // remove-column 은 역방향에선 ADD COLUMN 이 되므로 따로 넘기지 않고 diff 에 맡긴다.
+// 다만 rename 대상 이름이 지워질 컬럼과 겹치면 allowOverlap 을 붙여 diff 가 rename 을 먼저 맞추게 한다
+// (정방향 DROP a → RENAME b TO a, 역방향 RENAME a TO b → ADD a).
 // 전환 표는 대소문자를 무시해 같다고 보지만 diffSchemas 는 구분하므로, 표기만 달라도 rename 으로 넘겨 DROP+ADD 를 막는다
 export function flowRenameMappings(flow: MigrationFlow, direction: RenameDirection = 'forward'): RenameMapping[] {
   const isReverse = direction === 'reverse';
   return pairedTables(flow).flatMap((t) => {
     const [from, to] = isReverse ? [t.toBe, t.asIs] : [t.asIs, t.toBe];
-    const columns = t.columns.filter((c) => c.asIs !== c.toBe)
-      .map((c) => ({ kind: 'column' as const, table: to, from: isReverse ? c.toBe : c.asIs, to: isReverse ? c.asIs : c.toBe }));
+    const columns = t.columns.filter((c) => c.asIs !== c.toBe).map((c) => ({
+      kind: 'column' as const, table: to, from: isReverse ? c.toBe : c.asIs, to: isReverse ? c.asIs : c.toBe, ...(c.overlap ? { allowOverlap: true } : {}),
+    }));
     return from !== to ? [{ kind: 'table' as const, from, to }, ...columns] : columns;
   });
 }

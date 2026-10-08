@@ -90,6 +90,8 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 - `migration-flow.ts`
   - `toRenameMappings(mapping, base: SchemaModel, target: SchemaModel): RenameMapping[]` — 컬럼 rename 의 `table` 을 To-Be 테이블명으로, 이름을 모델의 실제 표기(대소문자)로 맞춘다. 양쪽 모델에 없는 대상은 만들지 않는다.
   - `toReverseRenameMappings(mapping, asIs, toBe)` / `flowRenameMappings(flow, direction)` — 역방향(BASE = To-Be) 비교용. 테이블은 To-Be → As-Is 로 뒤집고, 컬럼 rename 의 `table` 은 역방향 TARGET 인 As-Is 테이블명이다. remove-column 은 역방향에선 ADD COLUMN 이 되므로 diff 에 맡긴다.
+  - **삭제와 rename 이 같은 이름에서 겹칠 때** (예: `t(a,b)` 에 remove-column `a` + `b→a`, 또는 `b→c` 와 To-Be 신규 컬럼 `b`): 해당 컬럼 rename 에 `allowOverlap: true` 를 붙인다. `diffSchemas` 는 rename 을 먼저 짝짓고 겹친 같은 이름 컬럼은 DROP·ADD 로 처리한다. 정방향은 `DROP COLUMN a, RENAME COLUMN b TO a`, 역방향은 `ADD COLUMN a …, RENAME COLUMN a TO b` 로 한 ALTER 안에 나와 값 대응이 유지된다(MySQL 8.0/8.4 실증, 골든 `remove-rename-column`·`remove-rename-column-reverse`).
+  - 순서로 풀 수 없는 충돌(맞바꾸기·연쇄 rename 처럼 `이름 충돌` 로 적용되지 않은 컬럼 rename)이 있는 테이블은 ALTER 를 실행 SQL 로 내지 않고 `[수동 확인 필요]` 주석 문장(`comment: true`, `notes` 에 겹친 매핑)으로 바꾼다.
   - `buildMigrationFlow(base: SchemaModel, target: SchemaModel, mapping: DmsMapping): MigrationFlow`
     - 테이블 행: `asIs?`, `toBe?`, `status` — `ok`(양쪽 존재) / `missing-target`(To-Be 에 없음) / `missing-source`(As-Is 에 없음) / `excluded`(selection 밖) / `unmapped-target`(어느 As-Is 와도 이어지지 않은 To-Be 테이블)
     - 컬럼 행: `asIs?`, `toBe?`, 양쪽 타입, `status` — `renamed` / `same`(이름 그대로) / `removed`(remove-column) / `added`(To-Be 에만 있음) / `dropped`(As-Is 에 있는데 룰도 To-Be 대응도 없음) / `missing`(룰이 가리키는 컬럼이 모델에 없음)
