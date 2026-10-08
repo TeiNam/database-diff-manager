@@ -1,8 +1,9 @@
 import { parseMdDump, parseSqlDump, suggestTarget } from '@tdm/core';
-import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useRef, useState, type DragEvent } from 'react';
 import { useSchemaInfo, useTree, useUpload } from '../../api/hooks';
 import type { UploadResult } from '../../api/types';
 import { Icon } from '../../components/Icon';
+import { trapTab, useDialogFocus } from '../../hooks/useDialog';
 import { useSchemaContext } from '../../hooks/useSchemaContext';
 import s from './UploadDialog.module.css';
 
@@ -54,18 +55,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
   const [dragging, setDragging] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
 
-  // 열릴 때 첫 포커스 가능 요소로 포커스를 옮기고, 닫히면 열었던 요소로 되돌린다
-  useEffect(() => {
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    dialogRef.current?.querySelector<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')?.focus();
-    return () => opener?.focus();
-  }, []);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  useDialogFocus(dialogRef, onClose);
 
   const addFiles = async (files: FileList | File[]) => {
     // 이미 담긴 파일·같은 묶음 안의 파일과 이름이 겹치면 제외한다 (서버는 meta 파일명이 유일해야 한다)
@@ -98,17 +88,6 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
       setDrafts((prev) => prev.filter((d) => !done.has(d.file.name)));
     },
   });
-
-  // Tab 이동을 대화상자 안에서 순환시킨다
-  const trapTab = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== 'Tab') return;
-    const items = [...e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)')];
-    const first = items[0];
-    const last = items[items.length - 1];
-    if (!first || !last) return;
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-  };
 
   return (
     <div className={s.backdrop} role="presentation" onClick={onClose}>
