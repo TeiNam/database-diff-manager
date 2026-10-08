@@ -46,15 +46,20 @@ export function getMigration(db: Db, id: number): MigrationMeta {
   return toMeta(r);
 }
 
-// 같은 쌍의 다음 리비전 번호로 저장한다
+// 같은 쌍의 다음 리비전 번호로 저장한다. 번호는 migration_pairs 카운터에서 받아 지운 리비전 번호를 다시 쓰지 않는다
 export function addMigration(db: Db, input: MigrationInput): MigrationMeta {
   const id = tx(db, () => {
-    const last = one<{ revision: number | null }>(db,
-      'SELECT MAX(revision) AS revision FROM migration_mappings WHERE from_schema_id = ? AND to_schema_id = ?', input.fromSchemaId, input.toSchemaId);
-    return run(db, `INSERT INTO migration_mappings (from_schema_id, to_schema_id, revision, filename, source, rule_count, note, uploaded_by, uploaded_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      input.fromSchemaId, input.toSchemaId, Number(last?.revision ?? 0) + 1, input.filename, input.source, input.ruleCount,
+    const pair = one<{ revision: number }>(db, `
+      INSERT INTO migration_pairs (from_schema_id, to_schema_id, next_revision) VALUES (?, ?, 2)
+      ON CONFLICT (from_schema_id, to_schema_id) DO UPDATE SET next_revision = next_revision + 1
+      RETURNING next_revision - 1 AS revision`, input.fromSchemaId, input.toSchemaId);
+    if (!pair) throw new Error('전환 매핑 리비전 번호를 받지 못했습니다');
+    const migrationId = run(db, `INSERT INTO migration_mappings (from_schema_id, to_schema_id, revision, filename, rule_count, note, uploaded_by, uploaded_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      input.fromSchemaId, input.toSchemaId, Number(pair.revision), input.filename, input.ruleCount,
       input.note ?? null, input.userId, new Date().toISOString()).lastInsertRowid;
+    run(db, 'INSERT INTO migration_mapping_sources (migration_id, source) VALUES (?, ?)', migrationId, input.source);
+    return migrationId;
   });
   return getMigration(db, Number(id));
 }
@@ -72,7 +77,8 @@ export function latestMigrationId(db: Db, fromSchemaId: number, toSchemaId: numb
 }
 
 export function getMigrationSource(db: Db, id: number): { filename: string; text: string } {
-  const r = one<{ filename: string; source: string }>(db, 'SELECT filename, source FROM migration_mappings WHERE id = ?', id);
+  const r = one<{ filename: string; source: string }>(db, `
+    SELECT m.filename, src.source FROM migration_mappings m JOIN migration_mapping_sources src ON src.migration_id = m.id WHERE m.id = ?`, id);
   if (!r) throw NOT_FOUND();
   return { filename: r.filename, text: r.source };
 }

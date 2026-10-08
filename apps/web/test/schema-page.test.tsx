@@ -13,6 +13,8 @@ const response = (renames: unknown[] = []) => {
   return { base: V(11, 1), target: V(12, 2), baseModel: base, targetModel: target, diff, statements: [], ddl: '', renames };
 };
 const ROUTE = '/db/1/schema/7';
+const DBA = { '/api/auth/me': { id: 3, username: 'park', role: 'dba' } };
+const VIEWER = { '/api/auth/me': { id: 2, username: 'kim', role: 'viewer' } };
 
 describe('SchemaPage', () => {
   it('base/target이 없으면 직전 → 최신 버전으로 URL을 채운다', async () => {
@@ -38,14 +40,16 @@ describe('SchemaPage', () => {
     expect(screen.getByTestId('location')).toHaveTextContent('obj=orders');
   });
 
-  it('rename 후보 배너: [이름 변경으로 처리]가 매핑을 저장한다', async () => {
+  it('rename 후보 배너: [이름 변경으로 처리]가 매핑을 저장한다 (dba)', async () => {
     const calls = mockApi({
+      ...DBA,
       '/api/schemas/7/versions': [V(12, 2), V(11, 1)],
       '/api/diff?base=11&target=12': response(),
       'PUT /api/diff/renames': () => response([{ kind: 'table', from: 'members', to: 'member' }]),
     });
     renderWithProviders(<SchemaPage />, { route: `${ROUTE}?base=11&target=12&tab=summary`, path: '/db/:dbId/schema/:schemaId' });
     const banner = await screen.findByRole('region', { name: '이름 변경 후보' });
+    await within(banner).findByRole('button', { name: '이름 변경으로 처리' });
     await userEvent.setup().click(within(banner).getByRole('button', { name: '이름 변경으로 처리' }));
     await waitFor(() => expect(screen.getByRole('region', { name: '적용된 이름 변경' })).toHaveTextContent('members → member'));
     expect(JSON.parse(String(calls.find((c) => c.url === '/api/diff/renames')!.init.body))).toEqual({
@@ -74,16 +78,32 @@ describe('SchemaPage', () => {
     expect(await screen.findByText(/같은 Schema 의 버전끼리는/)).toBeInTheDocument();
   });
 
-  it('적용된 rename 에 출처를 표시하고, 해제는 수동 매핑만 다시 저장한다', async () => {
+  it('viewer 에게 rename 배너는 읽기 전용이다 (처리·해제 버튼 없음)', async () => {
+    const manual = { kind: 'column', table: 'orders', from: 'x', to: 'y', source: 'manual' };
+    const calls = mockApi({ ...VIEWER, '/api/schemas/7/versions': [V(12, 2), V(11, 1)], '/api/diff?base=11&target=12': { ...response(), renames: [manual] } });
+    renderWithProviders(<SchemaPage />, { route: `${ROUTE}?base=11&target=12&tab=summary`, path: '/db/:dbId/schema/:schemaId' });
+    const candidates = await screen.findByRole('region', { name: '이름 변경 후보' });
+    await waitFor(() => expect(calls.some((c) => c.url === '/api/auth/me')).toBe(true));
+    expect(candidates).toHaveTextContent('members');
+    expect(within(candidates).queryByRole('button')).not.toBeInTheDocument();
+    expect(candidates).toHaveTextContent('DBA·관리자가 처리할 수 있습니다');
+    const applied = screen.getByRole('region', { name: '적용된 이름 변경' });
+    expect(applied).toHaveTextContent('orders.x → y');
+    expect(within(applied).queryByRole('button', { name: '해제' })).not.toBeInTheDocument();
+  });
+
+  it('적용된 rename 에 출처를 표시하고, 해제는 수동 매핑만 다시 저장한다 (dba)', async () => {
     const dms = { kind: 'table', from: 'members', to: 'member', source: 'dms' };
     const manual = { kind: 'column', table: 'orders', from: 'x', to: 'y', source: 'manual' };
     const calls = mockApi({
+      ...DBA,
       '/api/schemas/7/versions': [V(12, 2), V(11, 1)],
       '/api/diff?base=11&target=12': { ...response(), renames: [dms, manual] },
       'PUT /api/diff/renames': () => response(),
     });
     renderWithProviders(<SchemaPage />, { route: `${ROUTE}?base=11&target=12&tab=summary`, path: '/db/:dbId/schema/:schemaId' });
     const manualBanner = await screen.findByRole('region', { name: '적용된 이름 변경' });
+    await within(manualBanner).findByRole('button', { name: '해제' });
     expect(manualBanner).toHaveTextContent(/수동\s*orders\.x → y/);
     const dmsBanner = screen.getByRole('region', { name: 'DMS 매핑에서 적용된 이름 변경' });
     expect(dmsBanner).toHaveTextContent('이름 변경 1건');

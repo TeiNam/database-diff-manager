@@ -32,12 +32,13 @@ export async function login(app: FastifyInstance, username: string, password = P
 
 export const as = (cookie: string) => ({ cookie, ...CSRF });
 
-// admin·viewer 계정을 만들고 각각 로그인한 앱
+// admin·dba·viewer 계정을 만들고 각각 로그인한 앱 (admin 의 id 는 1)
 export async function loggedInApp() {
   const { app, db } = await testApp();
   await seedUser(db, 'admin', 'admin');
   await seedUser(db, 'viewer', 'viewer');
-  return { app, db, admin: as(await login(app, 'admin')), viewer: as(await login(app, 'viewer')) };
+  await seedUser(db, 'dba', 'dba');
+  return { app, db, admin: as(await login(app, 'admin')), viewer: as(await login(app, 'viewer')), dba: as(await login(app, 'dba')) };
 }
 
 export const SAMPLE_SQL = 'sample-app(10.0.0.15).sql';

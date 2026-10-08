@@ -1,10 +1,10 @@
 // 여러 라우트가 함께 쓰는 입력 검증 스키마
 import { z } from 'zod';
 import { MIN_PASSWORD_LENGTH } from './auth/password';
-import { USERNAME_PATTERN } from './repos/users';
+import { ROLES, USERNAME_PATTERN } from './repos/users';
 
 export const IdParams = z.object({ id: z.coerce.number().int().positive() });
-export const RoleSchema = z.enum(['admin', 'viewer']);
+export const RoleSchema = z.enum(ROLES);
 export const UsernameSchema = z.string().regex(USERNAME_PATTERN, '사용자명은 영문·숫자·_.- 3~32자여야 합니다');
 export const PasswordSchema = z.string().min(MIN_PASSWORD_LENGTH, `비밀번호는 ${MIN_PASSWORD_LENGTH}자 이상이어야 합니다`).max(256);
 export const SafeFilename = z

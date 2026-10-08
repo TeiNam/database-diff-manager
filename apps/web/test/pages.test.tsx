@@ -12,6 +12,7 @@ const VERSIONS = [
   { id: 11, versionNo: 1, uploadedAt: '2026-10-01T09:00:00Z', uploadedBy: 'kim', note: null, sourceFormat: 'sql', sourceFilename: 'shop(db).sql', changedObjects: 33 },
 ];
 const ADMIN = { '/api/auth/me': { id: 1, username: 'admin', role: 'admin' } };
+const DBA = { '/api/auth/me': { id: 3, username: 'park', role: 'dba' } };
 
 describe('HistoryPage', () => {
   it('버전 표·비교 링크·원본 다운로드·삭제(admin)', async () => {
@@ -59,6 +60,15 @@ describe('HistoryPage', () => {
     expect(calls.filter((c) => c.init.method === 'DELETE').map((c) => c.init.body)).toEqual([JSON.stringify({ confirmName: 'shop' }), JSON.stringify({ confirmName: 'db' })]);
   });
 
+  it('dba 에게는 버전·Schema·Database 삭제 버튼이 있다', async () => {
+    mockApi({ ...DBA, '/api/schemas/7': { id: 7, name: 'shop', databaseId: 1, databaseName: 'db' }, '/api/schemas/7/versions': VERSIONS });
+    renderWithProviders(<HistoryPage />, { route: '/db/1/schema/7/history', path: '/db/:dbId/schema/:schemaId/history' });
+    const row = (await screen.findByText('v2')).closest('tr')!;
+    expect(await within(row).findByRole('button', { name: 'v2 삭제' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Schema 삭제' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Database 삭제' })).toBeInTheDocument();
+  });
+
   it('viewer 에게는 Schema·Database 삭제 버튼이 없다', async () => {
     mockApi({ '/api/auth/me': { id: 2, username: 'kim', role: 'viewer' }, '/api/schemas/7': { id: 7, name: 'shop', databaseId: 1, databaseName: 'db' }, '/api/schemas/7/versions': VERSIONS });
     renderWithProviders(<HistoryPage />, { route: '/db/1/schema/7/history', path: '/db/:dbId/schema/:schemaId/history' });
@@ -91,6 +101,13 @@ describe('HomePage', () => {
     const del = calls.find((c) => c.init.method === 'DELETE')!;
     expect([del.url, del.init.body]).toEqual(['/api/databases/2', JSON.stringify({ confirmName: 'stg-db-01' })]);
     expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('dba 도 Database 목록에서 삭제할 수 있다', async () => {
+    mockApi({ ...DBA, '/api/tree': TREE });
+    renderWithProviders(<HomePage />);
+    const table = await screen.findByRole('table', { name: 'Database 목록' });
+    expect(within(table).getByRole('button', { name: 'stg-db-01 삭제' })).toBeInTheDocument();
   });
 
   it('viewer 에게는 Database 목록·삭제 버튼이 없다', async () => {
@@ -154,6 +171,34 @@ describe('UsersPage', () => {
     mockApi({ '/api/auth/me': { id: 2, username: 'kim', role: 'viewer' } });
     renderWithProviders(<UsersPage />);
     expect(await screen.findByText('관리자만 볼 수 있습니다')).toBeInTheDocument();
+  });
+
+  it('dba 도 계정 관리는 볼 수 없다', async () => {
+    const calls = mockApi(DBA);
+    renderWithProviders(<UsersPage />);
+    expect(await screen.findByText('관리자만 볼 수 있습니다')).toBeInTheDocument();
+    expect(calls.some((c) => c.url === '/api/users')).toBe(false);
+  });
+
+  it('역할 선택지에 dba 가 있고, dba 로 계정을 만들고 역할을 바꾼다', async () => {
+    const calls = mockApi({
+      ...ADMIN,
+      '/api/users': [{ id: 2, username: 'kim', role: 'viewer', disabled: false, createdAt: '' }],
+      'POST /api/users': { id: 3, username: 'park', role: 'dba', disabled: false, createdAt: '' },
+      'PATCH /api/users/2': { id: 2, username: 'kim', role: 'dba', disabled: false, createdAt: '' },
+    });
+    renderWithProviders(<UsersPage />);
+    const user = userEvent.setup();
+    const roleSelect = await screen.findByLabelText('kim 역할');
+    expect(within(roleSelect).getAllByRole('option').map((o) => o.textContent)).toEqual(['viewer', 'dba', 'admin']);
+    await user.selectOptions(roleSelect, 'dba');
+    await user.type(screen.getByLabelText('새 사용자명'), 'park');
+    await user.type(screen.getByLabelText('초기 비밀번호'), 'long-password-1');
+    await user.selectOptions(screen.getByLabelText('역할'), 'dba');
+    await user.click(screen.getByRole('button', { name: '계정 만들기' }));
+    await waitFor(() => expect(calls.some((c) => c.init.method === 'POST' && c.url === '/api/users')).toBe(true));
+    expect(JSON.parse(String(calls.find((c) => c.init.method === 'PATCH')!.init.body))).toEqual({ role: 'dba' });
+    expect(JSON.parse(String(calls.find((c) => c.init.method === 'POST')!.init.body))).toEqual({ username: 'park', password: 'long-password-1', role: 'dba' });
   });
 
   it('admin이 아니면 사용자 목록을 요청하지 않는다', async () => {

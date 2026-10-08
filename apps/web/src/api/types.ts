@@ -1,7 +1,8 @@
 // apps/server 응답과 같은 모양을 유지한다 (서버 타입은 node 의존성이 있어 직접 import 하지 않는다)
 import type { DmsWarning, MigrationFlow, ParseWarning, RenameMapping, SchemaDiff, SchemaModel, SourceFormat, Statement } from '@tdm/core';
 
-export type Role = 'admin' | 'viewer';
+// admin: 전부 + 계정 관리, dba: 데이터 변경 전부, viewer: 읽기 전용
+export type Role = 'admin' | 'dba' | 'viewer';
 
 export interface Me {
   id: number;

@@ -2,7 +2,7 @@ import { MAX_DMS_RULES, type RenameMapping } from '@tdm/core';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../app';
-import { requireLogin } from '../auth/plugin';
+import { requireEditor, requireLogin } from '../auth/plugin';
 import { AppError } from '../errors';
 import { replaceRenames } from '../repos/renames';
 import { RenameMappingSchema } from '../schemas';
@@ -32,8 +32,10 @@ export function diffRoutes(app: FastifyInstance, ctx: AppContext): void {
     return computeDiff(ctx.db, ctx.cache, base, target);
   });
 
-  app.put('/renames', async (req) => {
+  // viewer 는 읽기 전용이다. 권한도 본문을 읽기 전에 확인한다
+  app.put('/renames', { onRequest: requireEditor }, async (req) => {
     const { base, target, renames } = RenamesBody.parse(req.body);
+    if (base === target && renames.length > 0) throw new AppError(400, '같은 버전끼리는 이름 변경을 저장할 수 없습니다');
     const inputs = loadDiffInputs(ctx.db, ctx.cache, base, target); // 버전이 없으면 여기서 404
     replaceRenames(ctx.db, base, target, toManualRenames(renames, inputs.dms), req.user!.id);
     return computeDiff(ctx.db, ctx.cache, base, target, inputs);

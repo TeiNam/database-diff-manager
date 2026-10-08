@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { useCreateUser, useMe, usePatchUser, useUsers } from '../api/hooks';
 import type { Role } from '../api/types';
+import { isAdmin as isAdminUser, ROLE_OPTIONS } from '../lib/roles';
 import s from './Page.module.css';
 
 const MIN_PASSWORD_LENGTH = 10;
@@ -19,8 +20,7 @@ function CreateUserForm() {
       <input className={s.input} aria-label="새 사용자명" placeholder="사용자명" value={username} onChange={(e) => setUsername(e.target.value)} required />
       <input className={s.input} aria-label="초기 비밀번호" type="password" placeholder="비밀번호 (10자 이상)" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={10} autoComplete="new-password" />
       <select className={s.input} aria-label="역할" value={role} onChange={(e) => setRole(e.target.value as Role)}>
-        <option value="viewer">viewer</option>
-        <option value="admin">admin</option>
+        {ROLE_OPTIONS.map((r) => <option key={r} value={r}>{r}</option>)}
       </select>
       <button type="submit" className={s.btn} disabled={create.isPending}>계정 만들기</button>
       {create.error && <span role="alert" className={s.error}>{create.error.message}</span>}
@@ -30,7 +30,7 @@ function CreateUserForm() {
 
 export function UsersPage() {
   const me = useMe();
-  const isAdmin = me.data?.role === 'admin';
+  const isAdmin = isAdminUser(me.data);
   const users = useUsers(isAdmin);
   const patch = usePatchUser();
   const [resetError, setResetError] = useState<string | null>(null);
@@ -60,8 +60,7 @@ export function UsersPage() {
               <td className="mono">{u.username}</td>
               <td>
                 <select className={s.input} aria-label={`${u.username} 역할`} value={u.role} onChange={(e) => patch.mutate({ id: u.id, role: e.target.value as Role })}>
-                  <option value="viewer">viewer</option>
-                  <option value="admin">admin</option>
+                  {ROLE_OPTIONS.map((r) => <option key={r} value={r}>{r}</option>)}
                 </select>
               </td>
               <td>{u.disabled ? '비활성' : '활성'}</td>

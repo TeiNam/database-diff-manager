@@ -56,28 +56,37 @@ export function ingest(db: Db, input: IngestInput): IngestResult {
     const latest = one<{ id: number; version_no: number; model_hash: string }>(db,
       'SELECT id, version_no, model_hash FROM schema_versions WHERE schema_id = ? ORDER BY version_no DESC LIMIT 1', schemaId);
     if (latest && latest.model_hash === hash) return { status: 'duplicate', versionId: Number(latest.id), versionNo: Number(latest.version_no), warnings };
-    const versionNo = Number(latest?.version_no ?? 0) + 1;
+    const versionNo = takeNumber(db, 'UPDATE schemas SET next_version_no = next_version_no + 1 WHERE id = ? RETURNING next_version_no - 1 AS n', schemaId);
     const versionId = run(db, `
-      INSERT INTO schema_versions (schema_id, version_no, source_format, source_filename, source_text, source_sha256, model_hash, note, uploaded_by, uploaded_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      schemaId, versionNo, format, input.filename, input.text, sha256(input.text), hash, input.note ?? null, input.userId, new Date().toISOString(),
+      INSERT INTO schema_versions (schema_id, version_no, source_format, source_filename, source_sha256, model_hash, note, uploaded_by, uploaded_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      schemaId, versionNo, format, input.filename, sha256(input.text), hash, input.note ?? null, input.userId, new Date().toISOString(),
     ).lastInsertRowid;
+    run(db, 'INSERT INTO schema_version_sources (version_id, source_text) VALUES (?, ?)', versionId, input.text);
     for (const obj of [...model.tables, ...model.views]) linkObject(db, schemaId, versionId, obj);
     return { status: 'ok', versionId, versionNo, warnings };
   });
 }
 
+// 번호 카운터를 같은 트랜잭션 안에서 1 올리고 올리기 전 값을 쓴다 (지운 번호를 다시 쓰지 않는다)
+function takeNumber(db: Db, sql: string, id: number): number {
+  const r = one<{ n: number }>(db, sql, id);
+  if (!r) throw new Error(`번호 카운터 행이 없습니다: ${id}`);
+  return Number(r.n);
+}
+
 // 객체 내용 해시가 직전 리비전과 같으면 그 리비전을 재사용하고, 다르면 새 리비전을 만든다
 function linkObject(db: Db, schemaId: number, versionId: number, obj: Table | View): void {
-  const objectId = one<{ id: number }>(db, 'SELECT id FROM objects WHERE schema_id = ? AND kind = ? AND name = ?', schemaId, obj.kind, obj.name)?.id
-    ?? run(db, 'INSERT INTO objects (schema_id, kind, name) VALUES (?, ?, ?)', schemaId, obj.kind, obj.name).lastInsertRowid;
+  const objectId = Number(one<{ id: number }>(db, 'SELECT id FROM objects WHERE schema_id = ? AND kind = ? AND name = ?', schemaId, obj.kind, obj.name)?.id
+    ?? run(db, 'INSERT INTO objects (schema_id, kind, name) VALUES (?, ?, ?)', schemaId, obj.kind, obj.name).lastInsertRowid);
   const json = canonicalJson(obj);
   const contentHash = sha256(json);
-  const last = one<{ id: number; revision_no: number; content_hash: string }>(db,
-    'SELECT id, revision_no, content_hash FROM object_revisions WHERE object_id = ? ORDER BY revision_no DESC LIMIT 1', objectId);
+  const last = one<{ id: number; content_hash: string }>(db,
+    'SELECT id, content_hash FROM object_revisions WHERE object_id = ? ORDER BY revision_no DESC LIMIT 1', objectId);
   const revisionId = last && last.content_hash === contentHash
     ? Number(last.id)
-    : run(db, 'INSERT INTO object_revisions (object_id, revision_no, content_hash, model_json, fidelity, parse_error) VALUES (?, ?, ?, ?, ?, ?)',
-        objectId, Number(last?.revision_no ?? 0) + 1, contentHash, json, obj.fidelity, obj.parseError ?? null).lastInsertRowid;
-  run(db, 'INSERT INTO version_objects (version_id, revision_id) VALUES (?, ?)', versionId, revisionId);
+    : run(db, 'INSERT INTO object_revisions (object_id, revision_no, content_hash, fidelity, parse_error, model_json) VALUES (?, ?, ?, ?, ?, ?)',
+        objectId, takeNumber(db, 'UPDATE objects SET next_revision_no = next_revision_no + 1 WHERE id = ? RETURNING next_revision_no - 1 AS n', objectId),
+        contentHash, obj.fidelity, obj.parseError ?? null, json).lastInsertRowid;
+  run(db, 'INSERT INTO version_objects (version_id, schema_id, object_id, revision_id) VALUES (?, ?, ?, ?)', versionId, schemaId, objectId, revisionId);
 }

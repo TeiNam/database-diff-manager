@@ -43,7 +43,7 @@ describe('diff 에 DMS 매핑 반영', () => {
     const s = await setup();
     await s.upload();
     const manual = { kind: 'column', table: 'promotion', from: 'reg_dt', to: 'registered_at' };
-    const saved = await s.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: s.viewer, payload: { base: s.asIs.versionId, target: s.toBe.versionId, renames: [manual] } });
+    const saved = await s.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: s.dba, payload: { base: s.asIs.versionId, target: s.toBe.versionId, renames: [manual] } });
     const renames = saved.json().renames as { from: string; source: string }[];
     expect(renames).toHaveLength(11);
     expect(renames.filter((r) => r.from === 'reg_dt')).toEqual([{ ...manual, source: 'manual' }]);
@@ -100,7 +100,7 @@ describe('GET /api/migration-flow', () => {
 
 describe('PUT /api/diff/renames 와 DMS rename', () => {
   const put = (s: Awaited<ReturnType<typeof setup>>, renames: unknown[]) =>
-    s.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: s.viewer, payload: { base: s.asIs.versionId, target: s.toBe.versionId, renames } });
+    s.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: s.dba, payload: { base: s.asIs.versionId, target: s.toBe.versionId, renames } });
   const strip = (rs: { source: string }[]) => rs.map(({ source: _s, ...r }) => r);
 
   it('DMS rename 을 되돌려 보내도 수동으로 저장하지 않는다', async () => {

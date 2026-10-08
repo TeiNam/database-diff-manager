@@ -82,7 +82,7 @@ function PreviewPanel({ preview, from, to }: { preview: Preview; from: SchemaRef
   );
 }
 
-// As-Is → To-Be Schema 쌍에 DMS 매핑을 새 리비전으로 올린다 (admin 만 연다. 서버도 다시 확인한다)
+// As-Is → To-Be Schema 쌍에 DMS 매핑을 새 리비전으로 올린다 (admin·dba 만 연다. 서버도 다시 확인한다)
 export function MigrationUploadDialog({ from, to, onClose }: { from: SchemaRef; to: SchemaRef; onClose: () => void }) {
   const upload = useUploadMigration();
   const [preview, setPreview] = useState<Preview>();

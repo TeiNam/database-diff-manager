@@ -3,6 +3,7 @@ import { useDeleteDatabase, useDeleteSchema, useDeleteVersion, useMe, useSchemaI
 import { positive } from '../hooks/useSchemaContext';
 import { confirmByName } from '../lib/confirm-name';
 import { formatDateTime } from '../lib/format';
+import { canEdit } from '../lib/roles';
 import s from './Page.module.css';
 
 export function HistoryPage() {
@@ -15,7 +16,7 @@ export function HistoryPage() {
   const removeSchema = useDeleteSchema();
   const removeDatabase = useDeleteDatabase();
   const navigate = useNavigate();
-  const isAdmin = me.data?.role === 'admin';
+  const isEditor = canEdit(me.data);
   const info = schema.data;
   const confirmDelete = (target: typeof removeSchema, id: number, label: string, name: string) => {
     if (!confirmByName(label, name)) return;
@@ -29,7 +30,7 @@ export function HistoryPage() {
   return (
     <section className={s.page}>
       <h1 className={s.title}>버전 이력 · {info ? `${info.databaseName} › ${info.name}` : ''}</h1>
-      {isAdmin && info && (
+      {isEditor && info && (
         <div className={s.row}>
           <button type="button" className={`${s.btn} ${s.danger}`} disabled={removeSchema.isPending || removeDatabase.isPending}
             onClick={() => confirmDelete(removeSchema, info.id, 'Schema', info.name)}>Schema 삭제</button>
@@ -59,7 +60,7 @@ export function HistoryPage() {
                     <div className={s.row}>
                       {previous && <Link className={s.btn} to={`/db/${params.dbId}/schema/${schemaId}?base=${previous.id}&target=${v.id}`}>v{previous.versionNo}과 비교</Link>}
                       <a className={s.btn} href={`/api/versions/${v.id}/source`} download>원본</a>
-                      {isAdmin && (
+                      {isEditor && (
                         <button type="button" className={`${s.btn} ${s.danger}`} aria-label={`v${v.versionNo} 삭제`} disabled={remove.isPending}
                           onClick={() => window.confirm(`v${v.versionNo}을(를) 삭제할까요? 다른 버전에는 영향이 없습니다.`) && remove.mutate(v.id)}>
                           삭제

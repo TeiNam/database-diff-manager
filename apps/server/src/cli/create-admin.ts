@@ -3,7 +3,7 @@
 import { pathToFileURL } from 'node:url';
 import { hashPassword } from '../auth/password';
 import { dbPath, loadConfig } from '../config';
-import { openDb, type Db } from '../db/connection';
+import { closeDb, openDb, type Db } from '../db/connection';
 import { createUser, type User } from '../repos/users';
 import { PasswordSchema, UsernameSchema } from '../schemas';
 
@@ -53,7 +53,7 @@ async function main(): Promise<void> {
     const user = await createAdmin(db, username, password);
     console.log(`관리자 '${user.username}'을(를) 만들었습니다`);
   } finally {
-    db.close();
+    closeDb(db);
   }
 }
 

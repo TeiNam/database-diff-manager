@@ -10,6 +10,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "create-admin": "tsx src/cli/create-admin.ts",
+    "backup": "tsx src/cli/backup.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p ."
   },

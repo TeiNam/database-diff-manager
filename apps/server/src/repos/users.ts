@@ -1,7 +1,12 @@
 import { all, one, run, tx, type Db } from '../db/connection';
 import { AppError } from '../errors';
 
-export type Role = 'admin' | 'viewer';
+// admin: 전부 + 계정 관리, dba: 데이터 변경 전부, viewer: 읽기 전용
+export const ROLES = ['admin', 'dba', 'viewer'] as const;
+export type Role = (typeof ROLES)[number];
+
+// SQLite 확장 오류 코드: SQLITE_CONSTRAINT_UNIQUE · PRIMARYKEY · ROWID
+const UNIQUE_ERRCODES = new Set([2067, 1555, 2579]);
 
 export interface User {
   id: number;
@@ -29,7 +34,7 @@ const toUser = (r: UserRecord): User => ({
 });
 
 export function isUniqueViolation(e: unknown): boolean {
-  return e instanceof Error && e.message.includes('UNIQUE constraint failed');
+  return e instanceof Error && 'errcode' in e && UNIQUE_ERRCODES.has(Number(e.errcode));
 }
 
 export function createUser(db: Db, input: { username: string; passwordHash: string; role: Role }): User {
@@ -71,7 +76,7 @@ export interface UserPatch {
 export function updateUser(db: Db, id: number, patch: UserPatch): User {
   const user = getUser(db, id);
   if (!user) throw new AppError(404, '사용자를 찾을 수 없습니다');
-  const losesAdmin = user.role === 'admin' && !user.disabled && (patch.role === 'viewer' || patch.disabled === true);
+  const losesAdmin = user.role === 'admin' && !user.disabled && ((patch.role !== undefined && patch.role !== 'admin') || patch.disabled === true);
   tx(db, () => {
     if (losesAdmin && countActiveAdmins(db) <= 1) throw new AppError(409, '마지막 관리자는 강등하거나 비활성화할 수 없습니다');
     if (patch.role) run(db, 'UPDATE users SET role = ? WHERE id = ?', patch.role, id);

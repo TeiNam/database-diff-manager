@@ -5,6 +5,7 @@ import type { Me } from '../api/types';
 import { Icon } from '../components/Icon';
 import { UploadDialog } from '../features/upload/UploadDialog';
 import { useSchemaContext } from '../hooks/useSchemaContext';
+import { canEdit, isAdmin } from '../lib/roles';
 import { useTheme } from '../theme';
 import { APP_ENGINE, APP_NAME, APP_VERSION } from '../meta';
 import s from './Topbar.module.css';
@@ -17,7 +18,6 @@ export function Topbar({ me }: { me: Me }) {
   const logout = useLogout();
   const navigate = useNavigate();
   const [uploading, setUploading] = useState(false);
-  const isAdmin = me.role === 'admin';
   return (
     <header className={s.topbar}>
       <Link to="/" className={s.brand}>
@@ -39,12 +39,12 @@ export function Topbar({ me }: { me: Me }) {
           <Icon name="history" />버전 이력
         </Link>
       )}
-      {isAdmin && (
+      {canEdit(me) && (
         <button type="button" className={`${s.btn} ${s.primary}`} onClick={() => setUploading(true)}>
           <Icon name="upload" />업로드
         </button>
       )}
-      {isAdmin && (
+      {isAdmin(me) && (
         <Link className={s.iconBtn} to="/admin/users" aria-label="계정 관리" title="계정 관리">
           <Icon name="users" />
         </Link>

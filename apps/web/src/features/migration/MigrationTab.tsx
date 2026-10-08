@@ -4,6 +4,7 @@ import { useMe, useMigrationFlow } from '../../api/hooks';
 import type { DiffResponse } from '../../api/types';
 import { Banner } from '../../components/Banner';
 import { formatDateTime } from '../../lib/format';
+import { canEdit } from '../../lib/roles';
 import { MigrationRevisions } from './MigrationRevisions';
 import { MigrationTable } from './MigrationTable';
 import { MigrationUploadDialog, type SchemaRef } from './MigrationUploadDialog';
@@ -30,7 +31,7 @@ export function MigrationTab({ data }: { data: DiffResponse }) {
   const flow = useMigrationFlow(data.base.id, data.target.id, data.base.schemaId !== data.target.schemaId);
   const [uploading, setUploading] = useState(false);
   const [showRevisions, setShowRevisions] = useState(false);
-  const isAdmin = me.data?.role === 'admin';
+  const isEditor = canEdit(me.data);
   const from: SchemaRef = { id: data.base.schemaId, name: data.base.schemaName };
   const to: SchemaRef = { id: data.target.schemaId, name: data.target.schemaName };
   const dialog = uploading && <MigrationUploadDialog from={from} to={to} onClose={() => setUploading(false)} />;
@@ -45,7 +46,7 @@ export function MigrationTab({ data }: { data: DiffResponse }) {
         <div className={s.empty}>
           <p>{from.name} → {to.name} 쌍에는 전환 매핑이 없습니다. AWS DMS table-mapping JSON 을 올리면 테이블·컬럼 대응을 보여 주고 rename 을 diff 에 반영합니다.</p>
           <p className={s.meta}>역방향 비교에는 매핑을 뒤집어 rename 으로 반영합니다 ({to.name} → {from.name} 쌍에 매핑이 있으면 이 비교의 DDL 은 DROP 대신 RENAME 을 씁니다).</p>
-          {isAdmin && <button type="button" className={s.btn} onClick={() => setUploading(true)}>매핑 올리기</button>}
+          {isEditor && <button type="button" className={s.btn} onClick={() => setUploading(true)}>매핑 올리기</button>}
         </div>
         {dialog}
       </div>
@@ -60,9 +61,9 @@ export function MigrationTab({ data }: { data: DiffResponse }) {
         <span className={s.meta}>{mapping.uploadedBy} · {formatDateTime(mapping.uploadedAt)}</span>
         <span className={s.spacer} />
         <button type="button" className={s.btn} aria-expanded={showRevisions} onClick={() => setShowRevisions((v) => !v)}>리비전 목록</button>
-        {isAdmin && <button type="button" className={s.btn} onClick={() => setUploading(true)}>새 리비전 올리기</button>}
+        {isEditor && <button type="button" className={s.btn} onClick={() => setUploading(true)}>새 리비전 올리기</button>}
       </div>
-      {showRevisions && <MigrationRevisions from={from.id} to={to.id} isAdmin={isAdmin} />}
+      {showRevisions && <MigrationRevisions from={from.id} to={to.id} canEdit={isEditor} />}
       <Warnings warnings={warnings} />
       <MigrationTable flow={table} />
       {dialog}

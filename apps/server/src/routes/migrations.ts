@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../app';
-import { requireAdmin, requireLogin } from '../auth/plugin';
+import { requireEditor, requireLogin } from '../auth/plugin';
 import { attachment } from '../http';
 import { MAX_UPLOAD_BYTES, MIGRATION_BODY_LIMIT } from '../limits';
 import { getSchema } from '../repos/catalog';
@@ -22,7 +22,7 @@ const FlowQuery = z.object({ base: Id, target: Id });
 
 export function migrationRoutes(app: FastifyInstance, ctx: AppContext): void {
   // 권한은 본문을 읽기 전(onRequest)에 확인한다. 익명 요청이 40MB 본문을 다 보내고 파싱까지 하지 않도록
-  app.post('/migrations', { onRequest: requireAdmin, bodyLimit: MIGRATION_BODY_LIMIT }, async (req, reply) => {
+  app.post('/migrations', { onRequest: requireEditor, bodyLimit: MIGRATION_BODY_LIMIT }, async (req, reply) => {
     const body = UploadBody.parse(req.body);
     const result = uploadMigration(ctx.db, { ...body, note: body.note || undefined, userId: req.user!.id });
     ctx.cache.clear(); // 쌍의 최신 매핑이 바뀌어 diff 결과가 달라진다
@@ -41,7 +41,7 @@ export function migrationRoutes(app: FastifyInstance, ctx: AppContext): void {
     return reply.header('content-type', 'application/json; charset=utf-8').header('content-disposition', attachment(filename)).send(text);
   });
 
-  app.delete('/migrations/:id', { onRequest: requireAdmin }, async (req) => {
+  app.delete('/migrations/:id', { onRequest: requireEditor }, async (req) => {
     deleteMigration(ctx.db, IdParams.parse(req.params).id);
     ctx.cache.clear();
     return { ok: true };

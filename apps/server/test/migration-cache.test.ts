@@ -30,7 +30,7 @@ describe('전환 매핑 파싱·flow 캐시', () => {
     for (let i = 0; i < 3; i++) expect((await get(`/api/diff?base=${asIs.versionId}&target=${toBe.versionId}`)).statusCode).toBe(200);
     expect((await get(`/api/diff?base=${toBe.versionId}&target=${asIs.versionId}`)).statusCode).toBe(200);
     for (let i = 0; i < 2; i++) expect((await get(`/api/migration-flow?base=${asIs.versionId}&target=${toBe.versionId}`)).statusCode).toBe(200);
-    const saved = await ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.viewer, payload: { base: asIs.versionId, target: toBe.versionId, renames: [] } });
+    const saved = await ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.dba, payload: { base: asIs.versionId, target: toBe.versionId, renames: [] } });
     expect(saved.statusCode).toBe(200);
     expect(sourceReads() - before).toBe(1);
 

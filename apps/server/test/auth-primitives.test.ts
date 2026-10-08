@@ -40,12 +40,14 @@ describe('users', () => {
     const db = openDb(':memory:');
     createUser(db, { username: 'kim', passwordHash: 'h', role: 'viewer' });
     expect(() => createUser(db, { username: 'kim', passwordHash: 'h', role: 'admin' })).toThrow('이미 존재하는 사용자명입니다');
+    expect(() => createUser(db, { username: 'KIM', passwordHash: 'h', role: 'admin' })).toThrow('이미 존재하는 사용자명입니다');
   });
 
   it('마지막 활성 관리자는 강등·비활성화할 수 없다', () => {
     const db = openDb(':memory:');
     const admin = createUser(db, { username: 'admin', passwordHash: 'h', role: 'admin' });
     expect(() => updateUser(db, admin.id, { role: 'viewer' })).toThrow('마지막 관리자');
+    expect(() => updateUser(db, admin.id, { role: 'dba' })).toThrow('마지막 관리자');
     expect(() => updateUser(db, admin.id, { disabled: true })).toThrow('마지막 관리자');
     createUser(db, { username: 'admin2', passwordHash: 'h', role: 'admin' });
     expect(updateUser(db, admin.id, { disabled: true }).disabled).toBe(true);

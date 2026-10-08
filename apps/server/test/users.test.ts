@@ -2,20 +2,27 @@ import { describe, expect, it } from 'vitest';
 import { login, loggedInApp, as } from './helpers';
 
 describe('/api/users', () => {
-  it('viewer는 403', async () => {
-    const { app, viewer } = await loggedInApp();
+  it('viewer·dba는 403', async () => {
+    const { app, viewer, dba } = await loggedInApp();
     expect((await app.inject({ method: 'GET', url: '/api/users', headers: viewer })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'GET', url: '/api/users', headers: dba })).statusCode).toBe(403);
   });
 
   it('목록·생성·중복·약한 비밀번호', async () => {
     const { app, admin } = await loggedInApp();
     const list = await app.inject({ method: 'GET', url: '/api/users', headers: admin });
-    expect(list.json().map((u: { username: string }) => u.username)).toEqual(['admin', 'viewer']);
+    expect(list.json().map((u: { username: string }) => u.username)).toEqual(['admin', 'dba', 'viewer']);
     expect(list.body).not.toContain('password');
 
     const created = await app.inject({ method: 'POST', url: '/api/users', headers: admin, payload: { username: 'new.user', password: 'long-password-1', role: 'viewer' } });
     expect(created.statusCode).toBe(201);
     expect(created.json()).toMatchObject({ username: 'new.user', role: 'viewer', disabled: false });
+
+    const dbaUser = await app.inject({ method: 'POST', url: '/api/users', headers: admin, payload: { username: 'new.dba', password: 'long-password-1', role: 'dba' } });
+    expect(dbaUser.statusCode).toBe(201);
+    expect(dbaUser.json()).toMatchObject({ username: 'new.dba', role: 'dba' });
+    const caseDup = await app.inject({ method: 'POST', url: '/api/users', headers: admin, payload: { username: 'NEW.USER', password: 'long-password-1', role: 'viewer' } });
+    expect(caseDup.statusCode).toBe(409); // 대소문자만 다른 이름도 중복이다
 
     const dup = await app.inject({ method: 'POST', url: '/api/users', headers: admin, payload: { username: 'new.user', password: 'long-password-1', role: 'viewer' } });
     expect(dup.statusCode).toBe(409);
@@ -45,5 +52,6 @@ describe('/api/users', () => {
     expect((await app.inject({ method: 'PATCH', url: `/api/users/${adminId}`, headers: admin, payload: {} })).statusCode).toBe(400);
     expect((await app.inject({ method: 'PATCH', url: '/api/users/999', headers: admin, payload: { disabled: true } })).statusCode).toBe(404);
     expect((await app.inject({ method: 'PATCH', url: `/api/users/${adminId}`, headers: admin, payload: { role: 'viewer' } })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'PATCH', url: `/api/users/${adminId}`, headers: admin, payload: { role: 'dba' } })).statusCode).toBe(409);
   });
 });

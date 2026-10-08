@@ -29,6 +29,14 @@ Behind a reverse proxy such as nginx or ALB, the socket address of every request
 - If the server is directly reachable without going through the proxy and you trust everything with `TRUST_PROXY=true`, a client can forge `X-Forwarded-For` to bypass the limit. Block access to the server port from anything other than the proxy.
 - The login limit key is `IP:username` (username in lowercase), so other users behind the same NAT do not affect each other.
 
+## Operations (backup and schema upgrades)
+
+- **Backup**: `npm run backup -w @tdm/server -- <path>` writes a consistent snapshot with `VACUUM INTO`; it is safe while the server runs and refuses to overwrite an existing file. In Docker: `docker compose -f docker/compose.yaml exec app node --import tsx src/cli/backup.ts /data/backup-YYYYMMDD.db`. Do not copy only `tdm.db` while the server runs — recent commits may still be in `tdm.db-wal`.
+- **Schema upgrades**: migrations in `src/db/migrations/NNN_*.sql` run at startup, tracked by `PRAGMA user_version`. A file whose first line is `-- foreign_keys: off` is run with foreign keys disabled (for table rebuilds) and checked with `PRAGMA foreign_key_check` before commit, followed by a `VACUUM`. Take a backup before upgrading.
+- Migration 003 (schema v3) keeps user accounts (when two usernames differ only by case, the older one is kept), signs everyone out, and **clears uploaded data** (Databases, Schemas, versions, rename and DMS mappings) — upload the definition files again.
+- If the database's `user_version` is newer than the latest migration the server knows (e.g. after rolling back to an older image), the server refuses to start. Restore a backup taken with that version.
+- Connection settings: WAL, `synchronous=NORMAL`, `journal_size_limit=64MB`, `busy_timeout=5000`, `foreign_keys=ON`; `PRAGMA optimize` runs on shutdown.
+
 ## API summary
 
 All paths are under `/api`. Requests that change state must include the `X-Requested-With: tdm` header.
@@ -38,17 +46,18 @@ All paths are under `/api`. Requests that change state must include the `X-Reque
 | POST | `/auth/login`, `/auth/logout` · GET `/auth/me` | — / logged in |
 | GET·POST·PATCH | `/users[/:id]` | admin |
 | GET | `/tree`, `/schemas/:id`, `/schemas/:id/versions` | logged in |
-| POST·PATCH·DELETE | `/databases[/:id]` (`confirmName` required for deletion) | admin |
-| DELETE | `/schemas/:id` (`confirmName` required; cascades to versions and object history) | admin |
-| POST | `/uploads` (multipart: `meta` JSON + `files`) | admin |
+| POST·PATCH·DELETE | `/databases[/:id]` (`confirmName` required for deletion) | admin, dba |
+| DELETE | `/schemas/:id` (`confirmName` required; cascades to versions and object history) | admin, dba |
+| POST | `/uploads` (multipart: `meta` JSON + `files`) | admin, dba |
 | GET | `/versions/:id`, `/versions/:id/source` | logged in |
-| DELETE | `/versions/:id` | admin |
-| GET | `/diff?base=&target=` · PUT `/diff/renames` | logged in |
+| DELETE | `/versions/:id` | admin, dba |
+| GET | `/diff?base=&target=` | logged in |
+| PUT | `/diff/renames` | admin, dba |
 | GET | `/objects/:id/history` | logged in |
-| POST | `/migrations` (JSON: `fromSchemaId`, `toSchemaId`, `filename`, `source`, `note?`; returns parse warnings) · DELETE `/migrations/:id` | admin |
+| POST | `/migrations` (JSON: `fromSchemaId`, `toSchemaId`, `filename`, `source`, `note?`; returns parse warnings) · DELETE `/migrations/:id` | admin, dba |
 | GET | `/migrations?from=&to=`, `/migrations/:id/source`, `/migration-flow?base=&target=` | logged in |
 
-`PUT /diff/renames` (saves rename mappings) is open to all logged-in users, including viewers. This is the policy set in the design document.
+Roles: `admin` (everything, including account management), `dba` (every data change), `viewer` (read-only). `PUT /diff/renames` (saves rename mappings) requires admin or dba; the role is checked in `onRequest`, before the body is parsed, so a viewer gets 403 without the body being read. Saving renames for the same version on both sides returns 400.
 
 A migration mapping belongs to a Schema pair (As-Is → To-Be). Uploading again for the same pair adds a revision, and the latest revision is applied automatically whenever the BASE version belongs to the From Schema and the TARGET version to the To Schema (never in the reverse direction). Renames in `GET /diff` carry `source: 'dms' | 'manual'`. `PUT /diff/renames` saves manual renames only: entries identical to a DMS-derived rename are dropped on the server before the 500-entry limit is applied.
 
