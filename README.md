@@ -38,14 +38,14 @@ See [table-define-exporter](https://github.com/TeiNam/table-define-exporter) for
 ## Run with Docker
 
 ```bash
-docker compose -f docker/compose.yaml up -d --build      # http://localhost:3000
+docker compose -f docker/compose.yaml up -d --build      # http://127.0.0.1:3000 (this host only)
 docker compose -f docker/compose.yaml exec -it app \
   node --import tsx src/cli/create-admin.ts admin         # first admin (password prompt)
 ```
 
 - Data (SQLite) is stored in `/data` on the `tdm-data` volume.
 - Images are published to GHCR: `docker pull ghcr.io/teinam/database-diff-manager:latest`
-- The compose file sets `COOKIE_SECURE=false` for direct HTTP access. Behind an HTTPS reverse proxy, remove it and set `TRUST_PROXY` if needed.
+- The compose file publishes the port on `127.0.0.1` only and sets `COOKIE_SECURE=false` for direct HTTP access from this host. To expose it on a LAN, put an HTTPS reverse proxy in front, remove `COOKIE_SECURE` (default `true`), and set `TRUST_PROXY` if needed.
 
 ## Run locally (Node.js 22.13+)
 
@@ -91,9 +91,9 @@ npm run test:mysql -w @tdm/core   # applies generated DDL on MySQL 8.0/8.4 conta
 
 ## CI
 
-On every push to `main`, GitHub Actions runs typecheck, tests, and the build, then bumps the product version, creates the `vX.Y.N` tag and a GitHub Release, and publishes a Docker image (`linux/amd64`, `linux/arm64`) tagged with that version to GHCR. Pushes that only change documentation (`*.md`, `docs/`) do not trigger it.
+On every push to `main`, GitHub Actions runs typecheck, tests, and the build, then computes the product version, publishes a Docker image (`linux/amd64`, `linux/arm64`) tagged with that version to GHCR, and finally creates the `vX.Y.N` tag and a GitHub Release. Re-running a workflow for the same commit reuses that commit's tag, and `latest` only moves when the commit is still the head of `main`. Manual `workflow_dispatch` runs on other branches only run the tests. Pushes that only change documentation (`*.md`, `docs/`) do not trigger it.
 
-**Versioning**: `major.minor` comes from `apps/web/package.json`; the patch number is the latest `vX.Y.*` tag + 1 (starting at 0) — see `scripts/next-version.mjs`. To start a new minor/major line, change the version in `apps/web/package.json`. The version shown in the header and footer is the one injected at build time (`APP_VERSION`); local builds show `X.Y.Z-dev`. Pushing a `v*` tag manually builds an image for that tag without creating a new version.
+**Versioning**: `major.minor` comes from `apps/web/package.json`; the patch number is the latest `vX.Y.*` tag + 1 (starting at 0) — see `scripts/next-version.mjs`. To start a new minor/major line, change the version in `apps/web/package.json`. The version shown in the header and footer is the one injected at build time (`APP_VERSION`); local builds show `X.Y.Z-dev`. Pushing a `v*` tag manually (it must be `vX.Y.Z`) builds an image for that tag without creating a new version, and creates its Release if missing.
 
 ---
 

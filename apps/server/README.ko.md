@@ -17,7 +17,7 @@ npm run dev -w @tdm/server                          # http://127.0.0.1:3000
 | `HOST` | `127.0.0.1` | 바인딩 주소 |
 | `PORT` | `3000` | 포트 |
 | `DATA_DIR` | `./data` | SQLite 파일(`tdm.db`) 위치 |
-| `COOKIE_SECURE` | `true` | HTTP로 개발할 때만 `false`로 설정. localhost가 아닌 주소로 접속하면 Secure 쿠키가 전송되지 않습니다. `false`이면 HSTS와 `upgrade-insecure-requests`도 꺼집니다 |
+| `COOKIE_SECURE` | `true` | 평문 HTTP로 접속할 때만 `false`로 설정(로컬 개발, 또는 `127.0.0.1`에만 바인딩하는 `docker/compose.yaml`). LAN에 열 때 권장하는 HTTPS 리버스 프록시 뒤에서는 `true`로 둡니다. localhost가 아닌 주소로 접속하면 Secure 쿠키가 전송되지 않습니다. `false`이면 HSTS와 `upgrade-insecure-requests`도 꺼집니다 |
 | `WEB_DIST` | `<cwd>/../web/dist` | 빌드된 웹(`apps/web/dist`) 위치. 루트에서 `npm start` 하면 기본값 그대로 동작합니다. 웹을 다시 빌드하면 서버를 재시작해야 반영됩니다 |
 | `TRUST_PROXY` | `false` | 리버스 프록시 뒤에서 `X-Forwarded-For`를 신뢰할 범위. `true`/`false`, 홉 수(예: `1`), 또는 쉼표로 구분한 IP/CIDR 목록(예: `10.0.0.0/8,127.0.0.1`) |
 

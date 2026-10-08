@@ -53,7 +53,7 @@ BASE(As-Is)·TARGET(To-Be) 스키마는 지금처럼 각각 업로드하고, 매
 
 ## 3. 데이터 모델과 적용 범위
 
-전환 매핑은 **Schema 쌍**(As-Is Schema → To-Be Schema)에 붙는다. 같은 쌍에 다시 올리면 리비전이 1 늘고, 최신 리비전이 적용된다. 어느 버전 쌍을 비교하든 BASE 버전의 Schema 가 매핑의 From, TARGET 버전의 Schema 가 To 이면 최신 리비전을 자동 적용한다. 역방향(To → From) 비교에는 적용하지 않는다.
+전환 매핑은 **Schema 쌍**(As-Is Schema → To-Be Schema)에 붙는다. 같은 쌍에 다시 올리면 리비전이 1 늘고, 최신 리비전이 적용된다. 어느 버전 쌍을 비교하든 BASE 버전의 Schema 가 매핑의 From, TARGET 버전의 Schema 가 To 이면 최신 리비전을 자동 적용한다. 역방향(To → From) 비교에는 그 매핑을 뒤집어 rename 으로 반영한다(되돌리기 DDL 이 DROP TABLE/DROP COLUMN 대신 RENAME 을 쓰도록). 같은 버전 쌍에 정방향 매핑이 있으면 그것이 우선한다. 전환 표(`/migration-flow`)는 정방향 쌍에서만 보여 준다.
 
 ```sql
 -- 002_migration_mappings.sql
@@ -84,11 +84,12 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 ### packages/core (런타임 의존성 0 유지)
 
 - `dms-mapping.ts`
-  - `parseDmsMapping(text: string): { mapping: DmsMapping; warnings: DmsWarning[] }`
+  - `parseDmsMapping(text: string, opts?: { fromSchema?: string }): { mapping: DmsMapping; warnings: DmsWarning[] }` — `fromSchema`(BASE Schema 이름)를 지정하면 그 스키마 룰만 쓴다("구현 중 구체화한 사항" 참고)
   - `DmsMapping`: `fromSchema`, `toSchema?`, `selection`(include/exclude 패턴), `tables`(As-Is → To-Be), `columns`(As-Is 테이블별 As-Is → To-Be 컬럼), `removedColumns`(As-Is 테이블별)
   - `DmsWarning`: `{ ruleId, code: 'unsupported' | 'duplicate' | 'invalid', message }`
 - `migration-flow.ts`
   - `toRenameMappings(mapping, base: SchemaModel, target: SchemaModel): RenameMapping[]` — 컬럼 rename 의 `table` 을 To-Be 테이블명으로, 이름을 모델의 실제 표기(대소문자)로 맞춘다. 양쪽 모델에 없는 대상은 만들지 않는다.
+  - `toReverseRenameMappings(mapping, asIs, toBe)` / `flowRenameMappings(flow, direction)` — 역방향(BASE = To-Be) 비교용. 테이블은 To-Be → As-Is 로 뒤집고, 컬럼 rename 의 `table` 은 역방향 TARGET 인 As-Is 테이블명이다. remove-column 은 역방향에선 ADD COLUMN 이 되므로 diff 에 맡긴다.
   - `buildMigrationFlow(base: SchemaModel, target: SchemaModel, mapping: DmsMapping): MigrationFlow`
     - 테이블 행: `asIs?`, `toBe?`, `status` — `ok`(양쪽 존재) / `missing-target`(To-Be 에 없음) / `missing-source`(As-Is 에 없음) / `excluded`(selection 밖) / `unmapped-target`(어느 As-Is 와도 이어지지 않은 To-Be 테이블)
     - 컬럼 행: `asIs?`, `toBe?`, 양쪽 타입, `status` — `renamed` / `same`(이름 그대로) / `removed`(remove-column) / `added`(To-Be 에만 있음) / `dropped`(As-Is 에 있는데 룰도 To-Be 대응도 없음) / `missing`(룰이 가리키는 컬럼이 모델에 없음)
@@ -102,14 +103,16 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 
 | 메서드 | 경로 | 권한 | 설명 |
 |---|---|---|---|
-| POST | `/migrations` | admin | JSON 본문 `{ fromSchemaId, toSchemaId, filename, source, note? }`. 파싱 실패는 400, 경고는 응답에 포함 |
+| POST | `/migrations` | admin | JSON 본문 `{ fromSchemaId, toSchemaId, filename, source, note? }`. 파싱 실패·From Schema 룰 없음은 400, 경고는 응답에 포함 |
 | GET | `/migrations?from=&to=` | 로그인 | 쌍의 리비전 목록(원문 제외) |
 | GET | `/migrations/:id/source` | 로그인 | 원문 다운로드 |
 | DELETE | `/migrations/:id` | admin | 리비전 삭제 |
 | GET | `/migration-flow?base=&target=` | 로그인 | 적용 매핑 메타 + `MigrationFlow` + 파싱 경고. 매핑이 없으면 `{ mapping: null }` |
 
 - 업로드 본문은 JSON 이고 크기 상한은 기존 업로드 상한(20MB)과 같다.
-- `computeDiff`: 쌍의 최신 매핑이 있으면 `toRenameMappings` 결과와 수동 매핑을 합쳐(수동 우선) `diffSchemas` 에 넘긴다. 캐시 키에 매핑 id 를 넣고, 매핑 추가·삭제 시 캐시를 비운다. 응답의 `renames` 항목에 `source: 'dms' | 'manual'` 을 붙인다.
+- `computeDiff`: 쌍의 최신 매핑이 있으면 `toRenameMappings` 결과와 수동 매핑을 합쳐(수동 우선) `diffSchemas` 에 넘긴다. 정방향 매핑이 없고 역쌍(TARGET → BASE) 매핑이 있으면 뒤집은 rename 을 쓴다(`source: 'dms'`). 캐시 키에 매핑 방향·id 를 넣고, 매핑 추가·삭제와 버전·Schema·Database 삭제 시 캐시를 비운다. 응답의 `renames` 항목에 `source: 'dms' | 'manual'` 을 붙인다.
+- 매핑 캐시: diff 요청마다 원문(최대 20MB)을 읽지 않도록 캐시 키용으로는 최신 매핑 id 만 조회하고(`latestMigrationId`), 원문은 캐시 miss 때만 읽는다. 파싱 결과(mapping + warnings)는 매핑 id, 전환 표는 매핑 id + As-Is·To-Be 버전 id 를 키로 diff 캐시와 같은 LRU 에 둔다. `GET /diff`·`PUT /diff/renames`·`GET /migration-flow` 가 함께 쓰고, diff 캐시와 같은 시점에 비운다.
+- `/diff` 라우트(`PUT /diff/renames` 포함)는 로그인을 `onRequest` 에서 확인한다(본문 파싱 전 401).
 
 ### apps/web
 
@@ -123,14 +126,14 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 
 - 파싱 불가 JSON, `rules` 없음, 룰 수 초과 → 400, 한국어 메시지.
 - From/To Schema 가 같거나 없으면 400/404.
-- 파일의 `schema-name` 이 From Schema 이름과 다르면 업로드는 허용하고 경고로 돌려준다(Schema 이름을 바꿔 올리는 경우가 있어서).
+- 파일의 `schema-name` 이 From Schema 이름과 다르면, 파일의 스키마가 하나뿐일 때는 업로드를 허용하고 경고로 돌려준다(Schema 이름을 바꿔 올리는 경우가 있어서). 파일에 여러 스키마가 있는데 From Schema 룰이 하나도 없으면 400("매핑에 '<name>' 스키마 룰이 없습니다"), 미리보기에도 같은 오류를 보여 준다.
 - 적용 시 모델에 없는 대상을 가리키는 룰은 diff 에 영향을 주지 않고, 전환 표에서 `missing-*` 상태로 드러난다.
 
 ## 6. 테스트
 
 - 픽스처: 실제 샘플을 3개 테이블 분량으로 줄이고 이름을 가린 `packages/core/test/fixtures/dms/` (JSON + As-Is/To-Be SQL). 전체 샘플 파일은 로컬에 있을 때만 도는 테스트(`samples/dms` 존재 시)로 룰 수와 경고 0을 확인한다.
 - core: action 별 파싱, 미지원 action 경고, 중복 rename, selection 와일드카드·exclude, 대소문자 무시 매칭, `toRenameMappings`(To-Be 테이블명 치환), `buildMigrationFlow` 상태별 사례, 반영 후 `diffSchemas` 에서 drop+add 대신 rename 이 나오는지.
-- server: 권한(anon 401 / viewer 403 / admin), 리비전 증가, flow API, diff 에 DMS rename 반영과 수동 우선, 역방향 미적용, Schema 삭제 시 연쇄 삭제, 캐시 무효화.
+- server: 권한(anon 401 / viewer 403 / admin), 리비전 증가, flow API, diff 에 DMS rename 반영과 수동 우선, 역방향 매핑 반전(RENAME, DROP 없음), Schema 삭제 시 연쇄 삭제, 캐시 무효화.
 - web: 전환 탭 렌더, 매핑 없음 안내, 필터·검색·펼치기, 업로드 대화상자 미리보기·권한.
 
 ## 7. 범위 밖
@@ -138,7 +141,6 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 - 미지원 DMS action(`add-column`, `change-data-type`, 대소문자·접두사 변환, 인덱스 룰)의 실제 반영
 - 전환 표 CSV·엑셀 내보내기
 - TARGET 버전 없이 매핑만으로 To-Be 스키마 예측
-- 역방향 비교에 매핑 반전 적용
 
 ## 구현 중 구체화한 사항
 
@@ -148,4 +150,6 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 - 상태가 ok 가 아닌 테이블에는 컬럼 행을 만들지 않는다.
 - 같은 Schema 끼리 비교하면 전환 탭이 안내 문구를 보여 준다.
 - `PUT /diff/renames` 는 DMS 로 계산된 rename 과 같은 항목을 수동 한도(500개) 적용 전에 서버에서 버린다.
-- `fromSchema` 는 룰 순서상 첫 번째로 와일드카드(`%`)가 없는 `schema-name` 이다(모두 와일드카드면 `%`). 이와 맞지 않는 schema 의 룰은 경고로 남기고 반영하지 않는다.
+- `fromSchema`: 서버(업로드·적용)와 웹 미리보기는 BASE(As-Is) Schema 이름을 `parseDmsMapping(text, { fromSchema })` 로 넘기고, 그 스키마(대소문자 무시)의 룰만 쓴다. 지정하지 않으면 룰 순서상 첫 번째로 와일드카드(`%`)가 없는 `schema-name` 이다(모두 와일드카드면 `%`). 이와 맞지 않는 schema 의 룰은 경고로 남기고 반영하지 않는다.
+- 길이 상한: 룰마다 schema·table·column·value·rule-id·rule-type·rule-action·rule-target 이 256자를 넘으면 `invalid` 경고로 버리고, 통과한 룰만 `fromSchema` 후보·비교에 쓴다(거대한 schema-name 이 매 룰 비교에 쓰이는 DoS 방지). 경고 메시지에 넣는 사용자 값은 64자로 잘라 표시한다.
+- 웹의 diff·전환 표 쿼리는 `staleTime` 30초다. 다른 사용자가 바꾼 매핑·수동 rename 이 이 시간이 지나면 반영된다.
