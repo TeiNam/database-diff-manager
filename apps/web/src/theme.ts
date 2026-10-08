@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
+import { readStorage, writeStorage } from './lib/storage';
 
 export type Theme = 'dark' | 'light';
 const STORAGE_KEY = 'tdm-theme';
 
 export function initialTheme(): Theme {
-  const saved = localStorage.getItem(STORAGE_KEY);
+  const saved = readStorage(STORAGE_KEY);
   if (saved === 'dark' || saved === 'light') return saved;
   return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }
@@ -18,7 +19,7 @@ export function useTheme() {
   const toggle = useCallback(() => {
     setTheme((current) => {
       const next = current === 'dark' ? 'light' : 'dark';
-      localStorage.setItem(STORAGE_KEY, next);
+      writeStorage(STORAGE_KEY, next);
       return next;
     });
   }, []);

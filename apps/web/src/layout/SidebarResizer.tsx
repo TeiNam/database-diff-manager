@@ -6,13 +6,15 @@ const KEY_STEP = 16;
 
 interface Props {
   width: number;
-  onChange: (width: number) => void;
+  onChange: (width: number) => void; // 드래그 중: 화면만 바꾼다
+  onCommit: (width: number) => void; // 드래그 끝·키보드: 저장까지 한다
   onReset: () => void;
 }
 
 // 사이드바 오른쪽 경계의 너비 조절 핸들: 드래그, ←/→·Home/End, 더블클릭으로 기본값
-export function SidebarResizer({ width, onChange, onReset }: Props) {
+export function SidebarResizer({ width, onChange, onCommit, onReset }: Props) {
   const start = useRef<{ x: number; width: number } | null>(null);
+  const last = useRef(width); // 드래그 중 마지막으로 계산한 너비 (pointerup 에서 저장한다)
   const [dragging, setDragging] = useState(false);
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
@@ -20,22 +22,25 @@ export function SidebarResizer({ width, onChange, onReset }: Props) {
     e.preventDefault();
     e.currentTarget.setPointerCapture?.(e.pointerId);
     start.current = { x: e.clientX, width };
+    last.current = width;
     setDragging(true);
   };
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
     if (!start.current) return;
-    onChange(start.current.width + e.clientX - start.current.x);
+    last.current = start.current.width + e.clientX - start.current.x;
+    onChange(last.current);
   };
   const stop = () => {
+    if (start.current) onCommit(last.current);
     start.current = null;
     setDragging(false);
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'ArrowLeft') onChange(width - KEY_STEP);
-    else if (e.key === 'ArrowRight') onChange(width + KEY_STEP);
-    else if (e.key === 'Home') onChange(SIDEBAR_MIN);
-    else if (e.key === 'End') onChange(sidebarMax());
+    if (e.key === 'ArrowLeft') onCommit(width - KEY_STEP);
+    else if (e.key === 'ArrowRight') onCommit(width + KEY_STEP);
+    else if (e.key === 'Home') onCommit(SIDEBAR_MIN);
+    else if (e.key === 'End') onCommit(sidebarMax());
     else return;
     e.preventDefault();
   };

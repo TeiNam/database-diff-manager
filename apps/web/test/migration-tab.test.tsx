@@ -82,6 +82,23 @@ describe('MigrationTab: 매핑 있음', () => {
     expect(screen.getByText('조건에 맞는 테이블이 없습니다')).toBeInTheDocument();
   });
 
+  it('필터 radiogroup 은 ←/→ 로 이동·선택하고, 선택된 것만 Tab 순서에 있다', async () => {
+    mockApi(routes('viewer'));
+    renderWithProviders(<MigrationTab data={data()} />);
+    await screen.findByRole('table', { name: '전환 표' });
+    const filters = screen.getByRole('radiogroup', { name: '전환 표 필터' });
+    const radio = (name: string) => within(filters).getByRole('radio', { name });
+    expect(within(filters).getAllByRole('radio').map((r) => r.tabIndex)).toEqual([0, -1, -1, -1, -1]);
+    radio('전체').focus();
+    const user = userEvent.setup();
+    await user.keyboard('{ArrowRight}');
+    expect(radio('이름변경')).toHaveAttribute('aria-checked', 'true');
+    expect(radio('이름변경')).toHaveFocus();
+    await user.keyboard('{ArrowLeft}{ArrowLeft}');
+    expect(radio('신규')).toHaveAttribute('aria-checked', 'true');
+    expect(radio('신규')).toHaveFocus();
+  });
+
   it('행을 펼치면 컬럼 매핑과 상태 배지', async () => {
     mockApi(routes('viewer'));
     renderWithProviders(<MigrationTab data={data()} />);
@@ -112,6 +129,7 @@ describe('MigrationTab: 매핑 있음', () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: '리비전 목록' }));
     const list = await screen.findByRole('table', { name: '전환 매핑 리비전' });
+    expect(within(list).getAllByRole('columnheader').at(-1)).toHaveTextContent('동작');
     expect(within(list).getAllByRole('link', { name: '원본' })[1]).toHaveAttribute('href', '/api/migrations/4/source');
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     await user.click(within(list).getByRole('button', { name: 'r2 삭제' }));

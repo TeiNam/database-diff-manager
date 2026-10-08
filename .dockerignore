@@ -12,6 +12,10 @@ data
 *.db
 *.db-wal
 *.db-shm
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/.env*
 mysql.txt
 **/.DS_Store
 .code-review-graph

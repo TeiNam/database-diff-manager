@@ -58,13 +58,16 @@ export const useVersions = (schemaId?: number) =>
 export const useVersion = (id?: number) =>
   useQuery({ queryKey: queryKeys.version(id), queryFn: () => api<VersionDetail>(`/versions/${id}`), enabled: id !== undefined, staleTime: Infinity });
 
-// 버전 내용은 불변이라 diff 결과는 rename 변경 전까지 다시 받을 필요가 없다
+// 버전 내용은 불변이지만 diff 에 반영되는 전환 매핑·수동 rename 은 다른 사용자가 바꿀 수 있다.
+// 내가 바꾼 것은 mutation 이 캐시를 갱신·무효화하고, 남이 바꾼 것은 이 시간이 지나면 다시 받아 반영한다
+export const DIFF_STALE_MS = 30_000;
+
 export const useDiff = (base?: number, target?: number) =>
   useQuery({
     queryKey: queryKeys.diff(base, target),
     queryFn: () => api<DiffResponse>(`/diff?base=${base}&target=${target}`),
     enabled: base !== undefined && target !== undefined,
-    staleTime: Infinity,
+    staleTime: DIFF_STALE_MS,
   });
 
 export function useSaveRenames() {
@@ -148,14 +151,14 @@ export function usePatchUser() {
 export const useObjectHistory = (id?: number) =>
   useQuery({ queryKey: queryKeys.objectHistory(id), queryFn: () => api<ObjectHistory>(`/objects/${id}/history`), enabled: id !== undefined });
 
-// 전환 매핑은 바뀔 수 있지만, 바꾸는 쪽(올리기·삭제)이 캐시를 무효화하므로 그 전까지 다시 받을 필요가 없다.
+// 전환 매핑은 내가 올리기·삭제하면 캐시를 무효화하고, 다른 사용자가 바꾼 것은 DIFF_STALE_MS 가 지나면 다시 받는다.
 // enabled=false(같은 Schema 끼리 비교 등)면 요청하지 않는다
 export const useMigrationFlow = (base?: number, target?: number, enabled = true) =>
   useQuery({
     queryKey: queryKeys.migrationFlow(base, target),
     queryFn: () => api<MigrationFlowResponse>(`/migration-flow?base=${base}&target=${target}`),
     enabled: enabled && base !== undefined && target !== undefined,
-    staleTime: Infinity,
+    staleTime: DIFF_STALE_MS,
   });
 
 export const useMigrations = (from: number, to: number, enabled: boolean) =>

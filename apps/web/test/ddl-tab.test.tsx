@@ -42,6 +42,15 @@ describe('DdlTab', () => {
     expect(screen.getByTestId('location')).toHaveTextContent('base=12&target=11');
   });
 
+  it('방향 radiogroup 은 ←/→ 로도 방향을 바꾸고, 선택된 방향만 Tab 순서에 있다', async () => {
+    renderWithProviders(<DdlTab data={DATA} />, { route: ROUTE, path: '/db/:dbId/schema/:schemaId' });
+    const group = screen.getByRole('radiogroup', { name: 'DDL 방향' });
+    expect(within(group).getAllByRole('radio').map((r) => r.tabIndex)).toEqual([0, -1]);
+    within(group).getByRole('radio', { name: 'v1 → v2' }).focus();
+    await userEvent.setup().keyboard('{ArrowRight}');
+    expect(screen.getByTestId('location')).toHaveTextContent('base=12&target=11');
+  });
+
   it('BASE·TARGET 의 Schema 가 다르면 방향 버튼에 Schema 이름을 붙인다', () => {
     const data = { ...(DATA as object), base: { id: 11, schemaId: 1, versionNo: 1, schemaName: 'legacy' }, target: { id: 12, schemaId: 2, versionNo: 1, schemaName: 'newapp' } } as never;
     renderWithProviders(<DdlTab data={data} />, { route: ROUTE, path: '/db/:dbId/schema/:schemaId' });

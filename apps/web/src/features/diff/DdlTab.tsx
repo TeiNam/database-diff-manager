@@ -6,6 +6,7 @@ import { Icon } from '../../components/Icon';
 import { useSchemaContext } from '../../hooks/useSchemaContext';
 import { copyText } from '../../lib/clipboard';
 import { downloadText } from '../../lib/download';
+import { handleRadioKeys } from '../../lib/radio-group';
 import s from './DdlTab.module.css';
 
 const COPY_FEEDBACK_MS = 2000;
@@ -52,6 +53,8 @@ function StatementBlock({ st }: { st: Statement }) {
   );
 }
 
+const DIRECTIONS = ['forward', 'backward'] as const;
+
 // 앱은 DDL을 실행하지 않는다. 보여 주고 복사·다운로드만 한다
 export function DdlTab({ data }: { data: DiffResponse }) {
   const ctx = useSchemaContext();
@@ -63,12 +66,14 @@ export function DdlTab({ data }: { data: DiffResponse }) {
   const targetLabel = isCrossSchema ? `${data.target.schemaName} v${t}` : `v${t}`;
   const forward = `${baseLabel} → ${targetLabel}`;
   const backward = `${targetLabel} → ${baseLabel}`;
+  const flip = () => ctx.set({ base: data.target.id, target: data.base.id });
   return (
     <section aria-label="DDL">
       <div className={s.bar}>
-        <div className={s.seg} role="radiogroup" aria-label="DDL 방향">
-          <button type="button" role="radio" aria-checked className={s.on}>{forward}</button>
-          <button type="button" role="radio" aria-checked={false} onClick={() => ctx.set({ base: data.target.id, target: data.base.id })}>{backward}</button>
+        {/* 선택된 방향이 항상 앞에 온다. 방향을 바꾸면 두 버튼의 글자가 서로 바뀌므로 포커스는 앞 버튼에 그대로 둔다 */}
+        <div className={s.seg} role="radiogroup" aria-label="DDL 방향" onKeyDown={(e) => handleRadioKeys(e, DIRECTIONS, 'forward', flip, false)}>
+          <button type="button" role="radio" aria-checked tabIndex={0} className={s.on}>{forward}</button>
+          <button type="button" role="radio" aria-checked={false} tabIndex={-1} onClick={flip}>{backward}</button>
         </div>
         <span className={s.spacer} />
         <button type="button" className={s.btn} disabled={!data.ddl}
