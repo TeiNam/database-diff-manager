@@ -1,8 +1,8 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { describe, expect, it } from 'vitest';
-import { DIFF_STALE_MS, queryKeys, useDeleteDatabase, useDeleteMigration, useDeleteSchema, useDeleteVersion, useDiff, useMigrationFlow, useUploadMigration } from '../src/api/hooks';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DIFF_REFETCH_MS, DIFF_STALE_MS, queryKeys, useDeleteDatabase, useDeleteMigration, useDeleteSchema, useDeleteVersion, useDiff, useMigrationFlow, useUploadMigration } from '../src/api/hooks';
 import { mockApi } from './render';
 
 // 삭제된 id 를 SQLite 가 다시 쓸 수 있어, 지운 버전·스키마·객체 이력 캐시가 남으면 새 데이터 대신 옛 내용이 보인다
@@ -79,5 +79,37 @@ describe('diff·전환 표 신선도', () => {
     const observer = client.getQueryCache().find({ queryKey: key })!.observers[0];
     expect(observer.options.staleTime).toBe(DIFF_STALE_MS);
     expect(DIFF_STALE_MS).toBe(30_000);
+  });
+});
+
+// staleTime 은 재요청을 예약하지 않는다. 다른 사용자의 변경이 반영되도록 주기 재조회·포커스 재조회를 켠다
+describe('diff·전환 표 주기적 재조회', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    focusManager.setFocused(undefined);
+  });
+
+  it.each([
+    ['diff', (): unknown => useDiff(11, 12), '/api/diff?base=11&target=12'],
+    ['migration-flow', (): unknown => useMigrationFlow(11, 12), '/api/migration-flow?base=11&target=12'],
+  ] as const)('%s 는 60초마다 다시 받고(백그라운드 탭에선 멈춤), 창으로 돌아오면 다시 받는다', async (_label, useHook, url) => {
+    vi.useFakeTimers();
+    const calls = mockApi({ '/api/diff?base=11&target=12': {}, '/api/migration-flow?base=11&target=12': { mapping: null } });
+    const count = () => calls.filter((c) => c.url === url).length;
+    // 전역 기본값(main.tsx)처럼 포커스 재조회를 끈 클라이언트에서도 쿼리별 옵션이 이긴다
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    renderHook(useHook, { wrapper });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(count()).toBe(1);
+    await vi.advanceTimersByTimeAsync(DIFF_REFETCH_MS);
+    expect(count()).toBe(2);
+    focusManager.setFocused(false);
+    await vi.advanceTimersByTimeAsync(DIFF_REFETCH_MS * 2);
+    expect(count()).toBe(2);
+    focusManager.setFocused(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(count()).toBe(3);
+    expect(DIFF_REFETCH_MS).toBe(60_000);
   });
 });

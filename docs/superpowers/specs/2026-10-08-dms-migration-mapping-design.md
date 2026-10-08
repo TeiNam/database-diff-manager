@@ -154,4 +154,4 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 - `PUT /diff/renames` 는 DMS 로 계산된 rename 과 같은 항목을 수동 한도(500개) 적용 전에 서버에서 버린다.
 - `fromSchema`: 서버(업로드·적용)와 웹 미리보기는 BASE(As-Is) Schema 이름을 `parseDmsMapping(text, { fromSchema })` 로 넘기고, 그 스키마(대소문자 무시)의 룰만 쓴다. 지정하지 않으면 룰 순서상 첫 번째로 와일드카드(`%`)가 없는 `schema-name` 이다(모두 와일드카드면 `%`). 이와 맞지 않는 schema 의 룰은 경고로 남기고 반영하지 않는다.
 - 길이 상한: 룰마다 schema·table·column·value·rule-id·rule-type·rule-action·rule-target 이 256자를 넘으면 `invalid` 경고로 버리고, 통과한 룰만 `fromSchema` 후보·비교에 쓴다(거대한 schema-name 이 매 룰 비교에 쓰이는 DoS 방지). 경고 메시지에 넣는 사용자 값은 64자로 잘라 표시한다.
-- 웹의 diff·전환 표 쿼리는 `staleTime` 30초다. 다른 사용자가 바꾼 매핑·수동 rename 이 이 시간이 지나면 반영된다.
+- 웹의 diff·전환 표 쿼리는 `staleTime` 30초에 쿼리별로 `refetchOnWindowFocus: true`·`refetchInterval` 60초를 켠다(전역 기본값은 그대로, 백그라운드 탭에선 주기 재조회가 멈춘다). 다른 사용자가 바꾼 매핑·수동 rename 은 창으로 돌아오거나 다음 주기에 반영된다. DDL 탭의 전체 복사·다운로드는 직전에 최신 diff 를 `fetchQuery` 로 다시 받아 그 결과를 쓰고, 문장 복사는 그 문장이 최신 DDL 에 없으면 복사하지 않고 알린다.
