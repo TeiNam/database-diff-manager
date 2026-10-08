@@ -29,6 +29,14 @@ Behind a reverse proxy such as nginx or ALB, the socket address of every request
 - If the server is directly reachable without going through the proxy and you trust everything with `TRUST_PROXY=true`, a client can forge `X-Forwarded-For` to bypass the limit. Block access to the server port from anything other than the proxy.
 - The login limit key is `IP:username` (username in lowercase), so other users behind the same NAT do not affect each other.
 
+## Operations (backup and schema upgrades)
+
+- **Backup**: `npm run backup -w @tdm/server -- <path>` writes a consistent snapshot with `VACUUM INTO`; it is safe while the server runs and refuses to overwrite an existing file. In Docker: `docker compose -f docker/compose.yaml exec app node --import tsx src/cli/backup.ts /data/backup-YYYYMMDD.db`. Do not copy only `tdm.db` while the server runs — recent commits may still be in `tdm.db-wal`.
+- **Schema upgrades**: migrations in `src/db/migrations/NNN_*.sql` run at startup, tracked by `PRAGMA user_version`. A file whose first line is `-- foreign_keys: off` is run with foreign keys disabled (for table rebuilds) and checked with `PRAGMA foreign_key_check` before commit, followed by a `VACUUM`. Take a backup before upgrading.
+- Migration 003 (schema v3) keeps user accounts (when two usernames differ only by case, the older one is kept), signs everyone out, and **clears uploaded data** (Databases, Schemas, versions, rename and DMS mappings) — upload the definition files again.
+- If the database's `user_version` is newer than the latest migration the server knows (e.g. after rolling back to an older image), the server refuses to start. Restore a backup taken with that version.
+- Connection settings: WAL, `synchronous=NORMAL`, `journal_size_limit=64MB`, `busy_timeout=5000`, `foreign_keys=ON`; `PRAGMA optimize` runs on shutdown.
+
 ## API summary
 
 All paths are under `/api`. Requests that change state must include the `X-Requested-With: tdm` header.

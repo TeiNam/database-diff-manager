@@ -58,6 +58,21 @@ COOKIE_SECURE=false npm start                   # http://127.0.0.1:3000
 
 환경변수(`HOST`, `PORT`, `DATA_DIR`, `COOKIE_SECURE`, `WEB_DIST`, `TRUST_PROXY`)와 API 목록은 [apps/server/README.md](apps/server/README.md)에 있습니다.
 
+## 백업
+
+데이터는 WAL 모드의 SQLite 파일 하나입니다. 서버가 실행 중이면 최근 커밋이 아직 `tdm.db-wal` 에 있을 수 있으므로 **`.db` 파일만 복사하면 안 됩니다** — 데이터가 빠지거나 깨진 사본이 될 수 있습니다. 대신 백업 명령을 쓰세요. `VACUUM INTO` 로 한 시점의 일관된 스냅샷을 만들며, 서버가 실행 중이어도 안전합니다.
+
+```bash
+# Docker
+docker compose -f docker/compose.yaml exec app node --import tsx src/cli/backup.ts /data/backup-$(date +%Y%m%d).db
+docker compose -f docker/compose.yaml cp app:/data/backup-$(date +%Y%m%d).db .   # 볼륨 밖으로 꺼내기
+
+# 로컬
+npm run backup -w @tdm/server -- ./backup-$(date +%Y%m%d).db
+```
+
+이미 있는 파일은 덮어쓰지 않습니다. 복원할 때는 서버를 멈추고 `tdm.db` 를 백업 파일로 바꾼 뒤 남아 있는 `tdm.db-wal`·`tdm.db-shm` 을 지웁니다. 더 새 버전이 만든 DB 로는 서버가 기동하지 않습니다(구 버전 이미지로 내려간 경우 등). 그때는 그 구 버전에서 받아 둔 백업으로 복원하세요.
+
 ## 권한
 
 | 작업 | admin | viewer |

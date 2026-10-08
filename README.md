@@ -58,6 +58,21 @@ COOKIE_SECURE=false npm start                   # http://127.0.0.1:3000
 
 Environment variables (`HOST`, `PORT`, `DATA_DIR`, `COOKIE_SECURE`, `WEB_DIST`, `TRUST_PROXY`) and the API list are in [apps/server/README.md](apps/server/README.md).
 
+## Backup
+
+The data is a single SQLite file in WAL mode. While the server is running, recent commits may still live in `tdm.db-wal`, so **do not copy only the `.db` file** — the copy can miss data or be corrupted. Use the backup command instead; it writes a consistent snapshot with `VACUUM INTO` and is safe while the server runs.
+
+```bash
+# Docker
+docker compose -f docker/compose.yaml exec app node --import tsx src/cli/backup.ts /data/backup-$(date +%Y%m%d).db
+docker compose -f docker/compose.yaml cp app:/data/backup-$(date +%Y%m%d).db .   # copy it out of the volume
+
+# Local
+npm run backup -w @tdm/server -- ./backup-$(date +%Y%m%d).db
+```
+
+The command refuses to overwrite an existing file. To restore, stop the server, replace `tdm.db` with the backup, and delete any leftover `tdm.db-wal`/`tdm.db-shm` files. The server refuses to start on a database created by a newer version (for example after rolling back to an older image) — restore a backup taken with that older version instead.
+
 ## Permissions
 
 | Action | admin | viewer |
