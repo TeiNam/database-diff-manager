@@ -10,6 +10,8 @@ COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 RUN npm ci
 COPY packages/core packages/core
+# vite.config.ts 가 로컬 버전 계산 스크립트를 불러온다 (CI 는 APP_VERSION 을 넘기므로 git 은 필요 없음)
+COPY scripts scripts
 COPY apps/web apps/web
 # CI 가 넘기는 제품 버전 (화면 상단·푸터에 표시). 로컬 빌드는 package.json 버전 + -dev
 ARG APP_VERSION=
