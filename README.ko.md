@@ -91,7 +91,9 @@ npm run test:mysql -w @tdm/core   # 생성 DDL을 MySQL 8.0/8.4 컨테이너에�
 
 ## CI
 
-`main` 브랜치 푸시와 `v*` 태그 푸시에서 GitHub Actions가 타입 검사·테스트·빌드를 거친 뒤 Docker 이미지(`linux/amd64`, `linux/arm64`)를 GHCR에 올립니다. 문서(`*.md`, `docs/`)만 바뀐 푸시에는 실행하지 않습니다.
+`main` 브랜치에 푸시할 때마다 GitHub Actions가 타입 검사·테스트·빌드를 거친 뒤 제품 버전을 올려 `vX.Y.N` 태그와 GitHub Release를 만들고, 그 버전을 붙인 Docker 이미지(`linux/amd64`, `linux/arm64`)를 GHCR에 올립니다. 문서(`*.md`, `docs/`)만 바뀐 푸시에는 실행하지 않습니다.
+
+**버전 규칙**: `major.minor`는 `apps/web/package.json`에서 가져오고, 패치 번호는 같은 `vX.Y.*` 태그 중 가장 큰 값 + 1입니다(처음은 0). 계산은 `scripts/next-version.mjs`가 합니다. 마이너·메이저를 올리려면 `apps/web/package.json`의 version을 바꾸면 됩니다. 상단·푸터에 보이는 버전은 빌드 때 넣은 값(`APP_VERSION`)이고, 로컬 빌드는 `X.Y.Z-dev`로 표시됩니다. `v*` 태그를 직접 푸시하면 새 버전을 만들지 않고 그 태그 버전으로 이미지만 빌드합니다.
 
 ---
 

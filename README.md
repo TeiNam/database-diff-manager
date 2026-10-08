@@ -91,7 +91,9 @@ npm run test:mysql -w @tdm/core   # applies generated DDL on MySQL 8.0/8.4 conta
 
 ## CI
 
-On pushes to `main` and `v*` tags, GitHub Actions runs typecheck, tests, and the build, then publishes a Docker image (`linux/amd64`, `linux/arm64`) to GHCR. Pushes that only change documentation (`*.md`, `docs/`) do not trigger it.
+On every push to `main`, GitHub Actions runs typecheck, tests, and the build, then bumps the product version, creates the `vX.Y.N` tag and a GitHub Release, and publishes a Docker image (`linux/amd64`, `linux/arm64`) tagged with that version to GHCR. Pushes that only change documentation (`*.md`, `docs/`) do not trigger it.
+
+**Versioning**: `major.minor` comes from `apps/web/package.json`; the patch number is the latest `vX.Y.*` tag + 1 (starting at 0) — see `scripts/next-version.mjs`. To start a new minor/major line, change the version in `apps/web/package.json`. The version shown in the header and footer is the one injected at build time (`APP_VERSION`); local builds show `X.Y.Z-dev`. Pushing a `v*` tag manually builds an image for that tag without creating a new version.
 
 ---
 

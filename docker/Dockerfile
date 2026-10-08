@@ -11,7 +11,9 @@ COPY apps/web/package.json apps/web/
 RUN npm ci
 COPY packages/core packages/core
 COPY apps/web apps/web
-RUN npm run build -w @tdm/web
+# CI 가 넘기는 제품 버전 (화면 상단·푸터에 표시). 로컬 빌드는 package.json 버전 + -dev
+ARG APP_VERSION=
+RUN APP_VERSION="$APP_VERSION" npm run build -w @tdm/web
 
 # 2) 실행 이미지: 서버·core 의 운영 의존성만 설치하고 빌드된 웹만 복사한다
 FROM node:24-bookworm-slim AS runtime
