@@ -56,7 +56,7 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
       ? commentBody(`-- [수동 확인 필요] ${v.name}: 파싱할 수 없는 뷰입니다. 원문을 확인하세요`)
       : sqlBody(printView(v.to!, { orReplace: true })));
   }
-  return out;
+  return guardConflicts(out, columnConflicts(diff));
 }
 
 export function renderDdl(stmts: Statement[], partial = false): string {
@@ -76,6 +76,33 @@ function createTable(t: Table): StatementBody {
   const sql = printTable({ ...t, columns: columns.map((c) => printable(inheritCollation(c, t))), indexes }, { foreignKeys: false });
   const missing = columns.filter(hasUnknownGenerated).map((c) => c.name);
   return missing.length ? manualBody(generatedReason(t.name, missing), sql, notes) : sqlBody(sql, notes);
+}
+
+// 순서로 풀 수 없는 컬럼 rename (맞바꾸기·연쇄 등 '이름 충돌'로 적용되지 않은 매핑)을 TARGET 테이블별로 모은다
+function columnConflicts(diff: SchemaDiff): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const { mapping: m, reason } of diff.ignoredRenames) {
+    if (m.kind !== 'column' || reason !== '이름 충돌' || m.table === undefined) continue;
+    out.set(m.table, [...(out.get(m.table) ?? []), `컬럼 rename ${m.from}→${m.to} 이 다른 컬럼 이름과 겹쳐 적용하지 못했습니다`]);
+  }
+  return out;
+}
+
+// 컬럼 rename 이 이름 충돌로 빠진 테이블은 값 대응이 어긋나므로 그 테이블의 모든 문장(FK 삭제·추가, 테이블 rename,
+// ALTER, 파티션)을 실행하지 않는 수동 확인 문장으로 바꾼다. 그 테이블 문장이 하나도 없으면 안내 문장 하나를 만든다
+function guardConflicts(stmts: Statement[], conflicts: Map<string, string[]>): Statement[] {
+  if (!conflicts.size) return stmts;
+  const reason = (table: string) => `${table}: 컬럼 rename 이름 충돌 — 값 대응을 확인해 직접 작성하세요`;
+  const guarded = stmts.map((st) => {
+    const notes = st.kind === 'table' ? conflicts.get(st.object) : undefined;
+    if (!notes || st.comment) return st;
+    return { ...st, ...manualBody(reason(st.object), st.sql, [...(st.notes ?? []), ...notes]) };
+  });
+  const covered = new Set(stmts.filter((st) => st.kind === 'table').map((st) => st.object));
+  const extra = [...conflicts].filter(([name]) => !covered.has(name)).map(([name, notes]): Statement => (
+    { object: name, kind: 'table', op: 'modify', ...commentBody(`-- [수동 확인 필요] ${reason(name)}`), notes }
+  ));
+  return [...guarded, ...extra];
 }
 
 function sortViews(views: ViewDiff[]): ViewDiff[] {

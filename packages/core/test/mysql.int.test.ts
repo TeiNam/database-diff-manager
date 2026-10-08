@@ -7,7 +7,7 @@ import type { SchemaModel, Table, View } from '../src/model';
 import { splitStatements } from '../src/parse-dump';
 import { parseCreateTable } from '../src/parse-table';
 import { parseCreateView } from '../src/parse-view';
-import { fixture, scenario, SCENARIOS } from './helpers';
+import { fixture, scenario, SCENARIOS, scenarioValues } from './helpers';
 
 const TARGETS = [
   { name: 'MySQL 8.0', port: 33080 },
@@ -30,6 +30,8 @@ suite.each(TARGETS)('$name', ({ port }) => {
     const db = `it_${name.replace(/-/g, '_')}`;
     await conn.query(`DROP DATABASE IF EXISTS \`${db}\`; CREATE DATABASE \`${db}\`; USE \`${db}\``);
     for (const { ddl } of splitStatements(fixture(`scenarios/${name}/base.sql`))) await conn.query(ddl);
+    const values = scenarioValues(name);
+    if (values) await conn.query(values.seed);
 
     const { base, target, renames } = scenario(name);
     for (const s of generateDdl(diffSchemas(base, target, renames))) {
@@ -38,6 +40,10 @@ suite.each(TARGETS)('$name', ({ port }) => {
 
     const after = diffSchemas(await dumpSchema(conn, db), target);
     expect({ tables: after.tables.map((t) => t.name), views: after.views.map((v) => v.name) }).toEqual({ tables: [], views: [] });
+    if (values) {
+      const [rows] = await conn.query<RowDataPacket[]>(values.query);
+      expect(rows.map((r) => ({ ...r }))).toEqual(values.rows);
+    }
   });
 });
 

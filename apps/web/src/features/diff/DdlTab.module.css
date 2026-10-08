@@ -11,3 +11,4 @@
 .sql { margin: 0; padding: var(--space-3); font: var(--code)/var(--code-lh) var(--mono); white-space: pre-wrap; word-break: break-word; color: var(--fg); }
 .note { color: var(--mod); }
 .empty { margin: var(--space-4); padding: var(--space-6); border: 1px dashed var(--border-strong); border-radius: var(--radius); color: var(--fg-muted); text-align: center; }
+.error { color: var(--del); font-size: var(--text-sm); }

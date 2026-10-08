@@ -90,6 +90,8 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 - `migration-flow.ts`
   - `toRenameMappings(mapping, base: SchemaModel, target: SchemaModel): RenameMapping[]` — 컬럼 rename 의 `table` 을 To-Be 테이블명으로, 이름을 모델의 실제 표기(대소문자)로 맞춘다. 양쪽 모델에 없는 대상은 만들지 않는다.
   - `toReverseRenameMappings(mapping, asIs, toBe)` / `flowRenameMappings(flow, direction)` — 역방향(BASE = To-Be) 비교용. 테이블은 To-Be → As-Is 로 뒤집고, 컬럼 rename 의 `table` 은 역방향 TARGET 인 As-Is 테이블명이다. remove-column 은 역방향에선 ADD COLUMN 이 되므로 diff 에 맡긴다.
+  - **삭제와 rename 이 같은 이름에서 겹칠 때** (예: `t(a,b)` 에 remove-column `a` + `b→a`, 또는 `b→c` 와 To-Be 신규 컬럼 `b`): 해당 컬럼 rename 에 `allowOverlap: true` 를 붙인다. `diffSchemas` 는 rename 을 먼저 짝짓고 겹친 같은 이름 컬럼은 DROP·ADD 로 처리한다. 정방향은 `DROP COLUMN a, RENAME COLUMN b TO a`, 역방향은 `ADD COLUMN a …, RENAME COLUMN a TO b` 로 한 ALTER 안에 나와 값 대응이 유지된다(MySQL 8.0/8.4 실증, 골든 `remove-rename-column`·`remove-rename-column-reverse`).
+  - 순서로 풀 수 없는 충돌(맞바꾸기·연쇄 rename 처럼 `이름 충돌` 로 적용되지 않은 컬럼 rename)이 있는 테이블은 그 테이블의 모든 문장(FK 삭제·추가, 테이블 rename, ALTER, 파티션)을 실행 SQL 로 내지 않고 `[수동 확인 필요]` 주석 문장(`comment: true`, `notes` 에 겹친 매핑)으로 바꾼다.
   - `buildMigrationFlow(base: SchemaModel, target: SchemaModel, mapping: DmsMapping): MigrationFlow`
     - 테이블 행: `asIs?`, `toBe?`, `status` — `ok`(양쪽 존재) / `missing-target`(To-Be 에 없음) / `missing-source`(As-Is 에 없음) / `excluded`(selection 밖) / `unmapped-target`(어느 As-Is 와도 이어지지 않은 To-Be 테이블)
     - 컬럼 행: `asIs?`, `toBe?`, 양쪽 타입, `status` — `renamed` / `same`(이름 그대로) / `removed`(remove-column) / `added`(To-Be 에만 있음) / `dropped`(As-Is 에 있는데 룰도 To-Be 대응도 없음) / `missing`(룰이 가리키는 컬럼이 모델에 없음)
@@ -152,4 +154,4 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 - `PUT /diff/renames` 는 DMS 로 계산된 rename 과 같은 항목을 수동 한도(500개) 적용 전에 서버에서 버린다.
 - `fromSchema`: 서버(업로드·적용)와 웹 미리보기는 BASE(As-Is) Schema 이름을 `parseDmsMapping(text, { fromSchema })` 로 넘기고, 그 스키마(대소문자 무시)의 룰만 쓴다. 지정하지 않으면 룰 순서상 첫 번째로 와일드카드(`%`)가 없는 `schema-name` 이다(모두 와일드카드면 `%`). 이와 맞지 않는 schema 의 룰은 경고로 남기고 반영하지 않는다.
 - 길이 상한: 룰마다 schema·table·column·value·rule-id·rule-type·rule-action·rule-target 이 256자를 넘으면 `invalid` 경고로 버리고, 통과한 룰만 `fromSchema` 후보·비교에 쓴다(거대한 schema-name 이 매 룰 비교에 쓰이는 DoS 방지). 경고 메시지에 넣는 사용자 값은 64자로 잘라 표시한다.
-- 웹의 diff·전환 표 쿼리는 `staleTime` 30초다. 다른 사용자가 바꾼 매핑·수동 rename 이 이 시간이 지나면 반영된다.
+- 웹의 diff·전환 표 쿼리는 `staleTime` 30초에 쿼리별로 `refetchOnWindowFocus: true`·`refetchInterval` 60초를 켠다(전역 기본값은 그대로, 백그라운드 탭에선 주기 재조회가 멈춘다). 다른 사용자가 바꾼 매핑·수동 rename 은 창으로 돌아오거나 다음 주기에 반영된다. DDL 탭의 전체 복사·다운로드는 직전에 최신 diff 를 `fetchQuery` 로 다시 받아 그 결과를 쓰고, 문장 복사는 그 문장이 최신 DDL 에 없으면 복사하지 않고 알린다. 객체 diff 카드의 DDL 복사도 최신 diff 에서 그 객체의 문장을 골라 복사한다.

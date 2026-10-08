@@ -53,6 +53,9 @@ export interface RenameMapping {
   table?: string; // column/index: TARGET 테이블명
   from: string;
   to: string;
+  // column 전용: 겹치는 같은 이름 컬럼이 따로 삭제·추가됨이 확인된 rename (전환 매핑의 remove-column·To-Be 신규 컬럼).
+  // 이름이 겹쳐도 먼저 짝지어, 겹친 컬럼은 DROP·ADD 로 처리한다
+  allowOverlap?: boolean;
 }
 
 export interface SchemaDiff {
@@ -106,7 +109,7 @@ export function diffTable(b: Table, t: Table, renames: RenameMapping[] = []): Ta
   if (b.parseError || t.parseError) return { ...base, unparsed: printTable(b) !== printTable(t) };
   const skipped = new Set<string>();
   const columns = matchByName(b.columns, t.columns, mappingOf(renames, 'column', t.name), (x, y) =>
-    fieldDiff(x, y, COLUMN_FIELDS, skipped, 'column.'),
+    fieldDiff(x, y, COLUMN_FIELDS, skipped, 'column.'), overlapOf(renames, t.name),
   );
   const baseOrder = columns.pairs.map(([, y]) => y.name);
   const targetOrder = t.columns.map((c) => c.name).filter((n) => baseOrder.includes(n));
@@ -149,21 +152,34 @@ function mappingOf(renames: RenameMapping[], kind: RenameMapping['kind'], table?
   return out;
 }
 
-// 이름으로 짝을 맞춘다. rename 매핑은 BASE에 새 이름이 없고 TARGET에 옛 이름이 없으며
-// 같은 대상이 아직 짝지어지지 않았을 때만 적용한다
+// 이름 겹침을 허용한 컬럼 rename 의 원본 이름 (TARGET 테이블 기준)
+function overlapOf(renames: RenameMapping[], table: string): Set<string> {
+  return new Set(renames.filter((r) => r.kind === 'column' && r.table === table && r.allowOverlap).map((r) => r.from));
+}
+
+// 이름으로 짝을 맞춘다. rename 매핑을 먼저 짝짓고 나머지를 같은 이름끼리 맞춘다.
+// rename 은 BASE에 새 이름이 없고 TARGET에 옛 이름이 없으며(겹침 허용 매핑은 예외) 같은 대상이 아직 짝지어지지 않았을 때만 적용한다
 function matchByName<T extends { name: string }>(
-  base: T[], target: T[], renames: Map<string, string>, fields: (a: T, b: T) => string[],
+  base: T[], target: T[], renames: Map<string, string>, fields: (a: T, b: T) => string[], overlap: ReadonlySet<string> = new Set(),
 ): { changes: Change<T>[]; pairs: [T, T][] } {
   const baseNames = new Set(base.map((x) => x.name));
   const targetByName = new Map(target.map((x) => [x.name, x]));
   const consumed = new Set<string>();
+  const renamedTo = new Map<T, string>();
+  for (const b of base) {
+    const renamed = renames.get(b.name);
+    if (renamed === undefined || !targetByName.has(renamed) || consumed.has(renamed)) continue;
+    if (!overlap.has(b.name) && (baseNames.has(renamed) || targetByName.has(b.name))) continue;
+    consumed.add(renamed);
+    renamedTo.set(b, renamed);
+  }
+  const renameTargets = new Set(consumed);
   const changes: Change<T>[] = [];
   const pairs: [T, T][] = [];
   for (const b of base) {
-    const renamed = renames.get(b.name);
-    const useRename = renamed !== undefined && targetByName.has(renamed) && !baseNames.has(renamed) && !targetByName.has(b.name)
-      && !consumed.has(renamed);
-    const t = targetByName.get(useRename ? renamed : b.name);
+    const renamed = renamedTo.get(b);
+    const useRename = renamed !== undefined;
+    const t = useRename ? targetByName.get(renamed) : renameTargets.has(b.name) ? undefined : targetByName.get(b.name);
     if (!t) {
       changes.push({ op: 'drop', name: b.name, from: b, fields: [] });
       continue;

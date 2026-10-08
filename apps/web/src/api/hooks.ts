@@ -1,5 +1,6 @@
 import type { RenameMapping } from '@tdm/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback } from 'react';
 import { api, ApiError } from './client';
 import type { DiffResponse, Me, MigrationFlowResponse, MigrationMeta, MigrationUploadInput, MigrationUploadResult, ObjectHistory, Role, SchemaInfo, TreeDatabase, UploadMeta, UploadResult, User, VersionDetail, VersionSummary } from './types';
 
@@ -59,16 +60,31 @@ export const useVersion = (id?: number) =>
   useQuery({ queryKey: queryKeys.version(id), queryFn: () => api<VersionDetail>(`/versions/${id}`), enabled: id !== undefined, staleTime: Infinity });
 
 // 버전 내용은 불변이지만 diff 에 반영되는 전환 매핑·수동 rename 은 다른 사용자가 바꿀 수 있다.
-// 내가 바꾼 것은 mutation 이 캐시를 갱신·무효화하고, 남이 바꾼 것은 이 시간이 지나면 다시 받아 반영한다
+// 내가 바꾼 것은 mutation 이 캐시를 갱신·무효화한다. 남이 바꾼 것은 staleTime 이 지난 뒤 창으로 돌아오거나
+// DIFF_REFETCH_MS 주기(보이는 탭에서만 — 백그라운드 탭에선 멈춘다)로 다시 받아 반영한다.
+// staleTime 만으로는 재요청이 예약되지 않고 전역 refetchOnWindowFocus 가 꺼져 있어 쿼리별로 켠다
 export const DIFF_STALE_MS = 30_000;
+export const DIFF_REFETCH_MS = 60_000;
+const LIVE_QUERY = { staleTime: DIFF_STALE_MS, refetchOnWindowFocus: true, refetchInterval: DIFF_REFETCH_MS } as const;
+
+const fetchDiff = (base?: number, target?: number) => api<DiffResponse>(`/diff?base=${base}&target=${target}`);
 
 export const useDiff = (base?: number, target?: number) =>
   useQuery({
     queryKey: queryKeys.diff(base, target),
-    queryFn: () => api<DiffResponse>(`/diff?base=${base}&target=${target}`),
+    queryFn: () => fetchDiff(base, target),
     enabled: base !== undefined && target !== undefined,
-    staleTime: DIFF_STALE_MS,
+    ...LIVE_QUERY,
   });
+
+// 복사·다운로드 직전에 최신 diff 를 한 번 더 받는다 (캐시가 신선해도 서버에 다시 묻는다). 결과는 캐시에도 반영된다
+export function useFreshDiff(base: number, target: number): () => Promise<DiffResponse> {
+  const client = useQueryClient();
+  return useCallback(
+    () => client.fetchQuery({ queryKey: queryKeys.diff(base, target), queryFn: () => fetchDiff(base, target), staleTime: 0 }),
+    [client, base, target],
+  );
+}
 
 export function useSaveRenames() {
   const client = useQueryClient();
@@ -151,14 +167,14 @@ export function usePatchUser() {
 export const useObjectHistory = (id?: number) =>
   useQuery({ queryKey: queryKeys.objectHistory(id), queryFn: () => api<ObjectHistory>(`/objects/${id}/history`), enabled: id !== undefined });
 
-// 전환 매핑은 내가 올리기·삭제하면 캐시를 무효화하고, 다른 사용자가 바꾼 것은 DIFF_STALE_MS 가 지나면 다시 받는다.
+// 전환 매핑은 내가 올리기·삭제하면 캐시를 무효화하고, 다른 사용자가 바꾼 것은 diff 와 같은 주기·포커스 재조회로 받는다.
 // enabled=false(같은 Schema 끼리 비교 등)면 요청하지 않는다
 export const useMigrationFlow = (base?: number, target?: number, enabled = true) =>
   useQuery({
     queryKey: queryKeys.migrationFlow(base, target),
     queryFn: () => api<MigrationFlowResponse>(`/migration-flow?base=${base}&target=${target}`),
     enabled: enabled && base !== undefined && target !== undefined,
-    staleTime: DIFF_STALE_MS,
+    ...LIVE_QUERY,
   });
 
 export const useMigrations = (from: number, to: number, enabled: boolean) =>

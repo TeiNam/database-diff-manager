@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { generateDdl, renderDdl } from '../src/ddl';
 import { diffSchemas } from '../src/diff';
 import { type DmsMapping, parseDmsMapping } from '../src/dms-mapping';
 import { buildMigrationFlow, toRenameMappings, toReverseRenameMappings } from '../src/migration-flow';
@@ -206,5 +207,69 @@ describe.skipIf(samples.length === 0)('로컬 DMS 샘플', () => {
     expect(m.ruleCount).toBe((JSON.parse(text) as { rules: unknown[] }).rules.length);
     expect(m.selection.include.length + m.tables.length + m.columns.length + m.removedColumns.length + (m.toSchema ? 1 : 0)).toBe(m.ruleCount);
     expect(warnings).toEqual([]);
+  });
+});
+
+// t(a,b) 에서 a 를 지우고 b 를 a 로 rename (지워질 컬럼과 rename 대상 이름이 같다)
+describe('컬럼 삭제와 rename 이 같은 이름에서 겹칠 때', () => {
+  const asIsT = parseSqlDump(table('t', ['id', 'a', 'b'])).model;
+  const toBeT = parseSqlDump(table('t', ['id', 'a'])).model;
+  const overlap = (): DmsMapping => ({
+    ...noRules(), columns: [{ ruleId: '1', table: 't', from: 'b', to: 'a' }], removedColumns: [{ ruleId: '2', table: 't', column: 'a' }], ruleCount: 2,
+  });
+  const ddlOf = (d: ReturnType<typeof diffSchemas>) => renderDdl(generateDdl(d));
+
+  it('정방향: DROP a 다음 RENAME b TO a (b 의 값이 a 로 남는다)', () => {
+    const d = diffSchemas(asIsT, toBeT, toRenameMappings(overlap(), asIsT, toBeT));
+    expect(d.ignoredRenames).toEqual([]);
+    expect(ddlOf(d)).toBe('-- [~] TABLE t\nALTER TABLE `t`\n  DROP COLUMN `a`,\n  RENAME COLUMN `b` TO `a`;\n');
+  });
+
+  it('역방향: RENAME a TO b 와 ADD a (To-Be a 의 값이 b 로 돌아간다)', () => {
+    const d = diffSchemas(toBeT, asIsT, toReverseRenameMappings(overlap(), asIsT, toBeT));
+    expect(d.ignoredRenames).toEqual([]);
+    expect(ddlOf(d)).toBe('-- [~] TABLE t\nALTER TABLE `t`\n  ADD COLUMN `a` int NOT NULL AFTER `id`,\n  RENAME COLUMN `a` TO `b`;\n');
+  });
+
+  it('To-Be 에 같은 이름의 새 컬럼이 생겨도 rename 을 먼저 맞춘다 (b→c, 새 b)', () => {
+    const toBeC = parseSqlDump(table('t', ['id', 'c', 'b'])).model;
+    const asIsB = parseSqlDump(table('t', ['id', 'b'])).model;
+    const m: DmsMapping = { ...noRules(), columns: [{ ruleId: '1', table: 't', from: 'b', to: 'c' }], ruleCount: 1 };
+    const fwd = diffSchemas(asIsB, toBeC, toRenameMappings(m, asIsB, toBeC));
+    expect(fwd.tables[0].columns.map((c) => [c.op, c.oldName, c.name])).toEqual([['rename', 'b', 'c'], ['add', undefined, 'b']]);
+    const rev = diffSchemas(toBeC, asIsB, toReverseRenameMappings(m, asIsB, toBeC));
+    expect(rev.tables[0].columns.map((c) => [c.op, c.oldName, c.name])).toEqual([['rename', 'c', 'b'], ['drop', undefined, 'b']]);
+  });
+
+  it('순서로 풀 수 없는 충돌(맞바꾸기)은 실행 SQL 대신 수동 확인 문장으로 낸다', () => {
+    const swapTo = parseSqlDump(table('t', ['id', 'a', 'b', 'x'])).model;
+    const swapFrom = parseSqlDump(table('t', ['id', 'a', 'b'])).model;
+    const m: DmsMapping = { ...noRules(), columns: [{ ruleId: '1', table: 't', from: 'a', to: 'b' }, { ruleId: '2', table: 't', from: 'b', to: 'a' }], ruleCount: 2 };
+    const d = diffSchemas(swapFrom, swapTo, toRenameMappings(m, swapFrom, swapTo));
+    expect(d.ignoredRenames.map((r) => r.reason)).toEqual(['이름 충돌', '이름 충돌']);
+    const stmts = generateDdl(d);
+    expect(stmts.map((s) => s.comment)).toEqual([true]);
+    expect(stmts[0].notes?.join('\n')).toContain('a→b');
+    expect(stmts[0].sql).toContain('-- [수동 확인 필요]');
+  });
+
+  it('이름 충돌 테이블은 FK 삭제·추가·테이블 rename 까지 실행 문장을 남기지 않고, 다른 테이블은 그대로 실행 SQL 이다', () => {
+    const parent = 'CREATE TABLE `p` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n';
+    const child = (name: string, cols: string[], fkCol: string) => `CREATE TABLE \`${name}\` (\n  \`id\` int NOT NULL,\n${cols.map((c) => `  \`${c}\` int NOT NULL,`).join('\n')}\n` +
+      `  PRIMARY KEY (\`id\`),\n  KEY \`fk\` (\`${fkCol}\`),\n  CONSTRAINT \`fk\` FOREIGN KEY (\`${fkCol}\`) REFERENCES \`p\` (\`id\`)\n) ENGINE=InnoDB;\n`;
+    const before = parseSqlDump(parent + child('t', ['a', 'b'], 'a') + table('u', ['id', 'x'])).model;
+    const after = parseSqlDump(parent + child('t2', ['b', 'c'], 'c') + table('u', ['id', 'y'])).model;
+    // 연쇄 rename a→b, b→c 는 순서로 풀 수 없어 이름 충돌이 된다
+    const d = diffSchemas(before, after, [
+      { kind: 'table', from: 't', to: 't2' },
+      { kind: 'column', table: 't2', from: 'a', to: 'b' }, { kind: 'column', table: 't2', from: 'b', to: 'c' },
+    ]);
+    expect(d.ignoredRenames.map((r) => r.reason)).toEqual(['이름 충돌', '이름 충돌']);
+    const stmts = generateDdl(d);
+    const forT = stmts.filter((x) => x.object === 't2');
+    expect(forT.length).toBeGreaterThan(2); // FK 삭제·rename·ALTER·FK 추가
+    expect(forT.filter((x) => !x.comment)).toEqual([]);
+    expect(forT.every((x) => x.sql.startsWith('-- [수동 확인 필요]') && x.notes?.some((n) => n.includes('a→b')))).toBe(true);
+    expect(stmts.filter((x) => x.object === 'u').map((x) => x.comment)).toEqual([false]);
   });
 });

@@ -66,10 +66,33 @@ describe('DiffTab', () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
-    mockApi({ '/api/versions/12': { version: {}, model: target, objects: [] } });
+    mockApi({ '/api/versions/12': { version: {}, model: target, objects: [] }, '/api/diff?base=11&target=12': DATA });
     renderWithProviders(<DiffTab data={DATA} />, { route: ROUTE, path: PATH });
     await user.click(within(screen.getByRole('region', { name: 'table orders' })).getByRole('button', { name: 'DDL 복사' }));
-    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('ALTER TABLE `orders`'));
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('ALTER TABLE `orders`')));
+  });
+
+  it('카드의 DDL 복사는 최신 diff 를 다시 받아 그 객체의 최신 문장을 복사한다', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    const fresh = { ...(DATA as object), statements: [{ object: 'orders', kind: 'table', op: 'modify', sql: 'ALTER TABLE `orders`\n  DROP COLUMN `fresh`', comment: false }] };
+    const calls = mockApi({ '/api/versions/12': { version: {}, model: target, objects: [] }, '/api/diff?base=11&target=12': fresh });
+    renderWithProviders(<DiffTab data={DATA} />, { route: ROUTE, path: PATH });
+    await user.click(within(screen.getByRole('region', { name: 'table orders' })).getByRole('button', { name: 'DDL 복사' }));
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('DROP COLUMN `fresh`')));
+    expect(calls.filter((c) => c.url === '/api/diff?base=11&target=12')).toHaveLength(1);
+  });
+
+  it('최신 diff 에 그 객체 문장이 없으면 복사하지 않고 알린다', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    mockApi({ '/api/versions/12': { version: {}, model: target, objects: [] }, '/api/diff?base=11&target=12': { ...(DATA as object), statements: [] } });
+    renderWithProviders(<DiffTab data={DATA} />, { route: ROUTE, path: PATH });
+    await user.click(within(screen.getByRole('region', { name: 'table orders' })).getByRole('button', { name: 'DDL 복사' }));
+    expect(await screen.findByRole('button', { name: 'DDL이 바뀜' })).toBeInTheDocument();
+    expect(writeText).not.toHaveBeenCalled();
   });
 
   it('변경 없는 객체를 선택하면 단일 정의를 보여 준다', async () => {
