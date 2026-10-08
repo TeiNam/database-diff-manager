@@ -83,6 +83,28 @@ function expectStatus(actual: number, expected: number | 'allowed') {
   else expect(actual).toBe(expected);
 }
 
+// 업로드 본문 크기·권한 순서: 익명 요청은 본문을 읽기 전에 거절해야 한다
+describe('POST /api/migrations 본문 크기와 권한 순서', () => {
+  const MB = 1024 * 1024;
+  const json = { ...CSRF_ONLY, 'content-type': 'application/json' };
+  const uploadBody = (source: string) => JSON.stringify({ fromSchemaId: 1, toSchemaId: 2, filename: 'm.json', source });
+
+  it('익명이 40MB 넘는 본문을 보내도 413 이 아니라 401', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/migrations', headers: json, payload: 'x'.repeat(41 * MB) });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('admin 이 20MB 넘는 source 를 보내면 400', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/migrations', headers: { ...admin, 'content-type': 'application/json' }, payload: uploadBody('a'.repeat(20 * MB + 1)) });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('admin 이 40MB 넘는 본문을 보내면 413', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/migrations', headers: { ...admin, 'content-type': 'application/json' }, payload: uploadBody('a'.repeat(41 * MB)) });
+    expect(res.statusCode).toBe(413);
+  });
+});
+
 describe.each(CASES)('$method $url', (c) => {
   it(`익명 ${c.anon}`, async () => expect((await call(c, CSRF_ONLY)).statusCode).toBe(c.anon));
   it(`viewer ${c.viewer}`, async () => expectStatus((await call(c, viewer)).statusCode, c.viewer));

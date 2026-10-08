@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { diffSchemas } from '../src/diff';
-import { parseDmsMapping } from '../src/dms-mapping';
+import { type DmsMapping, parseDmsMapping } from '../src/dms-mapping';
 import { buildMigrationFlow, toRenameMappings } from '../src/migration-flow';
 import { parseSqlDump } from '../src/parse-dump';
 import { fixture } from './helpers';
@@ -117,6 +117,56 @@ describe('toRenameMappings', () => {
     expect(promotion.columns.map((c) => [c.op, c.oldName, c.name])).toEqual([
       ['rename', 'prm_id', 'promotion_id'], ['rename', 'prm_nm', 'promotion_name'], ['drop', undefined, 'max_dc_cnt'], ['rename', 'reg_dt', 'created_at'],
     ]);
+  });
+});
+
+// 룰 없는 매핑 (selection 이 비어 있으면 모든 테이블이 대상)
+const noRules = (): DmsMapping => ({ fromSchema: 'legacy', selection: { include: [], exclude: [] }, tables: [], columns: [], removedColumns: [], ruleCount: 0 });
+const table = (name: string, cols: string[]) => `CREATE TABLE \`${name}\` (\n${cols.map((c) => `  \`${c}\` int NOT NULL`).join(',\n')}\n) ENGINE=InnoDB;\n`;
+
+describe('대소문자만 다른 이름', () => {
+  const base = parseSqlDump(table('Orders', ['id', 'REG_DT'])).model;
+  const target = parseSqlDump(table('orders', ['id', 'reg_dt'])).model;
+
+  it('전환 표는 ok/same 이지만 rename 매핑은 실제 표기 차이를 낸다', () => {
+    const f = buildMigrationFlow(base, target, noRules());
+    expect(f.tables.map((t) => [t.asIs, t.toBe, t.status])).toEqual([['Orders', 'orders', 'ok']]);
+    expect(f.tables[0].columns.map((c) => [c.asIs, c.toBe, c.status])).toEqual([['id', 'id', 'same'], ['REG_DT', 'reg_dt', 'same']]);
+    expect(toRenameMappings(noRules(), base, target)).toEqual([
+      { kind: 'table', from: 'Orders', to: 'orders' },
+      { kind: 'column', table: 'orders', from: 'REG_DT', to: 'reg_dt' },
+    ]);
+  });
+
+  it('diffSchemas 가 drop/add 대신 rename 을 낸다 (데이터 삭제 DDL 방지)', () => {
+    const d = diffSchemas(base, target, toRenameMappings(noRules(), base, target));
+    expect(d.tables.map((t) => [t.op, t.oldName, t.name])).toEqual([['rename', 'Orders', 'orders']]);
+    expect(d.tables[0].columns.map((c) => [c.op, c.oldName, c.name])).toEqual([['rename', 'REG_DT', 'reg_dt']]);
+  });
+});
+
+describe('성능', () => {
+  const TABLES = 600;
+  const COLS = 32;
+  const RULES_PER_TABLE = 31; // 테이블 rename 1 + 컬럼 rename 30 → 18,600 룰
+  const names = Array.from({ length: TABLES }, (_, i) => `tb_${i}`);
+  const colNames = Array.from({ length: COLS }, (_, j) => `c_${j}`);
+  const base = parseSqlDump(names.map((n) => table(n, colNames)).join('')).model;
+  const target = parseSqlDump(names.map((n) => table(`new_${n}`, colNames.map((c, j) => (j < RULES_PER_TABLE - 1 ? `n${c}` : c)))).join('')).model;
+  const m: DmsMapping = {
+    ...noRules(),
+    tables: names.map((n, i) => ({ ruleId: `t${i}`, from: n.toUpperCase(), to: `new_${n}` })),
+    columns: names.flatMap((n, i) => colNames.slice(0, RULES_PER_TABLE - 1).map((c, j) => ({ ruleId: `c${i}_${j}`, table: n, from: c, to: `n${c}` }))),
+    ruleCount: TABLES * RULES_PER_TABLE,
+  };
+
+  it('600 테이블 · 18,600 룰을 2초 안에 계산한다', () => {
+    const started = performance.now();
+    const f = buildMigrationFlow(base, target, m);
+    const elapsed = performance.now() - started;
+    expect(f.totals.tables.ok).toBe(TABLES);
+    expect(f.totals.columns.renamed).toBe(TABLES * (RULES_PER_TABLE - 1));
+    expect(elapsed).toBeLessThan(2000);
   });
 });
 

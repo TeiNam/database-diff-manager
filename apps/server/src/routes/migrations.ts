@@ -21,7 +21,8 @@ const PairQuery = z.object({ from: Id, to: Id });
 const FlowQuery = z.object({ base: Id, target: Id });
 
 export function migrationRoutes(app: FastifyInstance, ctx: AppContext): void {
-  app.post('/migrations', { preHandler: requireAdmin, bodyLimit: MIGRATION_BODY_LIMIT }, async (req, reply) => {
+  // 권한은 본문을 읽기 전(onRequest)에 확인한다. 익명 요청이 40MB 본문을 다 보내고 파싱까지 하지 않도록
+  app.post('/migrations', { onRequest: requireAdmin, bodyLimit: MIGRATION_BODY_LIMIT }, async (req, reply) => {
     const body = UploadBody.parse(req.body);
     const result = uploadMigration(ctx.db, { ...body, note: body.note || undefined, userId: req.user!.id });
     ctx.cache.clear(); // 쌍의 최신 매핑이 바뀌어 diff 결과가 달라진다
@@ -40,7 +41,7 @@ export function migrationRoutes(app: FastifyInstance, ctx: AppContext): void {
     return reply.header('content-type', 'application/json; charset=utf-8').header('content-disposition', attachment(filename)).send(text);
   });
 
-  app.delete('/migrations/:id', { preHandler: requireAdmin }, async (req) => {
+  app.delete('/migrations/:id', { onRequest: requireAdmin }, async (req) => {
     deleteMigration(ctx.db, IdParams.parse(req.params).id);
     ctx.cache.clear();
     return { ok: true };
