@@ -109,7 +109,7 @@ export function diffTable(b: Table, t: Table, renames: RenameMapping[] = []): Ta
   if (b.parseError || t.parseError) return { ...base, unparsed: printTable(b) !== printTable(t) };
   const skipped = new Set<string>();
   const columns = matchByName(b.columns, t.columns, mappingOf(renames, 'column', t.name), (x, y) =>
-    fieldDiff(x, y, COLUMN_FIELDS, skipped, 'column.'), overlapOf(renames, t.name),
+    fieldDiff(withImpliedCharset(x), withImpliedCharset(y), COLUMN_FIELDS, skipped, 'column.'), overlapOf(renames, t.name),
   );
   const baseOrder = columns.pairs.map(([, y]) => y.name);
   const targetOrder = t.columns.map((c) => c.name).filter((n) => baseOrder.includes(n));
@@ -192,6 +192,14 @@ function matchByName<T extends { name: string }>(
   }
   for (const t of target) if (!consumed.has(t.name)) changes.push({ op: 'add', name: t.name, to: t, fields: [] });
   return { changes, pairs };
+}
+
+// SHOW CREATE 는 같은 컬럼을 `COLLATE x` 또는 `CHARACTER SET y COLLATE x` 로 찍는다(생성 방식에 따라 다름).
+// 콜레이션은 문자셋을 정하므로, 비교할 때만 빠진 문자셋을 콜레이션에서 채운다 (모델·출력은 그대로)
+function withImpliedCharset(col: Column): Column {
+  if (col.charset || !col.collation) return col;
+  const charset = col.collation === 'binary' ? 'binary' : col.collation.split('_')[0];
+  return { ...col, charset };
 }
 
 function fieldDiff<T extends object>(

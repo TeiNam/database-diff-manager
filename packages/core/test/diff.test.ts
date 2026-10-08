@@ -221,3 +221,18 @@ describe('diffSchemas 건너뛰기와 동등성', () => {
 function diffTableOf(a: Table, b: Table) {
   return diffTable(a, b);
 }
+
+describe('컬럼 문자셋 표기 차이', () => {
+  it('COLLATE 만 쓴 컬럼과 CHARACTER SET + COLLATE 를 쓴 같은 컬럼은 차이가 없다 (SHOW CREATE 표기 차이)', () => {
+    const a = parseSqlDump('CREATE TABLE `t` (\n  `c` varchar(20) COLLATE utf8mb4_general_ci DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;').model;
+    const b = parseSqlDump('CREATE TABLE `t` (\n  `c` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;').model;
+    expect(diffSchemas(a, b).tables).toEqual([]);
+    expect(diffSchemas(b, a).tables).toEqual([]);
+  });
+
+  it('문자셋이 실제로 다르면 여전히 차이로 본다', () => {
+    const a = parseSqlDump('CREATE TABLE `t` (\n  `c` varchar(20) COLLATE latin1_swedish_ci DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;').model;
+    const b = parseSqlDump('CREATE TABLE `t` (\n  `c` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;').model;
+    expect(diffSchemas(a, b).tables.map((t) => t.columns.map((c) => c.name))).toEqual([['c']]);
+  });
+});
