@@ -19,7 +19,7 @@ A team web tool for managing MySQL schema definitions exported with [td-export](
 
 - **Versioning**: upload definitions per Database (a physical engine instance) → Schema. An upload identical to the latest version does not create a new version.
 - **Comparison**: summary, per-object diff (SQL split/unified and a spreadsheet-like grid), and a tree that can filter to changed objects only.
-- **DDL generation**: ALTER/CREATE/DROP for tables, columns, indexes, foreign keys, views, and partitions, plus the reverse (rollback) direction. Renames are mapped in the UI.
+- **DDL generation**: ALTER/CREATE/DROP for tables, columns, indexes, foreign keys, views, partitions, and stored functions/procedures, plus the reverse (rollback) direction. Renames are mapped in the UI.
 - **DB migration mapping**: upload an AWS DMS table-mapping JSON for an As-Is → To-Be Schema pair. The Migration (전환) tab shows table and column correspondence with a status for each, and the same mapping is applied as renames to the object diff and DDL. Manual rename mappings still win for the same object.
 - **History**: version history, per-object change history, original file download.
 - **Accounts**: admin / dba / viewer roles. Dark and light themes.
@@ -28,7 +28,8 @@ A team web tool for managing MySQL schema definitions exported with [td-export](
 
 | Item | Details |
 |---|---|
-| Supported versions | td-export 0.1.15 – 0.1.36, MySQL output (format is detected per file; MySQL output is unchanged from 0.1.30 to 0.1.36) |
+| Supported versions | td-export 0.1.15 – 0.1.52, MySQL output (format is detected per file; MySQL output is unchanged from 0.1.30 to 0.1.36) |
+| Routines | MySQL stored functions and procedures in `.sql` output from td-export 0.1.52 (`DELIMITER ;;` blocks). They are stored and compared like tables and views (DEFINER is ignored; SQL_MODE is compared). `.md` output has no routines, so routines are not compared when either version is `.md` (the UI says so). Triggers and events are out of scope — td-export does not export them yet |
 | Formats | `.sql` (recommended, lossless), `.md` (partially lossy — flagged in the UI) |
 | Name suggestion | `schema(host).sql` → Database `host`; `schema(host_port).sql` (0.1.30) → Database `host:port`. If a Database with the older `host_port` name already exists, that one is selected |
 | DMS mapping | AWS DMS table-mapping JSON: `selection` include/exclude (`%` wildcard), `transformation` rename of schema/table/column, and `remove-column`. Other actions are listed as warnings and not applied. Up to 20,000 rules, 20MB |

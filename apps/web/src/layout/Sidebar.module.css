@@ -14,6 +14,7 @@
 .chev { width: 14px; display: inline-grid; color: var(--fg-dim); flex: none; }
 .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mono { font: var(--text-sm) var(--mono); }
+.note { font-size: var(--text-xs); color: var(--fg-dim); }
 .meta { font-size: var(--text-xs); color: var(--fg-dim); font-variant-numeric: tabular-nums; }
 .empty { padding: var(--space-3); color: var(--fg-dim); }
 :global(.struck) { text-decoration: line-through; text-decoration-color: var(--del); }

@@ -8,6 +8,7 @@ import { RenameBanner } from '../features/diff/RenameBanner';
 import { SummaryTab } from '../features/diff/SummaryTab';
 import { MigrationTab } from '../features/migration/MigrationTab';
 import { useSchemaContext, type Tab } from '../hooks/useSchemaContext';
+import { changeCount } from '../lib/object-diff';
 import s from './SchemaPage.module.css';
 
 const PARTIAL_MESSAGE = 'MD 정의서가 포함된 비교입니다. 일부 속성(인덱스 종류·순서, 파티션, CHECK, 문자셋 등)은 비교되지 않았습니다.';
@@ -30,7 +31,7 @@ export function SchemaPage() {
   if (diff.error) return <p className={s.message} role="alert">{diff.error.message}</p>;
   if (!diff.data) return <p className={s.message} role="status">비교 결과를 불러오는 중…</p>;
 
-  const changed = diff.data.diff.tables.length + diff.data.diff.views.length;
+  const changed = changeCount(diff.data.diff);
   return (
     <section className={s.page} aria-label="스키마 비교">
       <Tabs<Tab> value={ctx.tab} onChange={(tab) => set({ tab })}

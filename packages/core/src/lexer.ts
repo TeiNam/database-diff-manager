@@ -15,8 +15,17 @@ const WORD_CHAR = /[A-Za-z0-9_$\u0080-\uFFFF]/;
 const DIGIT = /[0-9]/;
 const ESCAPES: Record<string, string> = { '0': '\0', n: '\n', r: '\r', t: '\t', Z: '\x1a', b: '\b' };
 
-export function tokenize(src: string): Token[] {
-  const out: Token[] = [];
+// 문자열 규칙. noBackslashEscapes: SQL_MODE 의 NO_BACKSLASH_ESCAPES (백슬래시를 이스케이프로 보지 않음)
+export interface LexMode {
+  noBackslashEscapes?: boolean;
+}
+
+export function tokenize(src: string, mode: LexMode = {}): Token[] {
+  return [...lexTokens(src, mode)];
+}
+
+// 토큰을 하나씩 만든다. mode 는 매 문자열마다 읽으므로 호출자가 도중에 바꿀 수 있다 (덤프 안의 SET SQL_MODE)
+export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
   let i = 0;
   let versioned = 0; // 열려 있는 /*!NNNNN 주석 수
   while (i < src.length) {
@@ -41,32 +50,31 @@ export function tokenize(src: string): Token[] {
       continue;
     }
     if (c === '`' || c === "'" || c === '"') {
-      const [v, e] = readQuoted(src, i, c);
-      out.push({ t: c === '`' ? 'ident' : 'string', v, s: i, e });
+      const [v, e] = readQuoted(src, i, c, mode.noBackslashEscapes === true);
+      yield { t: c === '`' ? 'ident' : 'string', v, s: i, e };
       i = e;
       continue;
     }
     if (DIGIT.test(c)) {
       let j = i;
       while (j < src.length && /[0-9.]/.test(src[j])) j++;
-      out.push({ t: 'number', v: src.slice(i, j), s: i, e: j });
+      yield { t: 'number', v: src.slice(i, j), s: i, e: j };
       i = j;
       continue;
     }
     if (WORD_START.test(c)) {
       let j = i;
       while (j < src.length && WORD_CHAR.test(src[j])) j++;
-      out.push({ t: 'word', v: src.slice(i, j), s: i, e: j });
+      yield { t: 'word', v: src.slice(i, j), s: i, e: j };
       i = j;
       continue;
     }
-    out.push({ t: 'op', v: c, s: i, e: i + 1 });
+    yield { t: 'op', v: c, s: i, e: i + 1 };
     i++;
   }
-  return out;
 }
 
-function readQuoted(src: string, start: number, quote: string): [string, number] {
+function readQuoted(src: string, start: number, quote: string, noBackslashEscapes = false): [string, number] {
   let value = '';
   let i = start + 1;
   while (i < src.length) {
@@ -75,7 +83,7 @@ function readQuoted(src: string, start: number, quote: string): [string, number]
       if (src[i + 1] === quote) { value += quote; i += 2; continue; }
       return [value, i + 1];
     }
-    if (c === '\\' && quote !== '`') {
+    if (c === '\\' && quote !== '`' && !noBackslashEscapes) {
       const n = src[i + 1] ?? '';
       value += ESCAPES[n] ?? n;
       i += 2;

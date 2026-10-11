@@ -5,6 +5,7 @@ export * from './normalize';
 export * from './parse-table';
 export * from './parse-dump';
 export * from './parse-view';
+export * from './parse-routine';
 export * from './print';
 export * from './canonical';
 export * from './diff';

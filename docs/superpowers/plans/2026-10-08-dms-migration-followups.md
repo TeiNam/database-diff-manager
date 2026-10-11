@@ -25,3 +25,7 @@ Plan 4 최종 리뷰에서 머지 후로 미룬 항목.
 - zod `max` 가 UTF-16 글자 수 기준이다(바이트 아님). 실제 바이트 상한은 bodyLimit 40MB 가 막는다
 - PR 검증용 `pull_request` 워크플로 — 지금은 main·태그 push 와 workflow_dispatch(다른 브랜치는 test 만)만 있다. 필요하면 별도 요청
 - 업로드 대상 From Schema 이름과 파일의 스키마가 하나뿐인데 이름이 다르면 그 스키마로 보고 경고만 한다(Schema 이름을 바꿔 올리는 경우 보존). 엄격하게 400 으로 바꿀지 결정 필요
+
+## 루틴 (td-export 0.1.52)
+- NO_BACKSLASH_ESCAPES 모드 루틴의 COMMENT 에 백슬래시가 있으면 DDL 재출력이 어긋날 수 있음
+- 트리거·이벤트는 td-export 가 내보내지 않아 범위 밖

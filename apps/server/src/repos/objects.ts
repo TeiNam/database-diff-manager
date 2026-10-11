@@ -1,13 +1,14 @@
 import { all, one, type Db } from '../db/connection';
 import { AppError } from '../errors';
+import type { ObjectKind } from './versions';
 
 export interface ObjectHistory {
-  object: { id: number; kind: 'table' | 'view'; name: string; schemaId: number };
+  object: { id: number; kind: ObjectKind; name: string; schemaId: number };
   revisions: { revisionNo: number; fidelity: string; parseError: string | null; firstVersion: { id: number; versionNo: number; uploadedAt: string } }[];
 }
 
 export function objectHistory(db: Db, objectId: number): ObjectHistory {
-  const obj = one<{ id: number; kind: 'table' | 'view'; name: string; schema_id: number }>(db, 'SELECT id, kind, name, schema_id FROM objects WHERE id = ?', objectId);
+  const obj = one<{ id: number; kind: ObjectKind; name: string; schema_id: number }>(db, 'SELECT id, kind, name, schema_id FROM objects WHERE id = ?', objectId);
   if (!obj) throw new AppError(404, '객체를 찾을 수 없습니다');
   const rows = all<{ revision_no: number; fidelity: string; parse_error: string | null; version_id: number; version_no: number; uploaded_at: string }>(db, `
     SELECT r.revision_no, r.fidelity, r.parse_error, v.id AS version_id, v.version_no, v.uploaded_at

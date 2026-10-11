@@ -34,6 +34,7 @@ Behind a reverse proxy such as nginx or ALB, the socket address of every request
 - **Backup**: `npm run backup -w @tdm/server -- <path>` writes a consistent snapshot with `VACUUM INTO`; it is safe while the server runs and refuses to overwrite an existing file. In Docker: `docker compose -f docker/compose.yaml exec app node --import tsx src/cli/backup.ts /data/backup-YYYYMMDD.db`. Do not copy only `tdm.db` while the server runs — recent commits may still be in `tdm.db-wal`.
 - **Schema upgrades**: migrations in `src/db/migrations/NNN_*.sql` run at startup, tracked by `PRAGMA user_version`. A file whose first line is `-- foreign_keys: off` is run with foreign keys disabled (for table rebuilds) and checked with `PRAGMA foreign_key_check` before commit, followed by a `VACUUM`. Take a backup before upgrading.
 - Migration 003 (schema v3) keeps user accounts (when two usernames differ only by case, the older one is kept), signs everyone out, and **clears uploaded data** (Databases, Schemas, versions, rename and DMS mappings) — upload the definition files again.
+- Migration 004 rebuilds `objects` to allow MySQL routines (`function`, `procedure`, td-export 0.1.52+). All data is kept.
 - If the database's `user_version` is newer than the latest migration the server knows (e.g. after rolling back to an older image), the server refuses to start. Restore a backup taken with that version.
 - Connection settings: WAL, `synchronous=NORMAL`, `journal_size_limit=64MB`, `busy_timeout=5000`, `foreign_keys=ON`; `PRAGMA optimize` runs on shutdown.
 

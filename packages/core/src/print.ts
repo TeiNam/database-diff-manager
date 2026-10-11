@@ -1,6 +1,6 @@
 // 모델 → MySQL SHOW CREATE 형식 DDL (세미콜론 없음)
 import { quoteIdent as q, quoteString } from './lexer';
-import type { Check, Column, ForeignKey, Index, IndexKind, IndexPart, Table, TableOption, View } from './model';
+import type { Check, Column, ForeignKey, Index, IndexKind, IndexPart, Routine, Table, TableOption, View } from './model';
 import { normalizeDdl } from './normalize';
 
 const KEY_PREFIX: Record<IndexKind, string> = {
@@ -80,4 +80,18 @@ export function printView(v: View, opts: { orReplace?: boolean } = {}): string {
   s += ` AS ${v.body}`;
   if (v.checkOption) s += ` WITH ${v.checkOption} CHECK OPTION`;
   return s;
+}
+
+// SHOW CREATE FUNCTION/PROCEDURE 형식 (DEFINER 없이). 특성 순서는 MySQL sp.cc 와 같고 기본값 특성은 찍지 않는다
+export function printRoutine(r: Routine): string {
+  if (r.parseError && r.rawDdl) return normalizeDdl(r.rawDdl);
+  const ch = r.characteristics;
+  let s = `CREATE ${r.kind.toUpperCase()} ${q(r.name)}(${r.params})`;
+  if (r.kind === 'function' && r.returns !== undefined) s += ` RETURNS ${r.returns}`;
+  s += '\n';
+  if (ch.dataAccess && ch.dataAccess !== 'CONTAINS SQL') s += `    ${ch.dataAccess}\n`;
+  if (ch.deterministic) s += '    DETERMINISTIC\n';
+  if (ch.security === 'INVOKER') s += '    SQL SECURITY INVOKER\n';
+  if (ch.comment) s += `    COMMENT ${quoteString(ch.comment)}\n`;
+  return s + r.body;
 }

@@ -76,7 +76,7 @@ export function parseMdDump(text: string): ParsedDump {
       else tables.push({ kind: 'table', columns: [], indexes: [], foreignKeys: [], checks: [], options: [], ...failed });
     }
   }
-  return { model: { name: (lines[0] ?? '').trim(), tables, views }, warnings };
+  return { model: { name: (lines[0] ?? '').trim(), tables, views, routines: [], routinesUnknown: true }, warnings };
 }
 
 function sections(lines: string[]): Section[] {

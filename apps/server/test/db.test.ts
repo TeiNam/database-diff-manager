@@ -13,7 +13,7 @@ describe('openDb', () => {
       'databases', 'migration_mapping_sources', 'migration_mappings', 'migration_pairs', 'object_revisions', 'objects', 'rename_mappings',
       'schema_version_sources', 'schema_versions', 'schemas', 'sessions', 'users', 'version_objects',
     ]);
-    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')?.user_version).toBe(3);
+    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')?.user_version).toBe(4);
     expect(one<{ foreign_keys: number }>(db, 'PRAGMA foreign_keys')?.foreign_keys).toBe(1);
   });
 
@@ -21,7 +21,7 @@ describe('openDb', () => {
     const path = join(tmpdir(), `tdm-${process.pid}-${Date.now()}.db`);
     openDb(path).close();
     const db = openDb(path);
-    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')?.user_version).toBe(3);
+    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')?.user_version).toBe(4);
     expect(one<{ synchronous: number }>(db, 'PRAGMA synchronous')?.synchronous).toBe(1); // NORMAL
     expect(one<{ journal_size_limit: number }>(db, 'PRAGMA journal_size_limit')?.journal_size_limit).toBe(67108864);
     db.close();
