@@ -12,20 +12,39 @@ interface Scope {
   target: string[];
 }
 
+// 매핑 충돌 (17회차 2): 같은 범위(종류·TARGET 테이블)에서 서로 다른 원본이 같은 목적지로 가거나(다대일) 한 원본이 여러 목적지로
+// 가는(일대다) 매핑. 하나만 고르면 다른 원본이 소리 없이 DROP 되거나 뒤집은 역방향 매핑과 어긋난다 — AWS DMS 에서도 서로 다른
+// 원본 두 개가 한 대상으로 가면 데이터가 합쳐지는 충돌이다 (같은 원본에 룰이 여럿이면 rule-id 로 하나를 고르는 것과 다르다).
+// 이름은 대소문자를 무시해 비교한다 (MySQL 컬럼·인덱스 이름은 대소문자를 구분하지 않는다). 똑같은 매핑의 반복은 충돌이 아니다
+export const MAPPING_CONFLICT = '매핑 충돌';
+
+export function conflictingRenames(renames: readonly RenameMapping[]): Set<RenameMapping> {
+  const scopeOf = (m: RenameMapping) => `${m.kind}\u0000${m.table ?? ''}`;
+  const fold = (v: string) => v.toLowerCase();
+  const targets = new Map<string, Set<string>>(); // 범위·원본 → 목적지들
+  const sources = new Map<string, Set<string>>(); // 범위·목적지 → 원본들
+  const add = (map: Map<string, Set<string>>, key: string, value: string) => map.set(key, new Set([...(map.get(key) ?? []), value]));
+  for (const m of renames) {
+    add(targets, `${scopeOf(m)}\u0000${fold(m.from)}`, fold(m.to));
+    add(sources, `${scopeOf(m)}\u0000${fold(m.to)}`, fold(m.from));
+  }
+  return new Set(renames.filter((m) => targets.get(`${scopeOf(m)}\u0000${fold(m.from)}`)!.size > 1 || sources.get(`${scopeOf(m)}\u0000${fold(m.to)}`)!.size > 1));
+}
+
 export function findIgnoredRenames(base: SchemaModel, target: SchemaModel, tables: TableDiff[], renames: RenameMapping[]): IgnoredRename[] {
-  const seen: RenameMapping[] = [];
+  const conflicts = conflictingRenames(renames);
   const out: IgnoredRename[] = [];
   for (const m of renames) {
-    const duplicate = seen.some((s) => sameScope(s, m) && (s.from === m.from || s.to === m.to));
-    seen.push(m);
+    if (conflicts.has(m)) {
+      out.push({ mapping: m, reason: MAPPING_CONFLICT });
+      continue;
+    }
     if (isApplied(m, tables)) continue;
     const scope = scopeOf(m, base, target, tables);
-    out.push({ mapping: m, reason: scope ? reasonOf(m, scope, duplicate) : '테이블 없음' });
+    out.push({ mapping: m, reason: scope ? reasonOf(m, scope) : '테이블 없음' });
   }
   return out;
 }
-
-const sameScope = (a: RenameMapping, b: RenameMapping) => a.kind === b.kind && a.table === b.table;
 
 function isApplied(m: RenameMapping, tables: TableDiff[]): boolean {
   if (m.kind === 'table') return tables.some((t) => t.op === 'rename' && t.oldName === m.from && t.name === m.to);
@@ -45,9 +64,9 @@ function scopeOf(m: RenameMapping, base: SchemaModel, target: SchemaModel, table
   return { base: names(from), target: names(to) };
 }
 
-function reasonOf(m: RenameMapping, scope: Scope, duplicate: boolean): string {
+function reasonOf(m: RenameMapping, scope: Scope): string {
   if (!scope.base.includes(m.from)) return '원본 없음';
   if (!scope.target.includes(m.to)) return '대상 없음';
   if (scope.base.includes(m.to) || scope.target.includes(m.from)) return '이름 충돌';
-  return duplicate ? '중복 매핑' : '적용 불가';
+  return '적용 불가';
 }

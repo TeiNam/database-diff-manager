@@ -4,7 +4,8 @@ import type { Statement } from './ddl';
 import { isAlterBlocked, manualBody, manualNote } from './ddl-alter';
 import { hasSafeIdentifiers, isSingleStatement, UNSAFE_IDENTIFIER_REASON, UNSAFE_STATEMENT_REASON } from './statement-check';
 import { retypeGroups } from './fk-retype';
-import { localSchemas, routineNameKey, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
+import { localSchemas, routineNameKey, type RenameMapping, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
+import { MAPPING_CONFLICT } from './rename-check';
 import { objectReferences } from './lexer';
 import { renameGroups } from './table-rename';
 import { halfBlockedPairs, isRoutineStatement, PAIR_NOTE, pairReason, routinePairKey, type PairKeys } from './replace-pairs';
@@ -103,18 +104,23 @@ const addConflict = (out: Conflicts, table: string, reason: string, note: string
   out.set(table, { reason: prev?.reason ?? reason, notes: [...(prev?.notes ?? []), note], ...(isEvidence ? { evidence: true as const } : {}) });
 };
 
-// 출발점: 순서로 풀 수 없는 rename ('이름 충돌'로 적용되지 않은 매핑. 컬럼은 TARGET 테이블, 테이블 매핑은 옛·새 이름 두
-// 테이블 — 옛 이름 테이블이 그대로 남거나 새 이름 테이블이 따로 만들어진다), diff 가 찾은 수동 확인 테이블, 생성이 막힌 새 테이블
+// 출발점: 순서로 풀 수 없는 rename ('이름 충돌'로 적용되지 않은 매핑)과 매핑 충돌(서로 다른 원본이 같은 목적지로 가는 다대일·
+// 일대다 매핑, 17회차 2) — 컬럼·인덱스는 TARGET 테이블, 테이블 매핑은 옛·새 이름 테이블 모두 (옛 이름 테이블이 그대로 남거나
+// 지워지고 새 이름 테이블이 따로 만들어진다), diff 가 찾은 수동 확인 테이블, 생성이 막힌 새 테이블
+// 인덱스 매핑은 값이 없어(DROP·ADD 로 다시 만든다) 출발점이 아니다
+const KIND_LABEL: Partial<Record<RenameMapping['kind'], string>> = { table: '테이블', column: '컬럼' };
+const conflictNote = (reason: string, label: string): string | undefined => (reason === '이름 충돌' ? `이 다른 ${label} 이름과 겹쳐 적용하지 못했습니다`
+  : reason === MAPPING_CONFLICT ? `이 같은 목적지(또는 같은 원본)로 가는 다른 ${label} 매핑과 겹쳐 어느 것도 적용하지 않았습니다 — 서로 다른 원본의 값이 한 대상에 합쳐집니다`
+  : undefined);
+
 function seedConflicts(diff: SchemaDiff, stmts: Statement[], unsafe: Statement[]): Conflicts {
   const out: Conflicts = new Map();
   for (const { mapping: m, reason } of diff.ignoredRenames) {
-    if (reason !== '이름 충돌') continue;
-    if (m.kind === 'table') {
-      const note = `테이블 rename ${m.from}→${m.to} 이 다른 테이블 이름과 겹쳐 적용하지 못했습니다`;
-      for (const name of new Set([m.from, m.to])) addConflict(out, name, `${name}: 테이블 rename 이름 충돌 — 값 대응을 확인해 직접 작성하세요`, note);
-    } else if (m.kind === 'column' && m.table !== undefined) {
-      addConflict(out, m.table, `${m.table}: 컬럼 rename 이름 충돌 — 값 대응을 확인해 직접 작성하세요`, `컬럼 rename ${m.from}→${m.to} 이 다른 컬럼 이름과 겹쳐 적용하지 못했습니다`);
-    }
+    const label = KIND_LABEL[m.kind];
+    const tail = label === undefined ? undefined : conflictNote(reason, label);
+    if (label === undefined || tail === undefined) continue;
+    const names = m.kind === 'table' ? [m.from, m.to] : m.table === undefined ? [] : [m.table];
+    for (const name of new Set(names)) addConflict(out, name, `${name}: ${label} rename ${reason} — 값 대응을 확인해 직접 작성하세요`, `${label} rename ${m.from}→${m.to} ${tail}`);
   }
   for (const t of diff.manualTables) addConflict(out, t.table, t.reason, t.note);
   if (holds(diff)) {

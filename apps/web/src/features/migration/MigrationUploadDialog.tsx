@@ -48,6 +48,8 @@ function ruleCounts(m: DmsMapping, warnings: DmsWarning[]): [string, number][] {
     ['컬럼삭제', m.removedColumns.length],
     ['스키마 이름변경', m.toSchema === undefined ? 0 : 1],
     ['반영하지 않는 룰', warnings.filter((w) => w.code === 'unsupported').length],
+    // 서로 다른 원본이 같은 목적지로 가는 rename 룰 — 관련 문장은 수동 확인 (17회차 2)
+    ['목적지 충돌 룰', warnings.filter((w) => w.code === 'conflict').length],
   ];
 }
 

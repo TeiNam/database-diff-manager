@@ -55,8 +55,8 @@ describe('buildMigrationFlow', () => {
 
   it('합계와 검증 통과 수 (ok 이면서 missing 컬럼이 없는 테이블)', () => {
     expect(flow.totals).toEqual({
-      tables: { ok: 3, 'missing-target': 0, 'missing-source': 0, excluded: 1, 'unmapped-target': 1 },
-      columns: { renamed: 8, same: 1, removed: 2, added: 1, dropped: 1, missing: 1 },
+      tables: { ok: 3, conflict: 0, 'missing-target': 0, 'missing-source': 0, excluded: 1, 'unmapped-target': 1 },
+      columns: { renamed: 8, same: 1, conflict: 0, removed: 2, added: 1, dropped: 1, missing: 1 },
       inScope: 3,
       verified: 2,
     });
@@ -297,5 +297,55 @@ describe('같은 컬럼의 이종 DMS 룰', () => {
     expect(warnings.map((w) => [w.ruleId, w.code])).toEqual([['9', 'duplicate']]);
     const t = buildMigrationFlow(asIsT, toBeT, m).tables.find((r) => r.asIs === 't')!;
     expect(t.columns.map((c) => [c.asIs, c.toBe, c.status])).toEqual([['id', 'id', 'same'], ['a', 'x', 'renamed']]);
+  });
+});
+
+// 17회차 2: 서로 다른 As-Is 원본(테이블·컬럼)이 같은 To-Be 목적지로 가면 DMS 에서도 두 원본의 데이터가 한 대상에 합쳐지는 충돌이다
+// (같은 원본에 룰이 여럿이면 rule-id 로 하나만 적용하는 것과 다르다). 업로드 경고(conflict), 전환 표 '충돌', DDL 은 관련 문장 수동 확인
+describe('DMS 목적지 다대일 (매핑 충돌)', () => {
+  const rule = (id: string, target: 'table' | 'column', locator: Record<string, string>, value: string) =>
+    ({ 'rule-id': id, 'rule-type': 'transformation', 'rule-target': target, 'object-locator': { 'schema-name': 'legacy', ...locator }, 'rule-action': 'rename', value });
+  const parse = (rules: unknown[]) => parseDmsMapping(JSON.stringify({ rules }));
+
+  it('테이블: a→c, b→c 는 두 룰 모두 conflict 경고, 전환 표는 둘 다 충돌, DDL 은 a·b·c 문장을 실행하지 않는다', () => {
+    const asIsAB = parseSqlDump(tdExport(table('a', ['id', 'v']) + table('b', ['id', 'v']))).model;
+    const toBeC = parseSqlDump(tdExport(table('c', ['id', 'v']))).model;
+    const { mapping: m, warnings } = parse([rule('1', 'table', { 'table-name': 'a' }, 'c'), rule('2', 'table', { 'table-name': 'b' }, 'C')]);
+    expect(warnings.map((w) => [w.ruleId, w.code])).toEqual([['1', 'conflict'], ['2', 'conflict']]);
+    expect(warnings[0].message).toContain('같은 이름');
+    const f = buildMigrationFlow(asIsAB, toBeC, m);
+    expect(f.tables.map((t) => [t.asIs, t.toBe, t.status])).toEqual([['a', 'c', 'conflict'], ['b', 'c', 'conflict']]);
+    expect(f.totals).toMatchObject({ inScope: 2, verified: 0 });
+    for (const [base, target, renames] of [[asIsAB, toBeC, toRenameMappings(m, asIsAB, toBeC)], [toBeC, asIsAB, toReverseRenameMappings(m, asIsAB, toBeC)]] as const) {
+      const stmts = generateDdl(diffSchemas(base, target, renames));
+      expect(stmts.length).toBeGreaterThan(0);
+      expect(stmts.filter((s) => !s.comment).map((s) => s.sql)).toEqual([]);
+    }
+  });
+
+  it('룰 없는 같은 이름 As-Is 테이블과 겹치는 rename(a→c, As-Is c 도 있음)도 전환 표는 충돌', () => {
+    const asIsAC = parseSqlDump(tdExport(table('a', ['id']) + table('c', ['id']))).model;
+    const toBeC = parseSqlDump(tdExport(table('c', ['id']))).model;
+    const { mapping: m } = parse([rule('1', 'table', { 'table-name': 'a' }, 'c')]);
+    expect(buildMigrationFlow(asIsAC, toBeC, m).tables.map((t) => [t.asIs, t.status])).toEqual([['a', 'conflict'], ['c', 'conflict']]);
+    expect(generateDdl(diffSchemas(asIsAC, toBeC, toRenameMappings(m, asIsAC, toBeC))).filter((s) => !s.comment)).toEqual([]);
+  });
+
+  it('컬럼: t.x→z, t.y→z 는 conflict 경고, 전환 표 컬럼 충돌, DDL 은 t 문장을 실행하지 않는다', () => {
+    const asIsT = parseSqlDump(tdExport(table('t', ['id', 'x', 'y']))).model;
+    const toBeT = parseSqlDump(tdExport(table('t', ['id', 'z']))).model;
+    const { mapping: m, warnings } = parse([rule('1', 'column', { 'table-name': 't', 'column-name': 'x' }, 'z'), rule('2', 'column', { 'table-name': 't', 'column-name': 'y' }, 'z')]);
+    expect(warnings.map((w) => [w.ruleId, w.code])).toEqual([['1', 'conflict'], ['2', 'conflict']]);
+    const t = buildMigrationFlow(asIsT, toBeT, m).tables[0];
+    expect(t.columns.map((c) => [c.asIs, c.toBe, c.status])).toEqual([['id', 'id', 'same'], ['x', 'z', 'conflict'], ['y', 'z', 'conflict']]);
+    expect(buildMigrationFlow(asIsT, toBeT, m).totals).toMatchObject({ verified: 0 });
+    for (const [base, target, renames] of [[asIsT, toBeT, toRenameMappings(m, asIsT, toBeT)], [toBeT, asIsT, toReverseRenameMappings(m, asIsT, toBeT)]] as const) {
+      expect(generateDdl(diffSchemas(base, target, renames)).filter((s) => !s.comment)).toEqual([]);
+    }
+  });
+
+  it('같은 원본에 룰이 여럿인 것(rule-id 로 하나만 적용)은 충돌이 아니다', () => {
+    const { warnings } = parse([rule('1', 'table', { 'table-name': 'a' }, 'c'), rule('2', 'table', { 'table-name': 'a' }, 'd')]);
+    expect(warnings.map((w) => w.code)).toEqual(['duplicate']);
   });
 });

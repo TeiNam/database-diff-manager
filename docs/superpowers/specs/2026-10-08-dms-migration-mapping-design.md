@@ -49,6 +49,7 @@ BASE(As-Is)·TARGET(To-Be) 스키마는 지금처럼 각각 업로드하고, 매
 - 이름 비교는 **대소문자를 무시**한다. 샘플의 컬럼명은 전부 대문자(`PRM_ID`)이고 MySQL 컬럼명은 대소문자를 구분하지 않는다. 테이블명도 같은 규칙을 쓰되, 정확히 일치하는 것을 먼저 고른다.
 - locator 의 `%` 와일드카드는 selection 에서만 지원한다. transformation 의 와일드카드(예: 모든 테이블 이름 소문자화)는 경고로 남긴다.
 - 같은 대상에 대한 rename(·remove-column) 룰이 둘 이상이면 AWS DMS 와 같이 rule-id 가 **낮은** 쪽을 쓰고 경고한다 (DMS User Guide, Transformation rules and actions — `rule-id`: "AWS DMS applies the transformation rule with the lower rule-id"). 같은 컬럼의 `rename` 과 `remove-column` 처럼 action 이 달라도 대상(schema/table/column)이 같으면 한 묶음으로 겨뤄 낮은 rule-id 하나만 남기고 나머지는 `duplicate` 경고로 남긴다(7회차 개정).
+- 서로 다른 원본이 같은 목적지(대소문자 무시)로 가는 rename 룰(테이블 `a→c`·`b→c`, 같은 테이블의 컬럼 `x→z`·`y→z`)은 rule-id 로 하나를 고르는 경우가 아니다 — 위 규칙은 같은 객체에 붙은 여러 룰 중 하나를 고르는 것이고, 서로 다른 원본은 DMS 가 둘 다 그 대상으로 옮겨 데이터가 한 대상에 합쳐진다(충돌). 그런 룰마다 `conflict` 경고를 남기고(17회차 2), 전환 표는 `conflict`(충돌), diff 는 매핑 충돌로 어느 것도 적용하지 않고 관련 rename·DROP·CREATE 를 수동 확인으로 돌린다.
 - JSON 이 아니거나 `rules` 배열이 없으면 업로드를 거부한다(400). 룰은 20,000개까지.
 
 ## 3. 데이터 모델과 적용 범위
@@ -96,17 +97,17 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 - `dms-mapping.ts`
   - `parseDmsMapping(text: string, opts?: { fromSchema?: string }): { mapping: DmsMapping; warnings: DmsWarning[] }` — `fromSchema`(BASE Schema 이름)를 지정하면 그 스키마 룰만 쓴다("구현 중 구체화한 사항" 참고)
   - `DmsMapping`: `fromSchema`, `toSchema?`, `selection`(include/exclude 패턴), `tables`(As-Is → To-Be), `columns`(As-Is 테이블별 As-Is → To-Be 컬럼), `removedColumns`(As-Is 테이블별)
-  - `DmsWarning`: `{ ruleId, code: 'unsupported' | 'duplicate' | 'invalid', message }`
+  - `DmsWarning`: `{ ruleId, code: 'unsupported' | 'duplicate' | 'invalid' | 'conflict', message }` (`conflict`: 서로 다른 원본이 같은 목적지로 가는 rename, 17회차 2)
 - `migration-flow.ts`
   - `toRenameMappings(mapping, base: SchemaModel, target: SchemaModel): RenameMapping[]` — 컬럼 rename 의 `table` 을 To-Be 테이블명으로, 이름을 모델의 실제 표기(대소문자)로 맞춘다. 양쪽 모델에 없는 대상은 만들지 않는다.
   - `toReverseRenameMappings(mapping, asIs, toBe)` / `flowRenameMappings(flow, direction)` — 역방향(BASE = To-Be) 비교용. 테이블은 To-Be → As-Is 로 뒤집고, 컬럼 rename 의 `table` 은 역방향 TARGET 인 As-Is 테이블명이다. remove-column 은 역방향에선 ADD COLUMN 이 되므로 diff 에 맡긴다.
   - **삭제와 rename 이 같은 이름에서 겹칠 때** (예: `t(a,b)` 에 remove-column `a` + `b→a`, 또는 `b→c` 와 To-Be 신규 컬럼 `b`): 해당 컬럼 rename 에 `allowOverlap: true` 를 붙인다. `diffSchemas` 는 rename 을 먼저 짝짓고 겹친 같은 이름 컬럼은 DROP·ADD 로 처리한다. 정방향은 `DROP COLUMN a, RENAME COLUMN b TO a`, 역방향은 `ADD COLUMN a …, RENAME COLUMN a TO b` 로 한 ALTER 안에 나와 값 대응이 유지된다(MySQL 8.0/8.4 실증, 골든 `remove-rename-column`·`remove-rename-column-reverse`). 삭제되는 컬럼을 식 인덱스·생성 컬럼 식·다른 테이블 FK 가 참조하면 그 테이블(과 바뀌는 자식 테이블)은 수동 확인으로 돌린다(4회차).
   - 교차 매핑(맞바꾸기 a↔b, 연쇄 a→b·b→c, 테이블 교체)은 rename 끼리 이름을 비워 주고 채워 주므로 그대로 적용한다. 컬럼은 한 ALTER 안의 `RENAME COLUMN` 들(동시 적용), 테이블은 한 `RENAME TABLE` 문장(필요 시 임시 이름)으로 낸다(2026-10-11 개정).
-  - 순서로 풀 수 없는 충돌(`이름 충돌` 로 적용되지 않은 rename — 예: 새 이름의 BASE 객체가 그대로 남음)이 있는 테이블은 그 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제, ALTER, 파티션)을 실행 SQL 로 내지 않고 `[수동 확인 필요]` 주석 문장(`comment: true`, `notes` 에 겹친 매핑)으로 바꾼다. 테이블 rename 충돌은 옛·새 이름 두 테이블 모두 해당한다.
+  - 순서로 풀 수 없는 충돌(`이름 충돌` 로 적용되지 않은 rename — 예: 새 이름의 BASE 객체가 그대로 남음)이나 매핑 충돌(`매핑 충돌` — 서로 다른 원본이 같은 목적지로, 17회차 2)이 있는 테이블은 그 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제, ALTER, 파티션)을 실행 SQL 로 내지 않고 `[수동 확인 필요]` 주석 문장(`comment: true`, `notes` 에 겹친 매핑)으로 바꾼다. 테이블 rename 충돌은 옛·새 이름 두 테이블 모두 해당한다.
   - `buildMigrationFlow(base: SchemaModel, target: SchemaModel, mapping: DmsMapping): MigrationFlow`
-    - 테이블 행: `asIs?`, `toBe?`, `status` — `ok`(양쪽 존재) / `missing-target`(To-Be 에 없음) / `missing-source`(As-Is 에 없음) / `excluded`(selection 밖) / `unmapped-target`(어느 As-Is 와도 이어지지 않은 To-Be 테이블)
-    - 컬럼 행: `asIs?`, `toBe?`, 양쪽 타입, `status` — `renamed` / `same`(이름 그대로) / `removed`(remove-column) / `added`(To-Be 에만 있음) / `dropped`(As-Is 에 있는데 룰도 To-Be 대응도 없음) / `missing`(룰이 가리키는 컬럼이 모델에 없음)
-    - 합계: 상태별 테이블·컬럼 수, 검증 통과 테이블 수(`ok` 이고 컬럼 `missing` 이 없음)
+    - 테이블 행: `asIs?`, `toBe?`, `status` — `ok`(양쪽 존재) / `conflict`(서로 다른 As-Is 테이블 — 룰 없이 같은 이름으로 이어지는 것 포함 — 이 같은 To-Be 테이블로 간다, 17회차 2) / `missing-target`(To-Be 에 없음) / `missing-source`(As-Is 에 없음) / `excluded`(selection 밖) / `unmapped-target`(어느 As-Is 와도 이어지지 않은 To-Be 테이블)
+    - 컬럼 행: `asIs?`, `toBe?`, 양쪽 타입, `status` — `renamed` / `same`(이름 그대로) / `conflict`(서로 다른 As-Is 컬럼이 같은 To-Be 컬럼으로 간다) / `removed`(remove-column) / `added`(To-Be 에만 있음) / `dropped`(As-Is 에 있는데 룰도 To-Be 대응도 없음) / `missing`(룰이 가리키는 컬럼이 모델에 없음)
+    - 합계: 상태별 테이블·컬럼 수, 검증 통과 테이블 수(`ok` 이고 컬럼 `missing`·`conflict` 가 없음). 전환 대상(`inScope`)에는 `conflict` 도 든다. 충돌 테이블은 diff 에 테이블 매핑만 넘기고(컬럼 매핑은 어느 원본의 것인지 정할 수 없다), 충돌 컬럼은 매핑을 넘겨 diff 가 매핑 충돌·이름 충돌로 막게 한다
 
 ### apps/server
 

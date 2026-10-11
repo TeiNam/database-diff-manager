@@ -12,7 +12,8 @@ const hasColumn = (t: TableFlow, statuses: ColumnFlowStatus[]) => t.columns.some
 function matchesFilter(t: TableFlow, filter: FlowFilter): boolean {
   if (filter === 'renamed') return t.renamed || hasColumn(t, ['renamed']);
   if (filter === 'removed') return hasColumn(t, ['removed']);
-  if (filter === 'problem') return t.status === 'missing-target' || t.status === 'missing-source' || hasColumn(t, ['missing', 'dropped']);
+  // 충돌: 서로 다른 As-Is 원본이 같은 To-Be 로 간다 (17회차 2)
+  if (filter === 'problem') return t.status === 'conflict' || t.status === 'missing-target' || t.status === 'missing-source' || hasColumn(t, ['conflict', 'missing', 'dropped']);
   if (filter === 'new') return t.status === 'unmapped-target' || hasColumn(t, ['added']);
   return true;
 }

@@ -136,3 +136,65 @@ describe('PUT /api/diff/renames 와 DMS rename', () => {
     expect((await put(s, [...dms, ...many])).statusCode).toBe(400);
   });
 });
+
+// 17회차 2: 서로 다른 원본이 같은 목적지로 가는 DMS 매핑(a→c, b→c). DMS 에서도 두 원본의 데이터가 한 대상에 합쳐지는 충돌이다
+describe('DMS 목적지 다대일', () => {
+  const HEADER = "SET NAMES utf8mb4;\nSET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;\nSET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';\n";
+  const TRAILER = 'SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;\nSET SQL_MODE = @OLD_SQL_MODE;\n';
+  const table = (name: string, cols: string[]) => `/* Table : ${name} */\nCREATE TABLE \`${name}\` (\n${cols.map((c) => `  \`${c}\` int NOT NULL`).join(',\n')}\n) ENGINE=InnoDB;\n`;
+  // td-export 헤더·트레일러가 있는 완전한 덤프 (부재 기반 DROP 이 증거 보류가 아니라 매핑 충돌로 막히는지 본다)
+  const dump = (db: string, ...tables: string[]) => `/* Database : ${db} */\n${HEADER}${tables.join('\n')}${TRAILER}`;
+  const rule = (id: string, from: string, to: string) =>
+    ({ 'rule-id': id, 'rule-type': 'transformation', 'rule-target': 'table', 'object-locator': { 'schema-name': 'legacy', 'table-name': from }, 'rule-action': 'rename', value: to });
+
+  async function manyToOne() {
+    const ctx = await loggedInApp();
+    const put = (schemaName: string, text: string) => {
+      const r = ingest(ctx.db, { databaseName: 'db', schemaName, filename: `${schemaName}.sql`, text, userId: 1 });
+      return { versionId: r.versionId, schemaId: getVersionMeta(ctx.db, r.versionId).schemaId };
+    };
+    const asIs = put('legacy', dump('legacy', table('a', ['id']), table('b', ['id']), table('u', ['id', 'x'])));
+    const toBe = put('newapp', dump('newapp', table('c', ['id']), table('u', ['id', 'y'])));
+    const res = await ctx.app.inject({ method: 'POST', url: '/api/migrations', headers: ctx.admin, payload: {
+      fromSchemaId: asIs.schemaId, toSchemaId: toBe.schemaId, filename: 'm.json', source: JSON.stringify({ rules: [rule('1', 'a', 'c'), rule('2', 'b', 'c')] }),
+    } });
+    const getDiff = async (base: number, target: number) =>
+      (await ctx.app.inject({ method: 'GET', url: `/api/diff?base=${base}&target=${target}`, headers: ctx.viewer })).json();
+    return { ...ctx, asIs, toBe, upload: res.json(), getDiff };
+  }
+  type Stmt = { object: string; comment: boolean };
+  const runnable = (body: { statements: Stmt[] }, names: string[]) => body.statements.filter((s) => names.includes(s.object) && !s.comment);
+
+  it('업로드 경고(conflict)·전환 표 충돌·정방향/역방향 DDL 의 a·b·c 문장은 수동 확인', async () => {
+    const s = await manyToOne();
+    expect(s.upload.warnings.map((w: { ruleId: string; code: string }) => [w.ruleId, w.code])).toEqual([['1', 'conflict'], ['2', 'conflict']]);
+    const flow = (await s.app.inject({ method: 'GET', url: `/api/migration-flow?base=${s.asIs.versionId}&target=${s.toBe.versionId}`, headers: s.viewer })).json();
+    expect(flow.flow.tables.filter((t: { status: string }) => t.status === 'conflict').map((t: { asIs: string }) => t.asIs)).toEqual(['a', 'b']);
+    const forward = await s.getDiff(s.asIs.versionId, s.toBe.versionId);
+    const reverse = await s.getDiff(s.toBe.versionId, s.asIs.versionId);
+    for (const body of [forward, reverse]) {
+      expect(body.statements.filter((st: Stmt) => ['a', 'b', 'c'].includes(st.object)).length).toBeGreaterThan(0);
+      expect(runnable(body, ['a', 'b', 'c'])).toEqual([]);
+    }
+  });
+
+  it('역쌍 수동 매핑을 뒤집어 쓰는 역방향 비교도 충돌한 DMS 매핑을 빼지 않고 막는다', async () => {
+    const s = await manyToOne();
+    const saved = await s.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: s.dba, payload: {
+      base: s.asIs.versionId, target: s.toBe.versionId, renames: [{ kind: 'column', table: 'u', from: 'x', to: 'y' }],
+    } });
+    expect(saved.statusCode).toBe(200);
+    const reverse = await s.getDiff(s.toBe.versionId, s.asIs.versionId);
+    expect(reverse.renames.some((r: { kind: string; from: string; to: string }) => r.kind === 'column' && r.from === 'y' && r.to === 'x')).toBe(true);
+    expect(runnable(reverse, ['a', 'b', 'c'])).toEqual([]);
+    expect(reverse.diff.ignoredRenames.map((r: { reason: string }) => r.reason)).toEqual(['매핑 충돌', '매핑 충돌']);
+  });
+
+  it('수동 매핑의 같은 목적지 거부는 대소문자를 무시한다', async () => {
+    const s = await manyToOne();
+    const res = await s.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: s.dba, payload: {
+      base: s.asIs.versionId, target: s.toBe.versionId, renames: [{ kind: 'column', table: 'u', from: 'x', to: 'y' }, { kind: 'column', table: 'u', from: 'id', to: 'Y' }],
+    } });
+    expect(res.statusCode).toBe(400);
+  });
+});

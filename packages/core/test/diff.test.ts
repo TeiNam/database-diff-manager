@@ -128,20 +128,31 @@ describe('ignoredRenames', () => {
     expect(reasons([col('a', 'x', 'nope')])).toEqual([['a', 'x', '테이블 없음']]);
   });
 
-  it('같은 대상으로의 중복 매핑은 첫 매핑만 적용한다', () => {
+  // 17회차 2: 서로 다른 원본이 같은 목적지로 가거나(다대일) 한 원본이 여러 목적지로 가는(일대다) 매핑은 어느 것도 적용하지 않는다.
+  // 하나만 고르면 다른 원본이 소리 없이 DROP 된다 (DMS 에서도 두 원본의 데이터가 한 대상에 합쳐지는 충돌이다)
+  it('같은 목적지로 가는 서로 다른 원본 컬럼 매핑은 매핑 충돌 — 어느 것도 적용하지 않는다 (대소문자 무시)', () => {
     const two = tbl('  `a` int NOT NULL,\n  `c` int NOT NULL');
-    const d = diffSchemas(model([two]), model([tbl('  `x` int NOT NULL')]), [col('a', 'x'), col('c', 'x')]);
-    expect(d.tables[0].columns.map((c) => [c.op, c.name, c.oldName])).toEqual([['rename', 'x', 'a'], ['drop', 'c', undefined]]);
-    expect(d.ignoredRenames.map((r) => [r.mapping.from, r.reason])).toEqual([['c', '중복 매핑']]);
+    const d = diffSchemas(model([two]), model([tbl('  `x` int NOT NULL')]), [col('a', 'x'), col('c', 'X')]);
+    expect(d.tables[0].columns.map((c) => [c.op, c.name])).toEqual([['drop', 'a'], ['drop', 'c'], ['add', 'x']]);
+    expect(d.ignoredRenames.map((r) => [r.mapping.from, r.reason])).toEqual([['a', '매핑 충돌'], ['c', '매핑 충돌']]);
   });
 
-  it('테이블 매핑', () => {
+  it('테이블 매핑: 다대일·일대다 모두 매핑 충돌, 똑같은 매핑의 반복은 충돌이 아니다', () => {
     const t = (name: string) => ({ ...a, name });
     const d = diffSchemas(model([t('p'), t('q')]), model([t('r')]), [
       { kind: 'table', from: 'p', to: 'r' }, { kind: 'table', from: 'q', to: 'r' }, { kind: 'table', from: 'p', to: 's' },
     ]);
-    expect(d.tables.map((x) => [x.op, x.name])).toEqual([['rename', 'r'], ['drop', 'q']]);
-    expect(d.ignoredRenames.map((r) => [r.mapping.from, r.mapping.to, r.reason])).toEqual([['q', 'r', '중복 매핑'], ['p', 's', '대상 없음']]);
+    expect(d.tables.map((x) => [x.op, x.name])).toEqual([['drop', 'p'], ['drop', 'q'], ['add', 'r']]);
+    expect(d.ignoredRenames.map((r) => [r.mapping.from, r.mapping.to, r.reason])).toEqual([['p', 'r', '매핑 충돌'], ['q', 'r', '매핑 충돌'], ['p', 's', '매핑 충돌']]);
+    const same = diffSchemas(model([t('p')]), model([t('r')]), [{ kind: 'table', from: 'p', to: 'r' }, { kind: 'table', from: 'p', to: 'r' }]);
+    expect(same.tables.map((x) => [x.op, x.name])).toEqual([['rename', 'r']]);
+    expect(same.ignoredRenames).toEqual([]);
+  });
+
+  it('범위(테이블)가 다르면 같은 이름으로 가도 충돌이 아니다', () => {
+    const u = { ...b, name: 'u' };
+    const d = diffSchemas(model([a, { ...a, name: 'u' }]), model([b, u]), [col('a', 'x'), col('a', 'x', 'u')]);
+    expect(d.ignoredRenames).toEqual([]);
   });
 });
 

@@ -1,4 +1,4 @@
-import { canonicalJson, diffSchemas, flowRenameMappings, generateDdl, holdAllStatements, renderDdl, type RenameMapping, type SchemaDiff, type SchemaModel, type Statement } from '@tdm/core';
+import { canonicalJson, diffSchemas, flowRenameMappings, generateDdl, holdAllStatements, MAPPING_CONFLICT, renderDdl, type RenameMapping, type SchemaDiff, type SchemaModel, type Statement } from '@tdm/core';
 import type { Db } from '../db/connection';
 import { hasSavedRenames, listRenames } from '../repos/renames';
 import { getVersionMeta, loadVersion, type VersionDetail, type VersionMeta } from '../repos/versions';
@@ -119,10 +119,12 @@ export function loadDiffInputs(db: Db, cache: AppCache, baseId: number, targetId
   return { ref, base, target, dms: dmsRenamesFor(db, cache, ref, base, target) };
 }
 
-// 역쌍(정방향) diff 에서 최종 적용된 rename (renameFullKey 형식)과 그 diff 의 테이블 대응
+// 역쌍(정방향) diff 에서 최종 적용된 rename (renameFullKey 형식)과 그 diff 의 테이블 대응. 매핑 충돌(다대일·일대다)로 빠진 매핑도
+// 넣는다 — 뒤집은 매핑을 이 방향에서도 넘겨야 diff 가 같은 충돌로 판정해 관련 문장을 막는다 (빼면 DROP·CREATE 가 실행 문장이 된다, 17회차 2)
 function forwardApplied(db: Db, cache: AppCache, baseId: number, targetId: number): { keys: Set<string>; diff: SchemaDiff } {
   const { diff } = computeDiff(db, cache, baseId, targetId);
-  return { keys: appliedRenameKeys(diff), diff };
+  const conflicted = diff.ignoredRenames.filter((r) => r.reason === MAPPING_CONFLICT).map((r) => renameFullKey(r.mapping));
+  return { keys: new Set([...appliedRenameKeys(diff), ...conflicted]), diff };
 }
 
 // 이 방향 매핑을 뒤집은 정방향 매핑의 키. column/index 의 table(이 방향 TARGET = 정방향 BASE 이름)은 정방향 TARGET 이름으로 바꾼다

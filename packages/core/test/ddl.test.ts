@@ -549,6 +549,17 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(objectStatements(stmts, 'table', 'p2').statements.map((s) => s.sql.split('\n').join(' '))).toContain('ALTER TABLE `c`   DROP FOREIGN KEY `fk_c_p`');
   });
 
+  it('서로 다른 원본이 같은 목적지로 가는 매핑(테이블·컬럼)은 관련 rename·DROP·CREATE 를 수동 확인으로 묶고 무관한 테이블은 실행 (17회차 2)', () => {
+    for (const [name, blocked] of [['rename-table-many-to-one', ['a', 'b', 'c']], ['rename-column-many-to-one', ['t']]] as const) {
+      const { base, target, renames } = scenario(name);
+      const stmts = generateDdl(diffSchemas(base, target, renames));
+      const own = stmts.filter((s) => blocked.includes(s.object as never));
+      expect(own.length, name).toBeGreaterThan(0);
+      expect(own.every((s) => s.comment && s.sql.includes('매핑 충돌')), name).toBe(true);
+      expect(stmts.filter((s) => !s.comment).map((s) => s.sql.split('\n').join(' ')), name).toEqual(['ALTER TABLE `u`   ADD COLUMN `memo` varchar(50) DEFAULT NULL']);
+    }
+  });
+
   it('의존 매칭은 문장의 object 와 related 이름 모두를 본다: 맞바꾸기 뒤 coupon 을 읽는 새 뷰 카드는 묶음 RENAME 을 넣는다 (13회차 3)', () => {
     const { statements, dependencies } = cardOf('card-view-swap-rename', 'view', 'v_coupon');
     expect(statements.map((s) => s.sql.split('\n')[0])).toEqual([expect.stringMatching(/^RENAME TABLE `coupon` TO `__tdm_tmp_1`/), expect.stringMatching(/VIEW `v_coupon`/)]);

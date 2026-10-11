@@ -171,18 +171,24 @@ describe('rename 3회차 — 역방향은 적용된 매핑만, 수동 테이블 
   const get = async (ctx: App, base: number, target: number) =>
     (await ctx.app.inject({ method: 'GET', url: `/api/diff?base=${base}&target=${target}`, headers: ctx.viewer })).json();
 
-  it('이미 저장된 c→b, a→b 의 역방향은 정방향에서 실제로 적용된 a→b 만 뒤집는다', async () => {
+  // 17회차 2 개정: 예전에는 정방향이 a→b 하나만 적용하고 c 를 DROP 했다. 서로 다른 원본이 같은 목적지로 가는 매핑은 매핑 충돌이라
+  // 어느 것도 적용하지 않고 관련 문장을 수동 확인으로 돌린다. 역방향도 뒤집은 두 매핑(b→c, b→a)을 같은 충돌로 판정한다
+  it('이미 저장된 c→b, a→b 는 매핑 충돌 — 정방향·역방향 모두 적용하지 않고 a·b·c 문장을 실행하지 않는다', async () => {
     const ctx = await loggedInApp();
     const v1 = await upload(ctx, 's.sql', 'CREATE TABLE `a` (\n  `id` int NOT NULL\n);\nCREATE TABLE `c` (\n  `id` int NOT NULL\n);');
     const v2 = await upload(ctx, 's.sql', 'CREATE TABLE `b` (\n  `id` int NOT NULL\n);');
     // 2회차 저장 검증 이전에 남은 데이터 (라우트를 거치지 않고 저장)
     replaceRenames(ctx.db, v1, v2, [{ kind: 'table', from: 'c', to: 'b' }, { kind: 'table', from: 'a', to: 'b' }], 1);
+    const runnable = (body: { statements: { comment: boolean }[] }) => body.statements.filter((st) => !st.comment);
     const fwd = await get(ctx, v1, v2);
-    const applied = fwd.diff.tables.filter((t: { op: string }) => t.op === 'rename').map((t: { oldName: string; name: string }) => `${t.oldName}→${t.name}`);
-    expect(applied).toEqual(['a→b']);
+    expect(fwd.diff.tables.filter((t: { op: string }) => t.op === 'rename')).toEqual([]);
+    expect(fwd.diff.ignoredRenames.map((r: { reason: string }) => r.reason)).toEqual(['매핑 충돌', '매핑 충돌']);
+    expect(runnable(fwd)).toEqual([]);
     const rev = await get(ctx, v2, v1);
-    expect(rev.renames).toEqual([{ kind: 'table', from: 'b', to: 'a', source: 'manual', reversed: true }]);
-    expect(rev.ddl).toContain('RENAME TABLE `b` TO `a`');
+    expect(rev.renames).toEqual([
+      { kind: 'table', from: 'b', to: 'c', source: 'manual', reversed: true }, { kind: 'table', from: 'b', to: 'a', source: 'manual', reversed: true },
+    ]);
+    expect(runnable(rev)).toEqual([]);
   });
 
   it('DMS members→member·nick→nickname 의 테이블만 수동 members→customer 로 덮으면 DMS 컬럼 rename 은 customer 에 붙는다', async () => {
