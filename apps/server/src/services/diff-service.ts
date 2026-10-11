@@ -29,7 +29,8 @@ export interface StaleModel {
   reason: string;
 }
 
-const STALE_NOTE = '예전 파서로 저장된 버전이 낀 비교라 어느 문장도 실행하지 않습니다 — 같은 원문을 다시 올려 새 버전끼리 비교하세요';
+// 재업로드는 stale 버전을 고치지 않고 새 버전 번호로 붙는다 (17회차 7)
+const STALE_NOTE = '예전 파서로 저장됐거나 원문과 대조할 수 없는 버전이 낀 비교라 어느 문장도 실행하지 않습니다 — 같은 원문을 다시 올리면 기존 버전을 고치지 않고 새 버전 번호로 추가되니 새 버전끼리 비교하세요';
 
 // stale 버전이 낀 diff 의 실행 문장을 모두 수동 확인으로 돌린다 (저장 모델이 원문과 달라 어떤 문장이 원문과 다른 모델에서 나왔는지 모른다)
 function staleModelsOf(base: VersionDetail, target: VersionDetail): StaleModel[] {

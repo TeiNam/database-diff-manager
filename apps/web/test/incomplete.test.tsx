@@ -60,6 +60,8 @@ describe('SummaryTab: 예전 파서로 저장된 버전', () => {
     expect(note).toHaveTextContent('TARGET v2');
     expect(note).toHaveTextContent('문장 1개');
     expect(note).toHaveTextContent('같은 원문을 다시 올려');
+    // 재업로드는 이 버전을 고치지 않고 새 번호로 붙는다 (17회차 7)
+    expect(note).toHaveTextContent('기존 버전(TARGET v2)을 고치지 않고 새 버전 번호로 추가됩니다');
     expect(stat('저장 모델')).toHaveTextContent('예전 파서');
   });
 

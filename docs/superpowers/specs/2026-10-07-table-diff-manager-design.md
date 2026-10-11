@@ -234,7 +234,7 @@ interface Statement {
   calls?: string[];   // 뷰 생성 문장의 본문이 부르는 함수 이름(`objectReferences().routines`). 카드 묶음은 함수 문장과만 대소문자 무시로 비교한다 (10회차 개정)
   keepsIncomingFks?: boolean; // 이 테이블 변경이 들어오는 FK 의 참조 컬럼·키를 건드리지 않음 — 카드에 자식 FK 해제를 넣지 않는다 (13회차 개정. 순수 테이블 rename 의 RENAME TABLE 도, 15회차 — 얽힌 rename 묶음도, 16회차)
   evidenceHold?: boolean; // TARGET 완전성 증거가 없어 수동 확인으로 돌린 부재 기반 파괴 문장 (요약 탭이 센다, 15회차)
-  staleHold?: boolean; // 예전 파서로 저장된 버전(stale-model)이 낀 diff 라 수동 확인으로 돌린 문장 (holdAllStatements, 요약 탭이 센다, 16회차)
+  staleHold?: boolean; // 예전 파서로 저장된 버전(stale-model — 원문 없음·모델 손상 포함, 17회차)이 낀 diff 라 수동 확인으로 돌린 문장 (holdAllStatements, 요약 탭이 센다, 16회차)
 }
 ```
 
@@ -353,7 +353,7 @@ interface Statement {
 - 003 은 사용자 계정을 보존하고(대소문자만 다른 이름은 먼저 만든 것만), 세션과 업로드 데이터를 비운다.
 - 004 는 `objects` 만 다시 만들어(`-- foreign_keys: off`, id 보존) kind 에 `function`·`procedure` 를 더한다. 데이터·FK·UNIQUE·STRICT 는 그대로다.
 - 루틴은 테이블·뷰와 같은 객체·리비전으로 저장한다(같은 해시는 리비전 재사용). 루틴 객체는 이름 대소문자를 무시하고 찾는다. 루틴이 없는 모델의 `model_hash` 는 루틴 지원 전과 같다. MD 버전을 불러오면 `routinesUnknown: true` 를 붙이고, 버전 목록의 변경 객체 수는 MD 가 낀 쌍에서 루틴을 세지 않는다.
-- 기동 시 재판정(15회차 1, 16회차 2 개정): 마이그레이션 직후 JS 단계 `backfillEvidence` 가 판정이 없거나(006 이전), 006 의 표시를 옮겼거나, `judge_rev` 가 앱의 `JUDGE_REV` 보다 낮은 버전을 원문으로 다시 판정한다(버전 하나씩, 멱등). 008 은 기존 행을 판 0 으로 두어 v7 DB 도 한 번 다시 판정한다. 파서·완전성 규칙이 바뀌면 `JUDGE_REV` 를 올린다. 재판정은 원문을 지금 파서로 다시 파싱한 모델과 저장 모델을 `modelHash`(객체 순서 무관)로 비교해, 다르면 `stale_reason` 을 단다(예: 옛 MD 파서가 `Order Items` 를 `order items` 로 저장한 버전). 원문을 지금 파서로 읽지 못하면 불완전 + stale 이다. 원문이 없으면 stale 표시를 바꾸지 않는다.
+- 기동 시 재판정(15회차 1, 16회차 2 개정): 마이그레이션 직후 JS 단계 `backfillEvidence` 가 판정이 없거나(006 이전), 006 의 표시를 옮겼거나, `judge_rev` 가 앱의 `JUDGE_REV` 보다 낮은 버전을 원문으로 다시 판정한다(버전 하나씩, 멱등). 008 은 기존 행을 판 0 으로 두어 v7 DB 도 한 번 다시 판정한다. 파서·완전성 규칙이 바뀌면 `JUDGE_REV` 를 올린다 — 테스트(`apps/server/test/judge-rev.test.ts`)가 실출력 픽스처와 그 변형(편집기 줄 끝 공백 제거·앞 절반 절단)의 모델 해시·완전성 판정을 판(`judgeRev`)과 함께 스냅샷(`judge-rev.snapshot.json`)으로 두고, 결과가 바뀌었는데 판이 같으면 실패한다(`UPDATE_JUDGE_SNAPSHOT=1` 은 판을 올렸거나 새 픽스처만 늘었을 때만 다시 쓴다, 17회차 5. 파서 지문 자동 계산은 파서 소스·의존 해시가 빌드 방식에 따라 달라져 쓰지 않는다). 판 2: 17회차(원문 없는 버전·모델 JSON 손상 버전도 stale). 재판정은 원문을 지금 파서로 다시 파싱한 모델과 저장 모델을 `modelHash`(객체 순서 무관)로 비교해, 다르면 `stale_reason` 을 단다(예: 옛 MD 파서가 `Order Items` 를 `order items` 로 저장한 버전). 원문을 지금 파서로 읽지 못하면 불완전 + stale 이다. 원문이 없거나 읽을 수 없으면(문자열이 아님) 저장 모델을 검증할 수 없으므로 판정은 unknown(006 의 불완전 표시는 유지) + stale(`원문이 없어 모델을 검증할 수 없음`)이다 — 16회차에는 stale 표시를 건너뛰어 옛 complete 판정이 남고 옛 모델 역방향 diff 에 실행 가능한 CREATE/DROP 이 나왔다(17회차 1). 저장 모델 JSON 이 손상돼 읽을 수 없는 버전은 기동을 막지 않고 그 버전만 stale(`저장된 모델을 읽지 못해 …`)로 표시하고 경고 로그를 남긴다(17회차 6).
 - **stale-model 처리 — 저장 모델을 고치지 않고 표시만 한다(16회차 2 결정)**: 그 버전이 BASE·TARGET 인 diff 는 실행 문장을 모두 수동 확인으로 돌리고(`holdAllStatements`, 문장에 `staleHold`), 응답 `staleModels` 로 요약 탭이 경고한다. 같은 원문을 다시 올리면 stale 버전과 duplicate 로 합치지 않고 지금 파서 모델로 새 버전을 만든다 — 그 새 버전끼리 비교하는 것이 사용자가 벗어나는 길이다. 저장 모델을 지금 파서 결과로 바꾸는 방식(교체)은 쓰지 않는다: 객체는 `(schema_id, kind, name)` 으로 식별되고 리비전 이력·`version_objects` 스냅샷·이름에 걸린 수동 rename 매핑(`rename_mappings` 의 `table_name`·`old_name`)·DMS 대응이 모두 이름에 걸려 있어, 이름이 바뀌는 교체는 이력을 끊고 저장한 rename 을 말없이 무효로 만든다. 표시는 데이터를 바꾸지 않으므로 되돌릴 수 있다.
 - 백업은 `VACUUM INTO` 로 하는 `npm run backup -w @tdm/server -- <경로>` 를 쓴다. 실행 중에 `.db` 만 복사하면 `-wal` 의 최근 커밋이 빠질 수 있다.
 
@@ -440,7 +440,7 @@ interface Statement {
 
 - **루틴**: 트리는 Tables / Views 다음에 Routines 그룹(함수·프로시저 아이콘, 루틴이 있을 때만)을 둔다. 요약에 루틴 추가/삭제/변경 수 카드와 변경 행(바뀐 항목)을, 객체 diff 의 SQL 보기는 CREATE 문 diff, 표 보기는 파라미터·RETURNS·특성·SQL_MODE·본문 표를 보여 준다. MD 가 끼면 트리·요약에 'MD 출처라 루틴은 비교하지 않음' 안내를 띄운다.
 - **TARGET 완전성(15회차)**: 요약 통계에 'TARGET 완전성' 카드(완전 / 불완전 / 확인 불가)를 두고, 완전이 아니면 사유와 그 때문에 수동 확인으로 돌린 삭제 문장 수(`evidenceHold` 문장 수)를 안내한다.
-- **예전 파서로 저장된 버전(16회차 2)**: BASE·TARGET 중 stale 버전이 있으면 요약 통계에 '저장 모델: 예전 파서' 카드를 두고, 어느 쪽 몇 번 버전인지와 수동 확인으로 돌린 문장 수(`staleHold` 문장 수), 같은 원문을 다시 올려 새 버전끼리 비교하라는 안내를 보인다.
+- **예전 파서로 저장된 버전(16회차 2)**: BASE·TARGET 중 stale 버전이 있으면 요약 통계에 '저장 모델: 예전 파서' 카드를 두고, 어느 쪽 몇 번 버전인지와 수동 확인으로 돌린 문장 수(`staleHold` 문장 수), 같은 원문을 다시 올리면 기존 버전을 고치지 않고 새 버전 번호로 추가되니 새 버전끼리 비교하라는 안내를 보인다(17회차 7). 원문이 없거나 모델을 읽을 수 없는 버전도 같은 경고로 보인다.
 - **rename 옛 이름**: 트리는 rename 된 테이블의 옛 이름을 숨긴다. 단 TARGET 에도 있는 이름(맞바꾸기 a↔b·교체의 새 이름)은 보인다(2026-10-11 2회차 개정).
 - **트리 동작**: 트리에서 객체를 클릭하면 diff 탭의 해당 객체로 스크롤한다. 변경이 없는 객체를 클릭하면 단일 버전 정의(SQL/표)를 보여준다.
 - **URL 상태**: `/db/:dbId/schema/:schemaId?base=3&target=5&tab=diff&obj=orders&mode=sql&layout=split`. 이 링크를 공유하면 같은 화면이 열린다.

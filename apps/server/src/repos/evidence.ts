@@ -5,7 +5,9 @@ import { one, run, type Db } from '../db/connection';
 export type JudgedBy = 'ingest' | 'backfill' | 'v6';
 // 판정 규칙 판 (v8). 파서·완전성 판정이 바뀌어 저장된 판정·모델을 원문으로 다시 확인해야 할 때 올린다 — 낮은 판의 버전은 기동 시
 // 다시 판정한다. 1: 16회차 (MD 끝 표식 없는 마지막 섹션은 unknown, 저장 모델과 원문 재파싱 모델 비교)
-export const JUDGE_REV = 1;
+// 2: 17회차 (원문 없는 버전·저장 모델 JSON 손상 버전도 stale). 파서·완전성 판정 결과가 바뀌면 test/judge-rev.test.ts 의 스냅샷
+// 검사가 실패한다 — 이 판을 올리고 스냅샷을 다시 만든다 (17회차 5)
+export const JUDGE_REV = 2;
 
 const LEVELS: ReadonlySet<string> = new Set<EvidenceLevel>(['complete', 'incomplete', 'unknown']);
 const UNREADABLE: SchemaEvidence = { level: 'incomplete', reason: '저장된 완전성 판정을 읽지 못했습니다', objects: [] };

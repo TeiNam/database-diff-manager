@@ -55,6 +55,7 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
   const held = data.statements.filter((st) => st.evidenceHold).length;
   const stale = data.staleModels ?? [];
   const staleHeld = data.statements.filter((st) => st.staleHold).length;
+  const staleNames = stale.map((m) => `${m.side === 'base' ? 'BASE' : 'TARGET'} v${m.versionNo}`).join(', ');
   const stats = [
     { value: `+${count('add')}`, label: '테이블 추가', tone: s.add },
     { value: `−${count('drop')}`, label: '테이블 삭제', tone: s.del },
@@ -79,8 +80,9 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
       {routinesUnknown && <p className={s.notice} role="note">MD 출처라 루틴은 비교하지 않음 — td-export MD 에는 함수·프로시저가 없습니다</p>}
       {stale.length > 0 && (
         <p className={s.notice} role="note">
-          예전 파서로 저장된 버전({stale.map((m) => `${m.side === 'base' ? 'BASE' : 'TARGET'} v${m.versionNo}`).join(', ')})이 낀 비교입니다 — 문장 {staleHeld}개를
-          실행하지 않고 수동 확인으로 돌렸습니다. {stale[0].reason}
+          예전 파서로 저장됐거나 원문과 대조할 수 없는 버전({staleNames})이 낀 비교입니다 — 문장 {staleHeld}개를
+          실행하지 않고 수동 확인으로 돌렸습니다. {stale[0].reason}. 같은 원문을 다시 올리면 기존 버전({staleNames})을 고치지 않고 새 버전 번호로
+          추가됩니다 — 새 버전끼리 비교하세요
         </p>
       )}
       {evidence.level !== 'complete' && (
