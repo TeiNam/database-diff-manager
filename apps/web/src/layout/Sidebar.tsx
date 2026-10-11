@@ -44,9 +44,11 @@ function objectNames(data: DiffResponse, kind: ObjectKind): string[] {
 }
 
 function objectNodes(data: DiffResponse, kind: ObjectKind, parentId: string, query: string, filter: Filter, selected: string | undefined, select: (name: string) => void): Node[] {
+  const targetNames = new Set(objectsOf(data.targetModel, kind).map((o) => o.name));
   return objectNames(data, kind).sort().flatMap((name) => {
     const op = opOf(data.diff, kind, name);
-    const renamedAway = kind === 'table' && data.diff.tables.some((t) => t.op === 'rename' && t.oldName === name);
+    // rename 의 옛 이름은 숨긴다. 단 TARGET 에도 있는 이름(맞바꾸기·연쇄의 새 이름)은 그 테이블이므로 보인다
+    const renamedAway = kind === 'table' && !targetNames.has(name) && data.diff.tables.some((t) => t.op === 'rename' && t.oldName === name);
     if (renamedAway) return [];
     if (filter === 'changed' && !op) return [];
     if (query && !name.toLowerCase().includes(query.toLowerCase())) return [];

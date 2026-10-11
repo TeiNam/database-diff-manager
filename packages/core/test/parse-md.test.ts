@@ -336,3 +336,38 @@ describe('MD 생성 컬럼 저장 방식', () => {
     expect(d.tables[0].columns.map((x) => [x.name, x.fields])).toEqual([['g2', ['generated']]]);
   });
 });
+
+// 이스케이프 판별: 새 형식(0.1.46+)에서만 생기는 증거(홀수 백슬래시 뒤 ` * <)로만 새 형식으로 본다
+describe('MD 이스케이프 형식 판별', () => {
+  const row = (name: string, type: string, def: string, comment = '') => `|${name}|${type}|NO|${def}|utf8mb4|utf8mb4_0900_ai_ci|||${comment}|`;
+  const md = (...rows: string[]) => [
+    'shop ', '=============', '', '## Table List', '- [t ()](#t)', ' ', '## t', '**Information**',
+    '|Table type|Engine|Row format|Collate|Comment|', '|---|---|---|---|---|', '|BASE TABLE|InnoDB|Dynamic|utf8mb4_0900_ai_ci||', '',
+    '**Columns**', '|Name|Type|Nullable|Default|Charset|Collation|Key|Extra|Comment|', '|---|---|---|---|---|---|---|---|---|',
+    '|id|int|NO||||PRI|||', ...rows, '', ' ',
+  ].join('\n');
+  const col = (text: string, name: string) => parseMdDump(text).model.tables[0].columns.find((c) => c.name === name)!;
+
+  it('구형(0.1.22–0.1.45) UNC 기본값만 있으면 새 형식 증거가 아니다: 모호한 기본값은 미확인으로 둔다', () => {
+    const c = col(md(row('unc', 'varchar(50)', "'\\\\\\\\srv'"), row('flag', 'char(1)', "'Y'")), 'unc');
+    expect(c.default).toBeUndefined();
+    expect(c.unknown).toContain('default');
+  });
+
+  it('구형 증거(맨몸 * 등)가 있으면 UNC 기본값과 glob\\* 코멘트를 글자 그대로 읽는다', () => {
+    const text = md(row('unc', 'varchar(50)', "'\\\\\\\\srv'", 'glob\\*'), row('expr', 'varchar(9)', "'Y'", 'a * b'));
+    expect(col(text, 'unc')).toMatchObject({ default: "'\\\\\\\\srv'", comment: 'glob\\*' });
+    expect(col(text, 'unc').unknown).not.toContain('default');
+  });
+
+  it('신형 개행 기본값만 있는 파일: 백슬래시 기본값은 형식을 몰라 미확인으로 둔다', () => {
+    const c = col(md(row('nl', 'varchar(20)', "'a\\\\nb'")), 'nl');
+    expect(c.unknown).toContain('default');
+  });
+
+  it('신형 증거가 있으면 인덱스 정보(따옴표 기본값·상세 인덱스)가 없어도 새 형식으로 읽는다', () => {
+    expect(col(md(row('n', 'int', '0', 'a \\* b \\<i>')), 'n').comment).toBe('a * b <i>');
+    const text = md(row('n', 'int', '0', 'a \\* b'), row('nl', 'varchar(20)', "'a\\\\nb'"));
+    expect(col(text, 'nl')).toMatchObject({ default: "'a\\nb'" });
+  });
+});

@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `member` (`id`, `name`, `full_name`) VALUES (1, 'kim', 'Kim Minsu')",
+  "query": "SELECT `id`, `name` FROM `member`",
+  "rows": [{ "id": 1, "name": "Kim Minsu" }]
+}

@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `session` (`id`) VALUES (1), (2), (3), (4)",
+  "query": "SELECT `id` FROM `session` ORDER BY `id`",
+  "rows": [{ "id": 1 }, { "id": 2 }, { "id": 3 }, { "id": 4 }]
+}

@@ -1,0 +1,4 @@
+[
+  { "kind": "table", "from": "log", "to": "log_2025" },
+  { "kind": "table", "from": "log_new", "to": "log" }
+]

@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `members` (`id`, `code`) VALUES (1, 'M1'); INSERT INTO `post` (`id`, `member_code`) VALUES (5, 'M1')",
+  "query": "SELECT `p`.`id`, `m`.`id` AS `member_id`, `m`.`member_code` FROM `post` `p` JOIN `member` `m` ON `m`.`member_code` = `p`.`member_code`",
+  "rows": [{ "id": 5, "member_id": 1, "member_code": "M1" }]
+}

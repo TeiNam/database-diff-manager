@@ -164,6 +164,18 @@ describe('테이블 rename 이름 충돌', () => {
   });
 });
 
+describe('맞바꾸기 임시 이름', () => {
+  const { base, target, renames } = scenario('table-swap');
+  const extra = (sql: string) => parseSqlDump(sql).model;
+
+  it('변경 없는 테이블·뷰가 이미 쓰는 __tdm_tmp_N 은 피한다', () => {
+    const t = extra('CREATE TABLE `__tdm_tmp_1` (`id` int NOT NULL) ENGINE=InnoDB;\nCREATE VIEW `__tdm_tmp_2` AS select 1 AS `x`;');
+    const withExtra = (m: typeof base) => ({ ...m, tables: [...m.tables, ...t.tables], views: [...m.views, ...t.views] });
+    const [st] = generateDdl(diffSchemas(withExtra(base), withExtra(target), renames));
+    expect(st.sql).toBe('RENAME TABLE `coupon` TO `__tdm_tmp_3`, `voucher` TO `coupon`, `__tdm_tmp_3` TO `voucher`');
+  });
+});
+
 describe('뷰 DEFINER 안내', () => {
   it('뷰 CREATE 에도 루틴과 같은 DEFINER 안내를 붙인다', () => {
     const { base, target } = scenario('order-view');

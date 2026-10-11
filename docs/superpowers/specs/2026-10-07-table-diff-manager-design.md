@@ -132,7 +132,7 @@ td-export MD 형식을 따른다.
   - td-export 0.1.22+는 셀 안의 `|`를 `\|`로, 줄바꿈을 `<br>`로 이스케이프한다. 0.1.22를 직접 가리키는 표기가 없으므로 상세 인덱스 형식(0.1.19+)으로 판별된 파일만 이스케이프되지 않은 `|`로 셀을 나누고 `\|`를 되돌린다. 그 밖의 파일은 모든 `|`로 나눈다(0.1.15 코멘트가 `C:\`처럼 `\`로 끝나도 그대로 읽는다). `<br>`은 버전과 관계없이 줄바꿈으로 읽는다(0.1.21 이하 코멘트에 `<br>` 글자가 그대로 있으면 SQL과 다르게 보인다).
   - td-export 0.1.30도 백슬래시는 이스케이프하지 않는다. 그래서 0.1.22+ 파일에서 `\`로 끝나는 셀 뒤의 구분자 `|`는 `\|`(이스케이프된 `|`)와 구분할 수 없어, 그 셀과 다음 셀이 합쳐진다. 단 줄 끝의 `|`는 항상 표 구분자로 먼저 떼어 내므로 마지막 셀(Comment)의 `C:\`와 `C:|`는 구분된다.
   - 그 이전 버전은 `|`를 이스케이프하지 않는다. 셀 수가 열 수보다 많으면 넘친 셀을 마지막 Comment로 합친다.
-  - td-export 0.1.46+(#37·#48)는 셀·인덱스·FK 줄의 `\` `` ` `` `*` `<` 앞과 `](` 의 `(` 앞에 백슬래시를 붙인다(줄바꿈은 `<br>`, 테이블 목록의 이름과 뷰 SQL 블록은 이스케이프하지 않음). 버전 표기가 없으므로 파일 단위로 백슬래시 연속(k개) 뒤 글자를 센다: `` ` ``·`*`·`<`(`<br>` 제외) 앞의 홀수 k 는 새 형식, 짝수 k(0 포함, 맨몸 글자)는 옛 형식의 증거다. 그 밖의 글자 앞 홀수 k 는 옛 형식(새 형식은 백슬래시를 늘 둘씩 낸다), 따옴표 Default 안의 k ≡ 0 (mod 4) 는 새 형식, k ≡ 2 (mod 4)(제어 문자 이스케이프 `\n` 등 앞 제외)는 옛 형식의 증거다. 새 형식 증거만 있을 때 셀을 이스케이프되지 않은 `|` 로 나누고 이스케이프를 푼 뒤(셀 복원), Default 를 SQL 리터럴로 해석한다. 근거가 없으면 기존 해석을 유지한다(2026-10-11 개정).
+  - td-export 0.1.46+(#37·#48)는 셀·인덱스·FK 줄의 `\` `` ` `` `*` `<` 앞과 `](` 의 `(` 앞에 백슬래시를 붙인다(줄바꿈은 `<br>`, 테이블 목록의 이름과 뷰 SQL 블록은 이스케이프하지 않음). 버전 표기가 없으므로 인덱스 판별과 따로, 파일 단위로 백슬래시 연속(k개) 뒤 글자를 센다. 새 형식 증거는 새 형식에서만 생기는 `` ` ``·`*`·`<`(`<br>` 제외) 앞의 홀수 k 뿐이다. 옛 형식 증거는 그 글자들 앞의 짝수 k(0 포함, 맨몸 글자), 그 밖의 글자 앞 홀수 k(새 형식은 백슬래시를 늘 둘씩 낸다), 따옴표 Default 안의 k ≡ 2 (mod 4)(제어 문자 이스케이프 `\n` 등 앞 제외)다. 따옴표 Default 의 4의 배수 k(`'\\\\srv'` 같은 UNC 경로)는 두 형식 모두 낼 수 있어 증거가 아니다. 옛 형식 증거가 있으면 옛 형식, 새 형식 증거만 있으면 셀을 이스케이프되지 않은 `|` 로 나누고 이스케이프를 푼 뒤(셀 복원) Default 를 SQL 리터럴로 해석한다. 둘 다 없으면(맨몸 리터럴 Default 로 0.1.20 이하가 확실한 파일 제외) 기존 해석을 유지하되, 백슬래시가 든 따옴표 Default 는 두 형식에서 값이 달라 `unknown: ['default']` 로 둔다(2026-10-11 개정, 2회차: 판별 분리·UNC 증거 제외·모호한 기본값 미확인).
 - **형식 판별(파일 단위)**: 이전 버전이 낼 수 없는 표기가 하나라도 있으면 그 버전 이상으로 본다.
 
   | td-export | Default 칸 | Index 목록 | 판별 근거 |
@@ -204,6 +204,8 @@ interface RoutineDiff { op: 'add' | 'drop' | 'modify'; kind: 'function' | 'proce
 - **rename 매핑을 받으면** drop+add 쌍을 `rename` 하나로 합치고, 나머지 속성 차이는 `fields`에 담는다.
   - 매핑은 같은 대상이 아직 짝지어지지 않았을 때 적용한다. 새 이름이 BASE 에 있으면 그 BASE 객체도 다른 매핑으로 옮겨져야 하고, 옛 이름이 TARGET 에 있으면 그 TARGET 객체도 다른 매핑으로 채워져야 한다(맞바꾸기 a↔b, 연쇄 a→b·b→c, 교체 log→log_2025·log_new→log). 조건을 못 맞춘 매핑을 빼면 다른 매핑이 무너질 수 있어 안정될 때까지 반복한다. 적용하지 못한 매핑은 이유와 함께 `ignoredRenames`에 담는다(2026-10-11 개정: 이전에는 이름이 겹치면 모두 '이름 충돌'이었다).
   - 파싱 실패 테이블은 테이블 rename 후보에서 뺀다.
+- **FK 참조와 rename**: InnoDB 는 `RENAME TABLE`·`RENAME/CHANGE COLUMN` 때 다른 테이블 FK 의 참조 테이블·참조 컬럼도 따라 옮긴다. 그래서 FK 는 BASE FK 의 `refTable`·`refColumns` 에 적용된 테이블·컬럼 rename 을 반영한 값으로 TARGET 과 비교한다(`refSchema` 가 없는 같은 스키마 FK 만). 단순 rename 에서는 FK DROP/ADD 가 나오지 않고, 교체(log→log_2025·log_new→log)·맞바꾸기 뒤 TARGET 이 같은 이름을 가리키면 FK DROP+ADD 로 잡힌다(2026-10-11 2회차 개정).
+- **CHECK 자동 이름과 테이블 rename**: `RENAME TABLE` 은 자동 제약명 `<옛 테이블>_chk_N` 을 `<새 테이블>_chk_N` 으로 바꾸므로, rename 된 테이블은 BASE CHECK 이름을 새 이름으로 바꿔 비교·출력한다(2026-10-11 2회차 개정).
 - **파티션**: 방식·표현식·개수·파티션 목록과 `SUBPARTITION BY …` 절을 비교한다.
 - **생성 컬럼**: 한쪽이 MD(표현식 미상)여도 생성 여부와 저장 방식(VIRTUAL/STORED)은 비교하고, 표현식만 `skipped`(`column.generated`)로 남긴다.
 - **루틴**: (종류, 이름)으로 짝짓고 이름은 대소문자를 구분하지 않는다(MySQL 루틴 이름 규칙). 기본값과 같은 명시 특성은 생략과 같다. 본문은 줄 끝 공백·줄바꿈(CRLF) 차이만 무시한다. `sqlMode` 는 양쪽 다 알 때만 비교한다. rename 후보는 만들지 않는다. 한쪽이라도 `routinesUnknown`(MD)이면 루틴은 비교하지 않고 `routines: []`, `routinesUnknown: true` 를 돌려준다(모두 drop/add 로 보이지 않게).
@@ -226,10 +228,10 @@ interface Statement {
 
 1. 삭제·변경되는 FK를 `ALTER TABLE … DROP FOREIGN KEY`
 2. 삭제되는 뷰를 `DROP VIEW`, 삭제·변경되는 루틴을 `DROP FUNCTION|PROCEDURE IF EXISTS`
-3. `RENAME TABLE a TO b` (매핑된 것만). 이름이 얽힌 rename(한 rename 의 새 이름이 다른 rename 의 옛 이름)은 한 문장으로 묶는다. MySQL 은 절을 앞에서부터 원자적으로 적용하므로 비는 이름부터 옮기고(`RENAME TABLE log TO log_2025, log_new TO log`), 순환(맞바꾸기)은 겹치지 않는 임시 이름 `__tdm_tmp_n` 을 거친다(`RENAME TABLE a TO __tdm_tmp_1, b TO a, __tdm_tmp_1 TO b`).
+3. `RENAME TABLE a TO b` (매핑된 것만). 이름이 얽힌 rename(한 rename 의 새 이름이 다른 rename 의 옛 이름)은 한 문장으로 묶는다. MySQL 은 절을 앞에서부터 원자적으로 적용하므로 비는 이름부터 옮기고(`RENAME TABLE log TO log_2025, log_new TO log`), 순환(맞바꾸기)은 겹치지 않는 임시 이름 `__tdm_tmp_n` 을 거친다(`RENAME TABLE a TO __tdm_tmp_1, b TO a, __tdm_tmp_1 TO b`). 임시 이름은 BASE·TARGET 의 모든 테이블·뷰 이름(`SchemaDiff.objectNames`)과 겹치지 않게 고른다(2026-10-11 2회차 개정).
 4. 새 테이블을 `CREATE TABLE`. **FK를 뺀 정의**로 만들고 FK는 8단계에서 추가한다(테이블 간 생성 순서 문제 회피).
 5. 변경 테이블마다 `ALTER TABLE` 문 **하나**. 절 순서는 다음과 같다.
-   - `DROP CHECK` / `DROP INDEX`(PK면 `DROP PRIMARY KEY`)
+   - `DROP CHECK` / `DROP INDEX`(PK면 `DROP PRIMARY KEY`), `DROP COLUMN`. 같은 이름으로 들어오는 rename(x→y, 기존 y 삭제)은 `DROP COLUMN y, RENAME COLUMN x TO y` 순서로 낸다
    - `RENAME COLUMN`(이름만 바뀐 경우), 이름과 정의가 함께 바뀌면 `CHANGE COLUMN old new <정의>`. 한 ALTER 안의 RENAME/CHANGE 는 동시에 적용되므로(MySQL 8.0+) 컬럼 맞바꾸기·연쇄도 임시 이름 없이 그대로 낸다(`RENAME COLUMN a TO b, RENAME COLUMN b TO a`)
    - `MODIFY COLUMN <전체 정의> [FIRST|AFTER x]` (속성 변경, 위치 변경)
    - `ADD COLUMN <정의> [FIRST|AFTER x]`
@@ -244,10 +246,11 @@ interface Statement {
    - 테이블 콜레이션과 같은 `COLLATE`만 붙은 컬럼은 상속한 값이므로 `COLLATE`를 빼고 출력한다(명시하면 `SHOW CREATE` 출력이 달라진다).
 6. 파티션 변경은 테이블별로 별도 `ALTER TABLE` 하나로 처리한다(다른 변경과 섞지 않는다).
    - 타입·표현식이 같고 **RANGE/LIST 파티션이 끝에 추가만 됨**: `ADD PARTITION (…)`. 월별 파티션 운영에서 가장 흔한 경우다.
-   - 같은 조건에서 파티션이 **삭제됨**: 맨 앞(보관 기간 정리)이면 `DROP PARTITION p1, p2`. RANGE 중간 삭제는 다음 파티션과 합쳐 `REORGANIZE PARTITION p2, p3 INTO (p3 …)` 로 지운 구간의 행을 보존한다. 뒤쪽(다음 파티션 없음)·LIST 삭제는 `DROP PARTITION` 에 `[데이터 확인]` notes 를 단다(2026-10-11 개정)
+   - 같은 조건에서 파티션이 **삭제됨**: RANGE 맨 앞(보관 기간 정리)이면 `DROP PARTITION p1, p2` 에 `[데이터 확인]` notes. RANGE 중간 삭제는 다음 파티션과 합쳐 `REORGANIZE PARTITION p2, p3 INTO (p3 …)` 로 지운 구간의 행을 보존한다. 뒤쪽(다음 파티션 없음) 삭제는 `DROP PARTITION` 에 `[데이터 확인]` notes 를 단다(2026-10-11 개정)
+   - LIST: 사라진 파티션의 값이 TARGET 어디에도 없을 때만 `DROP PARTITION` + `[데이터 확인]`(위치 무관, 첫 파티션 포함). 값이 TARGET 의 다른 파티션에 남으면(병합 `p1 IN(1), p2 IN(2)` → `p2 IN(1,2)`) 연속 구간을 `REORGANIZE PARTITION p1, p2 INTO (…)` 로 묶는다. MySQL 은 LIST REORGANIZE 에서 새 파티션에 없는 값의 행을 오류 없이 지우므로, 그런 값이 있으면 `[데이터 확인] 값 …` notes 를 단다(2026-10-11 2회차 개정)
    - 같은 조건에서 중간 파티션의 경계·구성이 바뀜: `REORGANIZE PARTITION … INTO (…)`
    - 파티션 COMMENT/ENGINE만 바뀜: DDL 없이 `-- 파티션 메타 변경` 주석
-   - HASH/KEY 개수만 바뀜: `ADD PARTITION PARTITIONS n` / `COALESCE PARTITION n`
+   - HASH/KEY 개수만 바뀜: `ADD PARTITION PARTITIONS n` / `COALESCE PARTITION n`. 이름 있는 HASH/KEY 파티션은 `DROP PARTITION` 이 없으므로 뒤쪽 감소는 `COALESCE PARTITION n`, 뒤쪽 증가는 `ADD PARTITION (PARTITION …)`, 그 밖(이름·정의 변경)은 `PARTITION BY …` 전체 재정의(2026-10-11 2회차 개정)
    - 타입·표현식이 바뀌거나 새로 파티셔닝: `PARTITION BY …` 전체 재정의
    - 파티셔닝 제거: `REMOVE PARTITIONING`
 7. 삭제되는 테이블을 `DROP TABLE`
@@ -286,6 +289,7 @@ interface Statement {
 | `object_revisions` | 메타 컬럼 뒤 마지막에 `model_json`. `UNIQUE (object_id, revision_no)`, `UNIQUE (id, object_id)`, 커버링 인덱스 `ix_revisions_history (object_id, revision_no, fidelity, parse_error)` |
 | `version_objects` | `(version_id, schema_id, object_id, revision_id)`, PK `(version_id, object_id)`. FK `(version_id, schema_id)` → `schema_versions(id, schema_id)` CASCADE, `(object_id, schema_id)` → `objects(id, schema_id)`, `(revision_id, object_id)` → `object_revisions(id, object_id)` |
 | `rename_mappings` | `CHECK ((kind='table') = (table_name IS NULL))`, `CHECK (base_version_id <> target_version_id)`, `ux_renames (base, target, kind, coalesce(table_name,''), old_name)`, `ix_renames_target` |
+| `rename_mapping_sets` | (005) 수동 rename 을 명시적으로 저장한 쌍(빈 목록 포함). PK `(base_version_id, target_version_id)`, 두 FK 모두 CASCADE, `ix_rename_sets_target`. 005 는 매핑이 있던 쌍으로 채운다 |
 
 - 모든 테이블은 `STRICT` 다. 저장소 코드는 정확한 타입을 쓴다(불리언은 0/1 정수).
 - `version_objects` 의 복합 FK 와 PK 로 "버전당 객체 하나에 리비전 하나", "버전·객체·리비전이 같은 Schema·같은 객체 소속" 을 DB 가 강제한다.
@@ -329,7 +333,8 @@ interface Statement {
 - **업로드 제한**: 파일당 20 MB, UTF-8만 허용(BOM은 제거).
 - **업로드 응답**: 파일별로 `ok | duplicate | error`와 파싱 경고(객체, 줄 번호, 사유) 목록을 담는다.
 - **diff 결과 캐시**: `(base, target, 전환 매핑, 수동 rename 매핑과 그 방향)` 키로 메모리 LRU에 캐시한다. 버전 내용은 불변이라 무효화 조건은 rename 변경과 Database 이름 변경(응답 메타에 이름이 들어 있어 PATCH 시 diff 캐시를 비운다)이다.
-- **수동 rename 의 역방향**: (base, target) 쌍에 저장된 수동 매핑이 없으면 역쌍(target, base)의 수동 매핑을 뒤집어 적용한다(column/index 의 `table` 은 새 TARGET 쪽 이름). 응답 rename 은 `source: 'manual'`, `reversed: true`. 저장(PUT)은 그 쌍에만 한다(2026-10-11 개정).
+- **수동 rename 의 역방향**: (base, target) 쌍에 수동 매핑을 저장한 적이 없으면(`rename_mapping_sets`, 빈 목록 저장도 저장이다) 역쌍(target, base)의 수동 매핑을 뒤집어 적용한다. column/index 의 `table` 은 새 TARGET 쪽 이름으로, 테이블 대응은 뒤집은 수동 테이블 rename 이 우선이고 없으면 이 방향의 DMS 테이블 rename 을 쓴다. 응답 rename 은 `source: 'manual'`, `reversed: true`. 저장(PUT)은 그 쌍에만 한다. 역쌍 사본을 저장했다가 모두 해제해도 역쌍 매핑이 되살아나지 않는다(2026-10-11 개정, 2회차 보강).
+- **같은 대상 매핑 거부**: 같은 이름으로 가는 매핑(같은 kind·table·to, 예: `c→b`, `a→b`)이 둘 이상이고 그중 수동 매핑이 있으면 PUT 을 400(`같은 이름(b)으로 가는 매핑이 여러 개입니다 …`)으로 거부한다. diff 는 하나만 적용하므로 뒤집은 역방향과 어긋나기 때문이다(DMS 매핑 중 수동 매핑으로 덮이지 않은 것도 센다).
 - 입력 검증은 서버의 zod 스키마로 한다. core는 의존성이 없으므로 타입만 공유한다.
 
 ### 5.3 인증·보안
@@ -380,6 +385,7 @@ interface Statement {
 ```
 
 - **루틴**: 트리는 Tables / Views 다음에 Routines 그룹(함수·프로시저 아이콘, 루틴이 있을 때만)을 둔다. 요약에 루틴 추가/삭제/변경 수 카드와 변경 행(바뀐 항목)을, 객체 diff 의 SQL 보기는 CREATE 문 diff, 표 보기는 파라미터·RETURNS·특성·SQL_MODE·본문 표를 보여 준다. MD 가 끼면 트리·요약에 'MD 출처라 루틴은 비교하지 않음' 안내를 띄운다.
+- **rename 옛 이름**: 트리는 rename 된 테이블의 옛 이름을 숨긴다. 단 TARGET 에도 있는 이름(맞바꾸기 a↔b·교체의 새 이름)은 보인다(2026-10-11 2회차 개정).
 - **트리 동작**: 트리에서 객체를 클릭하면 diff 탭의 해당 객체로 스크롤한다. 변경이 없는 객체를 클릭하면 단일 버전 정의(SQL/표)를 보여준다.
 - **URL 상태**: `/db/:dbId/schema/:schemaId?base=3&target=5&tab=diff&obj=orders&mode=sql&layout=split`. 이 링크를 공유하면 같은 화면이 열린다.
 - **버전 선택기**: 같은 스키마의 버전 목록(번호·날짜·업로더·메모)을 보여주고, 맨 아래 "다른 Database/Schema와 비교…" 항목을 둔다. 기본값은 직전 버전 → 최신 버전.

@@ -34,9 +34,11 @@ interface MdFormat {
   cellEscapes: boolean;
   // 0.1.46+: 셀·인덱스·FK 줄의 '\\' '`' '*' '<' 앞과 '](' 의 '(' 앞에 백슬래시를 붙인다 (detectMarkdownEscapes)
   markdownEscapes: boolean;
+  // 0.1.46+ 인지 아닌지 근거가 없다. 백슬래시가 든 따옴표 Default 는 두 형식에서 값이 달라 미확인으로 둔다
+  ambiguousEscapes: boolean;
 }
 // 판별 전에는 이스케이프를 모르는 상태로 셀을 나눈다
-const PLAIN_FORMAT: MdFormat = { defaults: 'legacy', indexDetails: false, cellEscapes: false, markdownEscapes: false };
+const PLAIN_FORMAT: MdFormat = { defaults: 'legacy', indexDetails: false, cellEscapes: false, markdownEscapes: false, ambiguousEscapes: false };
 const ESCAPED_FORMAT: MdFormat = { ...PLAIN_FORMAT, cellEscapes: true };
 // 0.1.21+가 반드시 따옴표로 감싸는 타입 (문자열·날짜/시간). 이 타입의 맨몸 Default는 0.1.20 이하의 증거다
 const QUOTED_TYPE = /^((var)?char|(tiny|medium|long)?text|enum|set|date|datetime|time|timestamp)\b/i;
@@ -121,18 +123,24 @@ function detectFormat(secs: Section[]): MdFormat {
   const hasDetailedIndex = secs.some((sec) => listAfter(sec.body, '**Index**').some(isDetailedIndexLine));
   const isQuoted = !hasBareLiteral && hasQuotedDefault;
   const isV2 = isQuoted || defaults.some((d) => d === 'NULL' || d === "''");
-  const indexDetails = isQuoted || hasDetailedIndex;
-  const markdownEscapes = indexDetails && detectMarkdownEscapes(secs, rows);
-  return { defaults: isQuoted ? 'quoted' : isV2 ? 'v2' : 'legacy', indexDetails, cellEscapes: indexDetails, markdownEscapes };
+  // 맨몸 리터럴 Default 는 0.1.20 이하라 0.1.46+ 이스케이프일 수 없다. 이스케이프 판별은 인덱스 판별과 따로 한다
+  const escapes = hasBareLiteral ? 'old' : detectMarkdownEscapes(secs, rows);
+  const markdownEscapes = escapes === 'new';
+  const indexDetails = isQuoted || hasDetailedIndex || markdownEscapes;
+  return {
+    defaults: isQuoted ? 'quoted' : isV2 ? 'v2' : 'legacy', indexDetails, cellEscapes: indexDetails, markdownEscapes,
+    ambiguousEscapes: escapes === 'unknown',
+  };
 }
 
 // 0.1.46+ 서식 문자 이스케이프 판별. 백슬래시 연속(k개) 뒤 글자로 증거를 센다
-// - '`' '*' '<'(<br> 제외) 앞: k 가 홀수면 이스케이프됨(새 형식), 짝수(0 포함)면 맨몸(옛 형식)
-// - 그 밖의 글자 앞: 새 형식은 백슬래시를 늘 둘씩 내므로 홀수 k 는 옛 형식의 증거 ('|' '(' 와 칸 끝은 두 형식 모두 나올 수 있어 뺀다)
-// - 따옴표 Default 는 td-export 가 SQL 처럼 '\\' 를 '\\\\' 로 써 둔 값이라, 새 형식이면 4의 배수로 늘어난다
-//   (k ≡ 2 mod 4 는 옛 형식. 단 '\\n' 등 제어 문자 이스케이프 앞은 새 형식의 줄바꿈일 수 있어 뺀다)
-// 새 형식 증거가 있고 옛 형식 증거가 없을 때만 새 형식으로 읽는다 (근거가 없으면 기존 해석 유지)
-function detectMarkdownEscapes(secs: Section[], columnRows: string[][]): boolean {
+// - 새 형식 증거: '`' '*' '<'(<br> 제외) 앞의 홀수 k. 새 형식은 이 글자들을 늘 이스케이프한다
+// - 옛 형식 증거: 그 글자들 앞의 짝수 k(0 포함, 새 형식이면 이스케이프됐을 맨몸 글자),
+//   그 밖의 글자 앞 홀수 k (새 형식은 백슬래시를 늘 둘씩 낸다. '|' '(' 와 칸 끝은 두 형식 모두 나올 수 있어 뺀다),
+//   따옴표 Default 의 k ≡ 2 mod 4 (SQL 처럼 '\\' 를 '\\\\' 로 써 둔 값은 새 형식이면 4의 배수. '\\n' 등 제어 문자 이스케이프 앞은 뺀다)
+// - 따옴표 Default 의 4의 배수 k('\\\\srv' 같은 UNC 경로)는 두 형식 모두 낼 수 있어 증거가 아니다
+// 옛 형식 증거가 있으면 'old', 새 형식 증거만 있으면 'new', 둘 다 없으면 'unknown'
+function detectMarkdownEscapes(secs: Section[], columnRows: string[][]): 'new' | 'old' | 'unknown' {
   let fresh = 0;
   let old = 0;
   const scan = (text: string, isQuotedLiteral: boolean) => {
@@ -144,13 +152,12 @@ function detectMarkdownEscapes(secs: Section[], columnRows: string[][]): boolean
         else old++;
       } else if (k === 0 || next === '' || next === '|' || next === '(') continue;
       else if (k % 2) old++;
-      else if (isQuotedLiteral && k % 4 === 0) fresh++;
-      else if (isQuotedLiteral && !/[nr0Z]/.test(next)) old++;
+      else if (isQuotedLiteral && k % 4 === 2 && !/[nr0Z]/.test(next)) old++;
     }
   };
   for (const row of columnRows) row.forEach((cell, i) => scan(cell, i === 3 && cell.startsWith("'")));
   for (const sec of secs) for (const line of [...listAfter(sec.body, '**Index**'), ...listAfter(sec.body, '**Constraint**')]) scan(line, false);
-  return fresh > 0 && old === 0;
+  return old > 0 ? 'old' : fresh > 0 ? 'new' : 'unknown';
 }
 
 // 0.1.21+라면 따옴표로 감쌌을 Default (표현식 Default·생성 컬럼은 따옴표 없이 나오므로 제외)
@@ -276,6 +283,8 @@ function mdColumn(c: string[], format: MdFormat): { col: Column; isPk: boolean }
     unknown.push('generated');
   } else if (BINARY_TYPE.test(col.type) && HEX_DEFAULT.test(def)) {
     unknown.push('default');
+  } else if (format.ambiguousEscapes && QUOTED_LITERAL.test(def) && def.includes('\\')) {
+    unknown.push('default'); // 0.1.46+ 이스케이프인지 알 수 없어 백슬래시의 뜻이 두 가지다
   } else if (format.defaults === 'quoted') {
     col.default = quotedDefault(col, def, ex.includes('default_generated'));
   } else if (format.defaults === 'v2') {

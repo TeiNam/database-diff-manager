@@ -22,6 +22,39 @@ export interface PartitionStatement {
 }
 
 const lossNote = (ps: PartitionDef[]) => `[데이터 확인] ${ps.map((p) => p.name).join(', ')}: 파티션을 삭제하면 그 안의 행도 함께 삭제됩니다`;
+const retentionNote = (ps: PartitionDef[]) => `[데이터 확인] ${ps.map((p) => p.name).join(', ')}: 보관 기간 정리로 앞쪽 파티션을 삭제하면 그 안의 행도 함께 삭제됩니다`;
+// MySQL 은 LIST REORGANIZE 에서 새 파티션에 없는 값의 행을 오류 없이 지운다
+const vanishNote = (values: string[]) => `[데이터 확인] 값 ${values.join(', ')}: TARGET 파티션에 없어 REORGANIZE 하면 그 값의 행이 삭제됩니다`;
+const HASH_METHOD_RE = /^(LINEAR\s+)?(HASH|KEY)\b/;
+
+// 'VALUES IN (…)' 의 값 목록 (따옴표 밖 공백 제거). 읽을 수 없으면 undefined
+export function listValues(def: string): string[] | undefined {
+  const m = /^\s*VALUES\s+IN\s*\(/i.exec(def);
+  if (!m) return undefined;
+  const out: string[] = [];
+  let depth = 1;
+  let cur = '';
+  let quote: string | undefined;
+  for (let i = m[0].length; i < def.length; i++) {
+    const ch = def[i];
+    if (quote) {
+      cur += ch;
+      if (ch === '\\') cur += def[++i] ?? '';
+      else if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === '(') depth++;
+    else if (ch === ')' && --depth === 0) return [...out, cur];
+    else if (ch === ',' && depth === 1) {
+      out.push(cur);
+      cur = '';
+      continue;
+    }
+    if (!/\s/.test(ch)) cur += ch;
+  }
+  return undefined;
+}
 
 export const partitionStatements = (d: TableDiff): string[] => partitionBodies(d).map((s) => s.sql);
 export const listPartitionStatements = (table: string, a: PartitionDef[], b: PartitionDef[], range = true): string[] =>
@@ -35,25 +68,55 @@ export function partitionBodies(d: TableDiff): PartitionStatement[] {
   if (!p.from || p.from.method !== p.to.method || p.from.expr !== p.to.expr || subpartitionKey(p.from) !== subpartitionKey(p.to)) {
     return [{ sql: `ALTER TABLE ${table} ${p.to.clause}` }];
   }
-  if (!p.from.partitions.length && !p.to.partitions.length) {
-    const delta = (p.to.count ?? 1) - (p.from.count ?? 1);
+  if (HASH_METHOD_RE.test(p.to.method)) return hashBodies(table, p.from, p.to);
+  return listPartitionBodies(table, p.from.partitions, p.to.partitions, p.to.method.startsWith('RANGE'));
+}
+
+// HASH/KEY 는 DROP PARTITION 이 없다. 뒤쪽 감소는 COALESCE, 뒤쪽 증가는 ADD, 그 밖(이름·정의 변경)은 전체 재정의
+function hashBodies(table: string, from: Partitioning, to: Partitioning): PartitionStatement[] {
+  const a = from.partitions;
+  const b = to.partitions;
+  if (!a.length && !b.length) {
+    const delta = (to.count ?? 1) - (from.count ?? 1);
     if (delta > 0) return [{ sql: `ALTER TABLE ${table} ADD PARTITION PARTITIONS ${delta}` }];
     if (delta < 0) return [{ sql: `ALTER TABLE ${table} COALESCE PARTITION ${-delta}` }];
     return [];
   }
-  return listPartitionBodies(table, p.from.partitions, p.to.partitions, p.to.method.startsWith('RANGE'));
+  const isPrefix = (short: PartitionDef[], long: PartitionDef[]) => short.length > 0 && short.every((x, i) => sameStructure(x, long[i]));
+  const note = commentNote(a, b);
+  const notes = note ? [{ sql: note }] : [];
+  if (a.length === b.length && isPrefix(a, b)) return notes;
+  if (b.length < a.length && isPrefix(b, a)) return [{ sql: `ALTER TABLE ${table} COALESCE PARTITION ${a.length - b.length}` }, ...notes];
+  if (a.length < b.length && isPrefix(a, b)) return [{ sql: `ALTER TABLE ${table} ADD PARTITION (\n${b.slice(a.length).map(printPart).join(',\n')})` }, ...notes];
+  return [{ sql: `ALTER TABLE ${table} ${to.clause}` }];
+}
+
+// COMMENT 만 바뀐 파티션 안내 (없으면 undefined)
+function commentNote(a: PartitionDef[], b: PartitionDef[]): string | undefined {
+  const commentOnly = b.filter((y) => {
+    const x = a.find((p) => p.name === y.name);
+    return x !== undefined && x.def !== y.def && stripComment(x.def) === stripComment(y.def);
+  });
+  if (!commentOnly.length) return undefined;
+  return `-- 파티션 COMMENT 변경(${commentOnly.map((p) => p.name).join(', ')}): MySQL은 COMMENT만 바꾸는 DDL이 없습니다. 필요하면 REORGANIZE PARTITION으로 재정의하세요`;
 }
 
 export function listPartitionBodies(table: string, a: PartitionDef[], b: PartitionDef[], range = true): PartitionStatement[] {
   const out: PartitionStatement[] = [];
   const push = (sql: string, notes?: string[]) => out.push(notes ? { sql, notes } : { sql });
   const bNames = new Set(b.map((p) => p.name));
-  // 1) 보관 기간 정리: TARGET이 기존 파티션으로 시작할 때만 앞쪽의 사라진 파티션을 DROP
-  let lead = 0;
-  if (b.length && a.some((p) => p.name === b[0].name)) while (lead < a.length && !bNames.has(a[lead].name)) lead++;
-  if (lead) push(`ALTER TABLE ${table} DROP PARTITION ${names(a.slice(0, lead))}`);
+  const targetValues = range ? undefined : allValues(b);
+  // LIST 는 값이 TARGET 어딘가에 남는 파티션을 DROP 하면 그 행이 사라지므로 REORGANIZE 로 넘긴다
+  const isGone = (p: PartitionDef) => {
+    const values = listValues(p.def);
+    return values !== undefined && targetValues !== undefined && values.every((v) => !targetValues.has(v));
+  };
+  // 1) RANGE 보관 기간 정리: TARGET이 기존 파티션으로 시작할 때만 앞쪽의 사라진 파티션을 DROP.
+  //    LIST 는 위치와 상관없이 값이 TARGET 어디에도 없는 사라진 파티션만 DROP 한다
+  const gone = range ? leadingGone(a, b, bNames) : a.filter((p) => !bNames.has(p.name) && isGone(p));
+  if (gone.length) push(`ALTER TABLE ${table} DROP PARTITION ${names(gone)}`, [range ? retentionNote(gone) : lossNote(gone)]);
   // 2) 공통 앞·뒤를 제외한 가운데 구간만 재구성
-  const rest = a.slice(lead);
+  const rest = a.filter((p) => !gone.includes(p));
   let pre = 0;
   while (pre < rest.length && pre < b.length && sameStructure(rest[pre], b[pre])) pre++;
   let suf = 0;
@@ -81,15 +144,36 @@ export function listPartitionBodies(table: string, a: PartitionDef[], b: Partiti
       from = [rest[rest.length - suf]];
       to = [...to, b[b.length - suf]];
     }
-    push(`ALTER TABLE ${table} REORGANIZE PARTITION ${names(from)} INTO (\n${to.map(printPart).join(',\n')})`);
+    const vanished = range ? [] : vanishedValues(from, to);
+    push(`ALTER TABLE ${table} REORGANIZE PARTITION ${names(from)} INTO (\n${to.map(printPart).join(',\n')})`, vanished.length ? [vanishNote(vanished)] : undefined);
   }
   // 3) COMMENT만 바뀐 파티션
-  const commentOnly = b.filter((y) => {
-    const x = a.find((p) => p.name === y.name);
-    return x !== undefined && x.def !== y.def && stripComment(x.def) === stripComment(y.def);
-  });
-  if (commentOnly.length) {
-    push(`-- 파티션 COMMENT 변경(${commentOnly.map((p) => p.name).join(', ')}): MySQL은 COMMENT만 바꾸는 DDL이 없습니다. 필요하면 REORGANIZE PARTITION으로 재정의하세요`);
+  const note = commentNote(a, b);
+  if (note) push(note);
+  return out;
+}
+
+function leadingGone(a: PartitionDef[], b: PartitionDef[], bNames: ReadonlySet<string>): PartitionDef[] {
+  if (!b.length || !a.some((p) => p.name === b[0].name)) return [];
+  let lead = 0;
+  while (lead < a.length && !bNames.has(a[lead].name)) lead++;
+  return a.slice(0, lead);
+}
+
+// 파티션들의 LIST 값 전체. 하나라도 읽을 수 없으면 undefined
+function allValues(ps: PartitionDef[]): Set<string> | undefined {
+  const out = new Set<string>();
+  for (const p of ps) {
+    const values = listValues(p.def);
+    if (!values) return undefined;
+    for (const v of values) out.add(v);
   }
   return out;
+}
+
+// 재구성 전 파티션에 있었지만 새 파티션에는 없는 LIST 값
+function vanishedValues(from: PartitionDef[], to: PartitionDef[]): string[] {
+  const before = allValues(from);
+  const after = allValues(to);
+  return before && after ? [...before].filter((v) => !after.has(v)) : [];
 }

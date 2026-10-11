@@ -41,10 +41,11 @@ const sql = renderDdl(generateDdl(diff), diff.partial);
 - MD 기본값(Default 칸) 형식은 파일마다 판별한다. Columns 표에 `NULL` 또는 `''` 칸이 하나라도 있으면 td-export 0.1.15 이상(v2)으로 본다.
   - v2: `NULL`은 기본값 없는 nullable 컬럼이다(`DEFAULT NULL`, text/blob/geometry·auto_increment는 DEFAULT 절 없음). 빈 칸은 기본값 없는 NOT NULL, `''`는 빈 문자열 기본값이다. 문자열 기본값 `'NULL'`은 `DEFAULT NULL`과 구분할 수 없다.
   - legacy(0.1.14 이하): NULL·빈 문자열·기본값 없음이 모두 빈 칸이므로, 기본값이 없음이 확실한 타입이 아니면 `default`를 `unknown`으로 둔다.
-- td-export 0.1.46+ 는 셀·인덱스·FK 줄의 `\` `` ` `` `*` `<` 와 `](` 의 `(` 앞에 백슬래시를 붙인다. 파서가 백슬래시 연속으로 파일마다 판별해 셀 이스케이프를 푼 뒤 Default 를 SQL 리터럴로 읽는다. 이전 버전 파일은 기존대로 읽는다. 테이블명에 공백이 있어도(`Order Items`) 원문 그대로 읽는다.
+- td-export 0.1.46+ 는 셀·인덱스·FK 줄의 `\` `` ` `` `*` `<` 와 `](` 의 `(` 앞에 백슬래시를 붙인다. 파서가 인덱스 형식 판별과 따로, 백슬래시 연속으로 파일마다 판별한다. `` ` `` `*` `<` 앞의 홀수 백슬래시만 새 형식 증거로 센다(`'\\\\srv'` 같은 UNC 기본값은 증거가 아니다). 새 형식이면 셀 이스케이프를 푼 뒤 Default 를 SQL 리터럴로 읽고, 이전 버전 파일은 기존대로 읽는다. 어느 쪽인지 근거가 없으면 백슬래시가 든 따옴표 Default 는 `unknown` 으로 둔다. 테이블명에 공백이 있어도(`Order Items`) 원문 그대로 읽는다.
 - Extra 칸은 information_schema `EXTRA` 속성 뒤에 생성식이 붙은 값이다. 앞쪽 속성 토큰만 읽으므로 생성식 안의 글자(`'invisible'`)를 속성으로 오인하지 않는다.
 - diff는 한쪽이라도 `unknown`인 속성을 비교하지 않고 `TableDiff.skipped`에 기록한다. 단 MD 생성 컬럼도 생성 여부와 저장 방식(VIRTUAL/STORED)은 비교하고 표현식만 건너뛴다.
-- rename 매핑은 이름을 맞바꾸거나 이어도 된다(a↔b, a→b→c, log→log_2025 + log_new→log). 컬럼 rename 은 한 ALTER 에 넣고(MySQL 이 동시에 적용), 테이블 rename 은 한 `RENAME TABLE` 문장으로 묶으며(순환은 `__tdm_tmp_n` 임시 이름) `related` 에 관련 테이블을 모두 담는다. 그래도 겹치는 rename 은 `이름 충돌` 로 알리고 관련 테이블의 모든 문장을 수동 확인 문장으로 바꾼다.
+- rename 매핑은 이름을 맞바꾸거나 이어도 된다(a↔b, a→b→c, log→log_2025 + log_new→log). 컬럼 rename 은 한 ALTER 에 넣고(MySQL 이 동시에 적용), 테이블 rename 은 한 `RENAME TABLE` 문장으로 묶으며(순환은 `__tdm_tmp_n` 임시 이름) `related` 에 관련 테이블을 모두 담는다. 임시 이름은 양쪽의 모든 테이블·뷰 이름(`SchemaDiff.objectNames`)과 겹치지 않게 고른다. FK 는 BASE 참조에 테이블·참조 컬럼 rename 을 적용한 값으로 비교하고(InnoDB 가 rename 때 참조를 옮긴다), 자동 이름 CHECK `<옛>_chk_N` 은 테이블 rename 을 따라 `<새>_chk_N` 으로 본다. 그래도 겹치는 rename 은 `이름 충돌` 로 알리고 관련 테이블의 모든 문장을 수동 확인 문장으로 바꾼다.
+- 파티션: 값이 TARGET 에 남는 LIST 파티션 삭제는 `DROP PARTITION` 대신 `REORGANIZE PARTITION` 으로 합치고, 사라지는 값은 `[데이터 확인]` 안내를 단다(MySQL 이 그 행을 오류 없이 지운다). RANGE 앞쪽 삭제(보관 기간 정리)에도 `[데이터 확인]` 안내를 단다. 이름 있는 HASH/KEY 파티션은 `COALESCE PARTITION n` / `ADD PARTITION (…)`, 그 밖은 `PARTITION BY` 전체 재정의.
 - DDL을 만들 때는 TARGET의 `unknown` 속성을 짝지어진 BASE 객체 값으로 채운다. 채우지 못한 속성은 해당 문장의 `notes`에 적는다. 생성 컬럼 표현식처럼 올바른 SQL을 만들 수 없으면 SQL을 주석 처리한 수동 확인 문장(`comment: true`)을 만든다.
 
 ## 테스트

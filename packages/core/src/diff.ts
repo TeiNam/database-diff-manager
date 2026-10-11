@@ -76,6 +76,7 @@ export interface SchemaDiff {
   partial: boolean;
   routines: RoutineDiff[];
   routinesUnknown: boolean; // 한쪽이라도 MD 출처라 루틴을 비교하지 않음 (routines 는 빈 배열)
+  objectNames: string[]; // BASE·TARGET 의 모든 테이블·뷰 이름 (맞바꾸기 임시 이름이 겹치지 않게 예약)
 }
 
 const COLUMN_FIELDS = ['type', 'charset', 'collation', 'generated', 'nullable', 'srid', 'invisible', 'default', 'onUpdate', 'autoIncrement', 'comment'] as const;
@@ -103,13 +104,27 @@ export function diffSchemas(base: SchemaModel, target: SchemaModel, renames: Ren
     // routines 가 없는 옛 모델(루틴 지원 전 JSON)은 빈 목록으로 본다
     routines: routinesUnknown ? [] : diffRoutines(base.routines ?? [], target.routines ?? []),
     routinesUnknown,
+    objectNames: [...new Set(all.map((o) => o.name))],
   };
+}
+
+// 적용된 rename (BASE 이름 → TARGET 이름). InnoDB 는 RENAME TABLE·RENAME/CHANGE COLUMN 때 다른 테이블 FK 의
+// 참조 테이블·참조 컬럼도 따라 옮기므로, FK 는 BASE 참조에 이 rename 을 적용한 값으로 TARGET 과 비교한다
+export interface AppliedRenames {
+  tables: ReadonlyMap<string, string>;
+  columns: ReadonlyMap<string, ReadonlyMap<string, string>>; // BASE 테이블명 → (BASE 컬럼명 → TARGET 컬럼명)
 }
 
 function diffTables(base: Table[], target: Table[], renames: RenameMapping[]): TableDiff[] {
   const details = new Map<string, TableDiff>();
-  const { changes } = matchByName(base, target, mappingOf(renames, 'table'), (b, t) => {
-    const d = diffTable(b, t, renames);
+  const tableMap = mappingOf(renames, 'table');
+  const { pairs } = matchByName(base, target, tableMap, () => []);
+  const applied: AppliedRenames = {
+    tables: new Map(pairs.filter(([b, t]) => b.name !== t.name).map(([b, t]) => [b.name, t.name])),
+    columns: new Map(pairs.map(([b, t]) => [b.name, appliedColumnRenames(b, t, renames)])),
+  };
+  const { changes } = matchByName(base, target, tableMap, (b, t) => {
+    const d = diffTable(b, t, renames, applied);
     details.set(t.name, d);
     return hasChanges(d) ? ['definition'] : [];
   });
@@ -120,24 +135,41 @@ function diffTables(base: Table[], target: Table[], renames: RenameMapping[]): T
   });
 }
 
-export function diffTable(b: Table, t: Table, renames: RenameMapping[] = []): TableDiff {
+// 컬럼 짝짓기 (rename 매핑 우선). diffTable 과 적용된 컬럼 rename 계산이 함께 쓴다
+function matchColumns(b: Table, t: Table, renames: RenameMapping[], fields: (x: Column, y: Column) => string[]) {
+  return matchByName(b.columns, t.columns, mappingOf(renames, 'column', t.name), fields, overlapOf(renames, t.name));
+}
+
+function appliedColumnRenames(b: Table, t: Table, renames: RenameMapping[]): Map<string, string> {
+  const { changes } = matchColumns(b, t, renames, () => []);
+  return new Map(changes.filter((c) => c.op === 'rename').map((c) => [c.oldName!, c.name]));
+}
+
+// BASE FK 의 참조를 rename 적용 후 값으로 바꾼다. 다른 스키마를 가리키는 FK 는 그대로 둔다
+function renamedReference(fk: ForeignKey, applied: AppliedRenames): ForeignKey {
+  if (fk.refSchema !== undefined) return fk;
+  const cols = applied.columns.get(fk.refTable);
+  return { ...fk, refTable: applied.tables.get(fk.refTable) ?? fk.refTable, refColumns: fk.refColumns.map((c) => cols?.get(c) ?? c) };
+}
+
+export function diffTable(b: Table, t: Table, renames: RenameMapping[] = [], context?: AppliedRenames): TableDiff {
   const base = emptyDiff('modify', t.name, b, t);
   if (b.parseError || t.parseError) return { ...base, unparsed: printTable(b) !== printTable(t) };
   const skipped = new Set<string>();
-  const columns = matchByName(b.columns, t.columns, mappingOf(renames, 'column', t.name), (x, y) =>
-    columnFields(withImpliedCharset(x), withImpliedCharset(y), skipped), overlapOf(renames, t.name),
-  );
+  const columns = matchColumns(b, t, renames, (x, y) => columnFields(withImpliedCharset(x), withImpliedCharset(y), skipped));
   const baseOrder = columns.pairs.map(([, y]) => y.name);
   const targetOrder = t.columns.map((c) => c.name).filter((n) => baseOrder.includes(n));
   const keep = lcs(baseOrder, targetOrder);
   // RENAME/CHANGE COLUMN은 인덱스·FK의 컬럼 참조를 자동 갱신하므로, 적용된 rename을 BASE 사본에 반영해 비교한다
   const applied = new Map(columns.changes.filter((c) => c.op === 'rename').map((c) => [c.oldName!, c.name]));
   const renameCol = (n: string) => applied.get(n) ?? n;
+  // 단독 호출이면 이 테이블 자신의 rename 만 안다 (자기 참조 FK)
+  const refs = context ?? { tables: new Map(b.name === t.name ? [] : [[b.name, t.name]]), columns: new Map([[b.name, applied]]) };
   const indexes = matchByName(b.indexes, t.indexes, mappingOf(renames, 'index', t.name), (x, y) =>
     indexFields({ ...x, parts: x.parts.map((p) => (p.column === undefined ? p : { ...p, column: renameCol(p.column) })) }, y, skipped),
   );
   const foreignKeys = matchByName(b.foreignKeys, t.foreignKeys, new Map(), (x, y) =>
-    fieldDiff({ ...x, columns: x.columns.map(renameCol) }, y, FK_FIELDS, skipped, 'fk.', fkEqual),
+    fieldDiff({ ...renamedReference(x, refs), columns: x.columns.map(renameCol) }, y, FK_FIELDS, skipped, 'fk.', fkEqual),
   );
   return {
     ...base,
@@ -278,7 +310,15 @@ function checkChanges(a: Table, b: Table, skipped: Set<string>): Change<Check>[]
     skipped.add('checks');
     return [];
   }
-  return matchByName(a.checks, b.checks, new Map(), (x, y) => fieldDiff(x, y, CHECK_FIELDS, skipped, 'check.')).changes;
+  return matchByName(a.checks.map((c) => renamedCheck(c, a.name, b.name)), b.checks, new Map(), (x, y) => fieldDiff(x, y, CHECK_FIELDS, skipped, 'check.')).changes;
+}
+
+// RENAME TABLE 은 자동 제약명 '<옛 테이블>_chk_N' 을 '<새 테이블>_chk_N' 으로 바꾼다. ALTER 는 rename 뒤에 실행되므로 새 이름으로 비교·출력한다
+function renamedCheck(c: Check, from: string, to: string): Check {
+  if (from === to) return c;
+  const prefix = `${from}_chk_`;
+  const n = c.name.startsWith(prefix) ? c.name.slice(prefix.length) : '';
+  return /^\d+$/.test(n) ? { ...c, name: `${to}_chk_${n}` } : c;
 }
 
 function optionChanges(a: Table, b: Table, skipped: Set<string>): OptionChange[] {
