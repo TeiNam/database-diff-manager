@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseSqlDump } from '../src/parse-dump';
 import { parseCreateTable } from '../src/parse-table';
+import { printTable } from '../src/print';
 import { fixture } from './helpers';
 
 const table = parseCreateTable(fixture('parse-table.sql'));
@@ -114,5 +115,28 @@ describe('MySQL 8.4 SHOW CREATE 속성 (9회차 6·7·8·9)', () => {
 
   it('td-export escapes.sql 의 INVISIBLE 컬럼도 왕복 경고가 없다', () => {
     for (const v of ['0136', '0152']) expect(parseSqlDump(fixture(`td-export-${v}/escapes.sql`)).warnings).toEqual([]);
+  });
+});
+
+describe('binary 기본값의 따옴표 형식 (10회차 5)', () => {
+  // 8.4 SHOW CREATE 는 UTF-8 로 유효한 바이트면 0x… 대신 따옴표 문자열을 낸다 (제어 바이트는 그대로, NUL·개행·\·' 는 이스케이프)
+  const RAW = '\u0001\u0002';
+  const ddl = [
+    'CREATE TABLE `lit` (',
+    '  `id` int NOT NULL,',
+    `  \`b1\` binary(2) DEFAULT '${RAW}',`,
+    "  `b2` binary(2) DEFAULT 'A\\0',",
+    "  `b4` varbinary(4) DEFAULT 'A''\\n\\\\',",
+    '  `b3` binary(2) DEFAULT 0x00FF,',
+    '  PRIMARY KEY (`id`)',
+    ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci',
+  ].join('\n');
+
+  it('파싱 → 출력이 원문과 같고 경고가 없다', () => {
+    const t = parseCreateTable(ddl);
+    expect(t.parseError).toBeUndefined();
+    expect(t.columns.map((c) => c.default)).toEqual([undefined, `'${RAW}'`, "'A\\0'", "'A''\\n\\\\'", '0x00FF']);
+    expect(printTable(t)).toBe(ddl);
+    expect(parseSqlDump(`${ddl};`).warnings).toEqual([]);
   });
 });
