@@ -161,3 +161,9 @@ export function viewReferences(src: string): string[] | undefined {
   const calls = tokens.filter((tok, i) => (tok.t === 'ident' || (tok.t === 'word' && !NOT_CALL.test(tok.v))) && tokens[i + 1]?.t === 'op' && tokens[i + 1].v === '(').map((tok) => tok.v);
   return [...new Set([...tables, ...calls])];
 }
+
+// 뷰 본문이 쓰는 객체 이름 (viewReferences). 토큰으로 나눌 수 없으면 후보 중 `이름` 이 나오기만 해도 쓰는 것으로 본다 (안전 쪽).
+// 뷰 생성 순서와 객체 카드 복사 묶음이 같은 판정을 쓰도록 한곳에 둔다
+export function objectReferences(body: string, candidates: Iterable<string>): string[] {
+  return viewReferences(body) ?? [...new Set(candidates)].filter((n) => body.includes(quoteIdent(n)));
+}

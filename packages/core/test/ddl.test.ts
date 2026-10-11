@@ -371,7 +371,7 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(objectStatements(stmts, 'table', 'orders')).toEqual({ statements: stmts, dependencies: ['member'] });
   });
 
-  const cardOf = (name: string, kind: 'table' | 'view', object: string) => {
+  const cardOf = (name: string, kind: Parameters<typeof objectStatements>[1], object: string) => {
     const { base, target, renames } = scenario(name);
     const stmts = generateDdl(diffSchemas(base, target, renames));
     return { stmts, ...objectStatements(stmts, kind, object) };
@@ -431,6 +431,24 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     const { dependencies, statements } = objectStatements(stmts, 'view', 'report');
     expect(dependencies).toEqual(['t']);
     expect(statements.some((s) => s.sql.includes('DROP COLUMN'))).toBe(false);
+  });
+
+  it('이름 비우기 의존은 같은 이름 공간(테이블↔뷰)끼리만: 테이블 p 삭제 + 프로시저 p 추가 카드에 DROP TABLE 을 넣지 않는다 (9회차 1)', () => {
+    const { statements, dependencies } = cardOf('card-table-proc-same-name', 'procedure', 'p');
+    expect(statements.map((s) => s.kind)).toEqual(['procedure']);
+    expect(dependencies).toEqual([]);
+  });
+
+  it('같은 이름의 함수를 부르는 뷰 카드는 그 함수 생성을 포함한다 — 자기 자신(같은 종류·이름)만 뺀다 (9회차 2)', () => {
+    const { statements } = cardOf('card-function-view-same-name', 'view', 'v');
+    expect(statements.map((s) => s.kind)).toEqual(['function', 'view']);
+  });
+
+  it('뷰 카드와 뷰 생성 순서는 같은 토큰 기반 참조를 쓴다: 별칭 `z` 는 뷰 z 참조가 아니다 (9회차 3)', () => {
+    const { stmts, statements } = cardOf('view-order-alias', 'view', 'a');
+    expect(stmts.map((s) => s.object)).toEqual(['a', 'z']);
+    expect(statements.map((s) => s.object)).toEqual(['a']);
+    expect(cardOf('view-order-alias', 'view', 'z').statements.map((s) => s.object)).toEqual(['a', 'z']);
   });
 
   it('의존이 없으면 자기 문장만', () => {

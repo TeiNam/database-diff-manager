@@ -4,7 +4,7 @@ import { guardStatements } from './ddl-guard';
 import { RETYPED_FIELD, retypeGroups } from './fk-retype';
 import { type Op, type RoutineDiff, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
 import { alter, alterStatements, commentBody, inheritCollation, manualBody, sqlBody, type StatementBody } from './ddl-alter';
-import { quoteIdent as q, quoteString } from './lexer';
+import { objectReferences, quoteIdent as q, quoteString } from './lexer';
 import type { ForeignKey, Routine, RoutineKind, Table } from './model';
 import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated, indexNote, printable, tableNote } from './partial-fill';
 import { printForeignKey, printRoutine, printTable, printView } from './print';
@@ -28,6 +28,8 @@ export interface Statement extends StatementBody {
   fkAdds?: string[];
   // frees: 이 테이블 rename 이 비우는 BASE 이름 (묶음 안에서 다시 차지하는 이름 제외). 그 이름을 차지하는 다른 객체의 카드 복사에 쓴다
   frees?: string[];
+  // reads: 뷰 생성 문장의 본문이 쓰는 객체 이름 (objectReferences — 뷰 생성 순서와 같은 판정). 객체 카드 복사 묶음 계산에 쓴다
+  reads?: string[];
 }
 
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };
@@ -40,7 +42,7 @@ const PARTIAL_CHECK_NOTE = '-- [MD 기반] MD 출처는 CHECK 를 알 수 없어
 export function generateDdl(diff: SchemaDiff): Statement[] {
   const out: Statement[] = [];
   const table = (d: TableDiff, body: StatementBody & Pick<Statement, 'fkDrops' | 'fkAdds' | 'frees'>) => out.push({ object: d.name, kind: 'table', op: d.op, ...body });
-  const view = (v: ViewDiff, body: StatementBody) => out.push({ object: v.name, kind: 'view', op: v.op, ...body });
+  const view = (v: ViewDiff, body: StatementBody & Pick<Statement, 'reads'>) => out.push({ object: v.name, kind: 'view', op: v.op, ...body });
   const routine = (r: RoutineDiff, body: StatementBody) => out.push({ object: r.name, kind: r.kind, op: r.op, ...body });
   const altered = diff.tables.filter((d) => d.op === 'modify' || d.op === 'rename');
   const targetName = new Map(diff.tables.flatMap((d) => (d.oldName ? [[d.oldName, d.name] as const] : [])));
@@ -98,10 +100,12 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
   // 8-b. 루틴 생성 (뷰가 함수를 부를 수 있어 뷰보다 먼저)
   for (const r of diff.routines) if (r.op !== 'drop') routine(r, createRoutine(r.to!));
   // 9. 뷰 생성·교체 (뷰가 참조하는 뷰를 먼저)
-  for (const v of sortViews(diff.views.filter((x) => x.op !== 'drop'))) {
+  const names = [...diff.objectNames, ...diff.routines.map((r) => r.name)];
+  const reads = new Map(diff.views.filter((x) => x.op !== 'drop').map((v) => [v, objectReferences(v.to!.body, names)]));
+  for (const v of sortViews(reads)) {
     view(v, v.to!.parseError
       ? commentBody(`-- [수동 확인 필요] ${v.name}: 파싱할 수 없는 뷰입니다. 원문을 확인하세요`)
-      : sqlBody(printView(v.to!, { orReplace: true }), [DEFINER_NOTE]));
+      : { ...sqlBody(printView(v.to!, { orReplace: true }), [DEFINER_NOTE]), reads: reads.get(v) });
   }
   return guardStatements(withDepends(out, diff), diff);
 }
@@ -172,13 +176,16 @@ function createTable(t: Table): StatementBody {
   return missing.length ? manualBody(generatedReason(t.name, missing), sql, notes) : sqlBody(sql, notes);
 }
 
-function sortViews(views: ViewDiff[]): ViewDiff[] {
+// 참조하는 뷰를 먼저. reads: 뷰마다 본문이 쓰는 객체 이름 (objectReferences — 별칭·컬럼명·문자열의 같은 이름은 참조가 아니다)
+function sortViews(reads: Map<ViewDiff, string[]>): ViewDiff[] {
+  const views = [...reads.keys()];
   const done = new Set<string>();
   const out: ViewDiff[] = [];
   const visit = (v: ViewDiff) => {
     if (done.has(v.name)) return;
     done.add(v.name);
-    for (const dep of views) if (dep !== v && v.to!.body.includes(q(dep.name))) visit(dep);
+    const used = new Set(reads.get(v));
+    for (const dep of views) if (dep !== v && used.has(dep.name)) visit(dep);
     out.push(v);
   };
   views.forEach(visit);

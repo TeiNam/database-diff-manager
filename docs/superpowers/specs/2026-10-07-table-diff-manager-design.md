@@ -226,6 +226,7 @@ interface Statement {
   depends?: string[]; // 다른 테이블 문장과 함께 실행해야 하는 묶음의 테이블들(object 포함, 이름순). FK 로 묶인 컬럼 타입·문자셋 변경(fk-retype 묶음) — 부모 MODIFY 만 실행하면 자식 FK 해제·재추가가 없어 error 3780 (6회차 개정)
   fkDrops?: string[]; fkAdds?: string[]; // 이 문장이 해제(1·1-b단계) / 추가(8단계)하는 FK 가 참조하는 같은 스키마 테이블(TARGET 이름). 객체 카드 복사 묶음 계산용 (7회차 개정)
   frees?: string[];   // 테이블 rename 이 비우는 BASE 이름(묶음 안에서 다시 차지하는 이름 제외). 객체 카드 복사 묶음 계산용 (8회차 개정)
+  reads?: string[];   // 뷰 생성 문장의 본문이 쓰는 객체 이름(`objectReferences`). 9단계 뷰 정렬과 같은 값을 객체 카드 복사 묶음이 쓴다 (9회차 개정)
 }
 ```
 
@@ -234,8 +235,8 @@ interface Statement {
 - `depends` 묶음(fk-retype)의 테이블 문장 전부
 - FK 추가 문장(`fkAdds`): 그 테이블과 참조 테이블의 생성·rename·변경 문장(FK 문장·DROP TABLE 제외)
 - 테이블을 바꾸거나(rename·변경) 지우는 문장: 그 테이블을 참조하는 다른 테이블의 FK 해제 문장(`fkDrops`) — 삭제되는 자식은 해제 문장만(자식 DROP TABLE 은 넣지 않는다), 남는 자식은 재추가까지 그 테이블 문장 전부 (error 3780·3730; `drop-fk-tables`, `fk-drop-parent-widen`, `fk-rename-widen`)
-- 뷰 생성·교체: 본문이 참조하는 테이블(생성·변경)·뷰·함수 문장 (예: `routines` 의 `order_net` 은 새 함수 `net`). 참조는 본문 토큰에서 `FROM`/`JOIN` 뒤 테이블과 `` `이름`( `` 형태의 함수 호출만 본다 — 별칭(`AS` 뒤)·컬럼 참조(`` `t`.`c` `` 의 c)·문자열·주석 속 같은 이름은 무관하다(`select 1 AS `chat_log`` 가 `chat_log` 의 `DROP PARTITION` 을 끌어오지 않는다). 토큰으로 나눌 수 없으면 `` `이름` `` 포함 여부로 본다(안전 쪽, 8회차 개정)
-- 이름 N 을 차지하는 문장(생성·교체·rename into): 같은 이름 N 의 다른 종류 객체 삭제(테이블↔뷰 교체 — `DROP TABLE x` + `CREATE VIEW x`, `DROP VIEW x` + `CREATE TABLE x`·`RENAME TABLE y TO x`)와 N 을 비우는 테이블 rename(`frees`). 빠지면 단독 실행 때 `'db.x' is not VIEW`·`already exists` 로 실패한다(골든 `table-to-view`·`view-to-table`·`view-drop-rename-into`, 8회차 개정)
+- 뷰 생성·교체: 본문이 참조하는 테이블(생성·변경)·뷰·함수 문장 (예: `routines` 의 `order_net` 은 새 함수 `net`). 참조는 본문 토큰에서 `FROM`/`JOIN` 뒤 테이블과 `` `이름`( `` 형태의 함수 호출만 본다 — 별칭(`AS` 뒤)·컬럼 참조(`` `t`.`c` `` 의 c)·문자열·주석 속 같은 이름은 무관하다(`select 1 AS `chat_log`` 가 `chat_log` 의 `DROP PARTITION` 을 끌어오지 않는다). 토큰으로 나눌 수 없으면 `` `이름` `` 포함 여부로 본다(안전 쪽, 8회차 개정). 뷰 정렬(9단계)과 같은 `reads` 값을 쓰고, 자기 자신(같은 종류·이름)만 뺀다 — 같은 이름의 함수 `v()` 를 부르는 뷰 `v` 카드는 함수 생성을 포함한다(골든 `card-function-view-same-name`, 9회차 개정)
+- 이름 N 을 차지하는 문장(생성·교체·rename into): 같은 이름 N 의 다른 종류 객체 삭제(테이블↔뷰 교체 — `DROP TABLE x` + `CREATE VIEW x`, `DROP VIEW x` + `CREATE TABLE x`·`RENAME TABLE y TO x`)와 N 을 비우는 테이블 rename(`frees`). 빠지면 단독 실행 때 `'db.x' is not VIEW`·`already exists` 로 실패한다(골든 `table-to-view`·`view-to-table`·`view-drop-rename-into`, 8회차 개정). 이름 비우기는 같은 이름 공간끼리만 본다 — 테이블과 뷰는 이름 공간을 공유하고 함수·프로시저는 각자 별개라, 테이블 `p` 삭제 + 프로시저 `p` 추가의 프로시저 카드에 `DROP TABLE p` 를 넣지 않는다(무관한 테이블 삭제 = 데이터 손실, 골든 `card-table-proc-same-name`, 9회차 개정)
 
 `test:mysql` 은 골든 시나리오마다 모든 카드 묶음을 새 BASE DB 에 단독 적용해 오류가 없는지도 확인한다. 수동 확인 시나리오는 `manual.json`(이름순 테이블 목록)을 두어, 적용 뒤 그 테이블만 TARGET 과 다르고 BASE 그대로(반쯤 적용되지 않음)인지 확인한다(8회차 개정).
 
@@ -271,7 +272,7 @@ interface Statement {
 7. 삭제되는 테이블을 `DROP TABLE`
 8. 추가·변경되는 FK를 `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`
 8-b. 추가·변경되는 루틴을 `CREATE FUNCTION|PROCEDURE`(DEFINER 없이 — 실행한 사용자가 DEFINER 가 된다는 notes). 뷰가 함수를 부를 수 있어 뷰 생성보다 앞에 둔다. 문장 하나에 `DELIMITER ;;` / `CREATE …;;` / `DELIMITER ;` 를 넣어 mysql 클라이언트에 그대로 붙여 넣을 수 있게 하고, `sqlMode` 를 알면 앞뒤에 `SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = '…';` / `SET SQL_MODE = @OLD_SQL_MODE;` 를 같은 문장에 넣는다(`delimited: true`). 파싱 실패 루틴은 수동 확인 주석. 특성 `COMMENT` 는 SHOW CREATE 가 SQL_MODE 와 무관하게 일반 escaping 으로 내므로(NO_BACKSLASH_ESCAPES 루틴도 저장값 `C:\new` 를 `'C:\\new'` 로 — 8.4 실측) 파서는 그 문자열을 일반 규칙으로 읽고, 화면용 `printRoutine` 도 일반 escaping 을 쓴다. 생성 문장은 그 SQL_MODE 로 실행되므로 NO_BACKSLASH_ESCAPES 면 `'` 만 `''` 로 두 배로 쓴다(`printRoutine(r, { executable: true })`, 골든 `routine-comment-nbe`, 8회차 개정).
-9. 추가·변경되는 뷰를 `CREATE OR REPLACE [ALGORITHM=…] [SQL SECURITY …] VIEW … AS …`(DEFINER 없이 — 루틴과 같은 DEFINER notes). 뷰 본문에서 다른 뷰 이름 참조를 찾아 위상 정렬한다.
+9. 추가·변경되는 뷰를 `CREATE OR REPLACE [ALGORITHM=…] [SQL SECURITY …] VIEW … AS …`(DEFINER 없이 — 루틴과 같은 DEFINER notes). 뷰 본문이 쓰는 객체(`objectReferences` — `FROM`/`JOIN` 뒤 테이블·뷰와 함수 호출, 토큰으로 못 나누면 `` `이름` `` 포함)로 위상 정렬한다. 별칭 `AS `z`` 는 뷰 `z` 참조가 아니다(`a AS select 1 AS z` + `z AS … from a` 는 a 먼저, 골든 `view-order-alias`, 9회차 개정). 카드 묶음도 같은 값(`reads`)을 쓴다.
 
 **특수 처리**
 

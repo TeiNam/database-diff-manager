@@ -1,8 +1,10 @@
 // 객체 카드 복사 묶음: 그 객체의 문장과, 그 문장들이 새 BASE DB 에서 단독으로 성공하는 데 필요한 다른 객체 문장 (전체 DDL 순서의 부분 집합)
 import type { Statement } from './ddl';
-import { quoteIdent as q, viewReferences } from './lexer';
 
 type Kind = Statement['kind'];
+
+// 테이블과 뷰는 같은 이름 공간을 쓴다 (함수·프로시저는 각자 별개)
+const isRelation = (kind: Kind) => kind === 'table' || kind === 'view';
 
 // 다른 테이블을 바꾸거나 지우는 문장: 그 테이블을 참조하는 FK 가 먼저 풀려야 성공한다 (error 3780·3730)
 const blocksIncomingFks = (st: Statement) => st.kind === 'table' && st.op !== 'add' && !st.fkDrops && !st.fkAdds;
@@ -17,18 +19,18 @@ export function objectStatements(stmts: Statement[], kind: Kind, name: string): 
   const incoming = (t: string) => stmts
     .filter((st) => st.kind === 'table' && st.object !== t && Boolean(st.fkDrops?.includes(t)))
     .flatMap((st) => (st.op === 'drop' ? [st] : ofTable(st.object)));
-  // 뷰 본문이 참조하는 객체(테이블·뷰·함수)의 생성·변경 문장. 참조는 FROM/JOIN 테이블과 함수 호출만 본다 (별칭·컬럼명·문자열의
-  // 같은 이름은 무관하다). 토큰으로 나눌 수 없으면 `이름` 이 나오기만 해도 참조로 본다 (안전 쪽)
+  // 뷰 본문이 참조하는 객체(테이블·뷰·함수)의 생성·변경 문장. 참조(reads)는 뷰 생성 순서와 같은 토큰 기반 판정이다 (objectReferences).
+  // 자기 자신(같은 종류·이름)만 빼므로 같은 이름의 함수를 부르는 뷰는 그 함수 생성을 포함한다
   const used = (view: Statement) => {
-    const refs = viewReferences(view.sql);
-    const reads = (n: string) => (refs ? refs.includes(n) : view.sql.includes(q(n)));
-    return stmts.filter((st) => st.object !== view.object && st.op !== 'drop' && reads(st.object))
+    const reads = new Set(view.reads ?? []);
+    return stmts.filter((st) => !(st.kind === view.kind && st.object === view.object) && st.op !== 'drop' && reads.has(st.object))
       .flatMap((st) => (st.kind === 'table' ? prepare(st.object) : [st]));
   };
-  // 이름 N 을 차지하는(생성·rename into) 문장 앞에 N 을 비워야 하는 문장: 같은 이름의 다른 종류 객체 삭제(테이블↔뷰 교체)와
-  // N 을 다른 이름으로 옮기는 테이블 rename. 빠지면 단독 실행 때 'already exists'·'is not VIEW' 로 실패한다
-  const freeing = (st: Statement) => stmts.filter((o) => o !== st
-    && ((o.op === 'drop' && o.kind !== st.kind && o.object === st.object) || Boolean(o.frees?.includes(st.object))));
+  // 이름 N 을 차지하는(생성·rename into) 문장 앞에 N 을 비워야 하는 문장: 같은 이름 공간(테이블·뷰는 공유, 함수·프로시저는 별개)의
+  // 다른 종류 객체 삭제(테이블↔뷰 교체)와 N 을 다른 이름으로 옮기는 테이블 rename. 빠지면 단독 실행 때 'already exists'·'is not VIEW'
+  // 로 실패한다. 다른 이름 공간의 삭제를 넣으면 무관한 객체를 지운다 (테이블 p 삭제 + 프로시저 p 추가)
+  const freeing = (st: Statement) => (isRelation(st.kind) ? stmts.filter((o) => o !== st && isRelation(o.kind)
+    && ((o.op === 'drop' && o.kind !== st.kind && o.object === st.object) || Boolean(o.frees?.includes(st.object)))) : []);
 
   const picked = new Set<Statement>();
   const queue: Statement[] = [];

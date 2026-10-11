@@ -21,7 +21,8 @@ export const SCENARIOS = ['columns', 'tables', 'rename-table', 'rename-column', 
   'partition-list-merge', 'partition-hash-named', 'rename-table-fk-auto', 'remove-rename-column-index',
   'generated-stored-convert', 'partition-key-rename', 'fk-type-widen', 'partition-date-bound', 'fk-charset-convert',
   'fk-drop-parent-widen', 'fk-rename-widen', 'row-format-convert', 'row-format-convert-reverse',
-  'table-to-view', 'view-to-table', 'view-drop-rename-into', 'fk-retype-generated', 'convert-index-prefix', 'fk-unique-replace', 'routine-comment-nbe'];
+  'table-to-view', 'view-to-table', 'view-drop-rename-into', 'fk-retype-generated', 'convert-index-prefix', 'fk-unique-replace', 'routine-comment-nbe',
+  'card-table-proc-same-name', 'card-function-view-same-name', 'view-order-alias'];
 
 // 값 보존 확인 (선택): base 에 seed 를 넣고 DDL 적용 뒤 query 결과가 rows 와 같아야 한다
 export interface ScenarioValues {
