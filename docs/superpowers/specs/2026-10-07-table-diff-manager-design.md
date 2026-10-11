@@ -188,7 +188,8 @@ interface SchemaDiff { tables: TableDiff[]; views: ViewDiff[];
   renameCandidates: RenameMapping[];
   ignoredRenames: { mapping: RenameMapping; reason: string }[] /* 대상 없음·원본 없음·이름 충돌·중복 매핑·테이블 없음 */;
   partial: boolean /* 한쪽이라도 partial 출처 */;
-  routines: RoutineDiff[]; routinesUnknown: boolean /* 한쪽이라도 MD 출처라 루틴을 비교하지 않음 */ }
+  routines: RoutineDiff[]; routinesUnknown: boolean /* 한쪽이라도 MD 출처라 루틴을 비교하지 않음 */;
+  manualTables: { table: string; reason: string; note: string }[] /* 생성 DDL 을 그대로 실행할 수 없어 문장을 수동 확인으로 돌릴 테이블 */ }
 interface RoutineDiff { op: 'add' | 'drop' | 'modify'; kind: 'function' | 'procedure'; name: string; from?: Routine; to?: Routine;
   fields: string[] /* 'params', 'returns', 'characteristics.deterministic' …, 'body', 'sqlMode' */ }
 ```
@@ -205,7 +206,7 @@ interface RoutineDiff { op: 'add' | 'drop' | 'modify'; kind: 'function' | 'proce
   - 매핑은 같은 대상이 아직 짝지어지지 않았을 때 적용한다. 새 이름이 BASE 에 있으면 그 BASE 객체도 다른 매핑으로 옮겨져야 하고, 옛 이름이 TARGET 에 있으면 그 TARGET 객체도 다른 매핑으로 채워져야 한다(맞바꾸기 a↔b, 연쇄 a→b·b→c, 교체 log→log_2025·log_new→log). 조건을 못 맞춘 매핑을 빼면 다른 매핑이 무너질 수 있어 안정될 때까지 반복한다. 적용하지 못한 매핑은 이유와 함께 `ignoredRenames`에 담는다(2026-10-11 개정: 이전에는 이름이 겹치면 모두 '이름 충돌'이었다).
   - 파싱 실패 테이블은 테이블 rename 후보에서 뺀다.
 - **FK 참조와 rename**: InnoDB 는 `RENAME TABLE`·`RENAME/CHANGE COLUMN` 때 다른 테이블 FK 의 참조 테이블·참조 컬럼도 따라 옮긴다. 그래서 FK 는 BASE FK 의 `refTable`·`refColumns` 에 적용된 테이블·컬럼 rename 을 반영한 값으로 TARGET 과 비교한다(`refSchema` 가 없는 같은 스키마 FK 만). 단순 rename 에서는 FK DROP/ADD 가 나오지 않고, 교체(log→log_2025·log_new→log)·맞바꾸기 뒤 TARGET 이 같은 이름을 가리키면 FK DROP+ADD 로 잡힌다(2026-10-11 2회차 개정).
-- **CHECK·FK 자동 이름과 테이블 rename**: `RENAME TABLE` 은 자동 제약명 `<옛 테이블>_chk_N`·`<옛 테이블>_ibfk_N` 을 `<새 테이블>_…_N` 으로 바꾸므로(맞바꾸기·연쇄의 임시 이름을 거쳐도 마지막 이름), rename 된 테이블은 BASE CHECK·FK 이름을 새 이름으로 바꿔 비교·출력한다. 1단계 FK DROP 은 rename 전이라 옛 이름을 쓴다(CHECK 2026-10-11 2회차, FK 3회차 개정).
+- **CHECK·FK 자동 이름과 테이블 rename**: `RENAME TABLE` 은 자동 제약명 `<옛 테이블>_chk_N`·`<옛 테이블>_ibfk_N` 을 `<새 테이블>_…_N` 으로 바꾸므로(맞바꾸기·연쇄의 임시 이름을 거쳐도 마지막 이름), rename 된 테이블은 BASE CHECK·FK 이름을 새 이름으로 바꿔 비교·출력한다. 1단계 FK DROP 은 rename 전이라 옛 이름을 쓴다(CHECK 2026-10-11 2회차, FK 3회차 개정). 보정한 FK 이름이 같은 테이블의 다른 FK 이름과 겹치면(`c_ibfk_1` 과 명시적 `c2_ibfk_1`, `c→c2`) 보정하지 않고 원래 이름으로 비교하며, 그 테이블은 `manualTables` 에 넣어 문장을 수동 확인으로 돌린다(4회차 개정).
 - **삭제되는 컬럼을 쓰던 인덱스·FK·CHECK**: MySQL 은 `DROP COLUMN` 때 그 컬럼을 쓰던 인덱스를 지우거나 줄이고, CHECK 는 함께 지우거나 삭제를 거부한다(error 3959). 같은 이름으로 들어오는 컬럼(DMS `name` 삭제 + `full_name→name`)이 있어 TARGET 과 같아 보여도, 삭제되는 BASE 컬럼을 참조하던 인덱스·FK·CHECK 는 변경으로 보고 다시 만든다(2026-10-11 3회차 개정).
 - **파티션**: 방식·표현식·개수·파티션 목록과 `SUBPARTITION BY …` 절을 비교한다.
 - **생성 컬럼**: 한쪽이 MD(표현식 미상)여도 생성 여부와 저장 방식(VIRTUAL/STORED)은 비교하고, 표현식만 `skipped`(`column.generated`)로 남긴다.
@@ -249,7 +250,7 @@ interface Statement {
    - 타입·표현식이 같고 **RANGE/LIST 파티션이 끝에 추가만 됨**: `ADD PARTITION (…)`. 월별 파티션 운영에서 가장 흔한 경우다.
    - 같은 조건에서 파티션이 **삭제됨**: RANGE 맨 앞(보관 기간 정리)이면 `DROP PARTITION p1, p2` 에 `[데이터 확인]` notes. RANGE 중간 삭제는 다음 파티션과 합쳐 `REORGANIZE PARTITION p2, p3 INTO (p3 …)` 로 지운 구간의 행을 보존한다. 뒤쪽(다음 파티션 없음) 삭제는 `DROP PARTITION` 에 `[데이터 확인]` notes 를 단다(2026-10-11 개정)
    - LIST: 사라진 파티션의 값이 TARGET 어디에도 없을 때만 `DROP PARTITION` + `[데이터 확인]`(위치 무관, 첫 파티션 포함). 값이 TARGET 의 다른 파티션에 남으면(병합 `p1 IN(1), p2 IN(2)` → `p2 IN(1,2)`) 연속 구간을 `REORGANIZE PARTITION p1, p2 INTO (…)` 로 묶는다. MySQL 은 LIST REORGANIZE 에서 새 파티션에 없는 값의 행을 오류 없이 지우므로, 그런 값이 있으면 `[데이터 확인] 값 …` notes 를 단다(2026-10-11 2회차 개정)
-   - 같은 조건에서 중간 파티션의 경계·구성이 바뀜: `REORGANIZE PARTITION … INTO (…)`. 마지막 파티션 재구성은 범위를 늘릴 수만 있으므로(error 1520 ER_REORG_OUTSIDE_RANGE), 마지막 상한이 줄면(`MAXVALUE` → 유한, 30 → 15) SQL 을 주석 처리한 수동 확인 문장으로 낸다(2026-10-11 3회차 개정)
+   - 같은 조건에서 중간 파티션의 경계·구성이 바뀜: `REORGANIZE PARTITION … INTO (…)`. 마지막 파티션 재구성은 범위를 늘릴 수만 있으므로(error 1520 ER_REORG_OUTSIDE_RANGE), 마지막 상한이 줄면(`MAXVALUE` → 유한, 30 → 15) SQL 을 주석 처리한 수동 확인 문장으로 낸다(2026-10-11 3회차 개정). 상한은 정수 하나와 `MAXVALUE`·`(MAXVALUE)`·`(MAXVALUE, MAXVALUE…)` 만 비교하고, 그 밖의 상한(날짜·문자열·다중 컬럼·식)이 마지막 파티션에서 바뀌면 새 상한이 MAXVALUE 가 아닌 한 수동 확인으로 낸다(4회차 개정)
    - 파티션 COMMENT/ENGINE만 바뀜: DDL 없이 `-- 파티션 메타 변경` 주석
    - HASH/KEY 개수만 바뀜: `ADD PARTITION PARTITIONS n` / `COALESCE PARTITION n`. 이름 있는 HASH/KEY 파티션은 `DROP PARTITION` 이 없으므로 뒤쪽 감소는 `COALESCE PARTITION n`, 뒤쪽 증가는 `ADD PARTITION (PARTITION …)`, 그 밖(이름·정의 변경)은 `PARTITION BY …` 전체 재정의(2026-10-11 2회차 개정)
    - 타입·표현식이 바뀌거나 새로 파티셔닝: `PARTITION BY …` 전체 재정의
@@ -261,10 +262,11 @@ interface Statement {
 
 **특수 처리**
 
-- 순서로 풀 수 없는 rename(`이름 충돌` 로 적용되지 않은 매핑: 컬럼은 그 TARGET 테이블, 테이블은 옛·새 이름 두 테이블)이 있으면 관련 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제, ALTER, 파티션)을 수동 확인 문장으로 바꾼다. 관련 테이블이 얽힌 rename 묶음(맞바꾸기·연쇄)에 들면 묶음의 모든 테이블로, 그 테이블들을 참조하는 FK 를 바꾸는 테이블로도 넓힌다(묶음 RENAME 이 실행되지 않으면 다른 문장이 엉뚱한 테이블의 데이터를 바꾼다, 2026-10-11 3회차 개정).
+- 순서로 풀 수 없는 rename(`이름 충돌` 로 적용되지 않은 매핑: 컬럼은 그 TARGET 테이블, 테이블은 옛·새 이름 두 테이블)이 있으면 관련 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제, ALTER, 파티션)을 수동 확인 문장으로 바꾼다. 관련 테이블이 얽힌 rename 묶음(맞바꾸기·연쇄)에 들면 묶음의 모든 테이블로, 그 테이블들을 참조하는 FK 를 바꾸는 테이블로도 넓힌다(묶음 RENAME 이 실행되지 않으면 다른 문장이 엉뚱한 테이블의 데이터를 바꾼다, 2026-10-11 3회차 개정). 넓히기는 더 이상 늘지 않을 때까지(고정점) 반복하고(FK 로 번진 테이블이 다시 다른 묶음에 들 수 있다), 막힌 테이블·뷰를 본문에서 읽는 뷰의 삭제·생성도 수동 확인으로 바꾼다. 출발점에는 `manualTables`(FK 보정명 충돌, 아래 재사용 컬럼명 의존성)도 들어간다(4회차 개정).
+- 삭제되는 컬럼 이름을 겹침 허용 rename 이 다시 쓸 때(`DROP COLUMN y, RENAME COLUMN x TO y`), BASE 에서 그 컬럼을 식 인덱스(`((abs(y)))`)·생성 컬럼 식이 쓰거나 다른(자기 포함) 테이블 FK 가 참조하면 그 테이블과, 바뀌는 자식 테이블의 문장을 수동 확인으로 돌린다(생성 DDL 이 실패하거나 새 컬럼을 가리키게 된다). 일반 인덱스·FK 컬럼·CHECK 는 다시 만들어 골든 `remove-rename-column-index` 로 검증되었으므로 막지 않는다(4회차 개정).
 - 생성 컬럼의 VIRTUAL↔STORED 변경은 `MODIFY` 로 할 수 없어(MySQL error 3106) 그 ALTER 를 수동 확인 문장으로 낸다.
 - `parseError`가 있는 객체는 DDL 대신 `-- [수동 확인 필요] <객체>: 파싱 불가` 주석 문장(`comment: true`)을 만든다.
-- partial 출처가 있으면 출력 맨 위에 `-- [MD 기반] 일부 속성(…)은 비교하지 않았습니다` 주석을 단다.
+- partial 출처가 있으면 출력 맨 위에 `-- [MD 기반] 일부 속성(…)은 비교하지 않았습니다` 주석을 단다. 실행 문장에 컬럼 rename(`RENAME COLUMN`·`CHANGE COLUMN`)이 있으면 `-- [MD 기반] MD 출처는 CHECK 를 알 수 없어, 실제 DB 에 CHECK 가 있으면 그 컬럼의 RENAME·CHANGE COLUMN 이 오류 3959 로 실패할 수 있습니다` 한 줄을 덧붙인다(4회차 개정).
 - partial(MD) TARGET으로 문장을 만들 때
   - 변경·rename·위치 변경 컬럼과 재생성 인덱스의 `unknown` 속성은 짝지어진 BASE 객체 값으로 채운다(새 객체). 예: MD에서 타입만 바뀐 컬럼의 문자셋·기본값, 생성 컬럼 표현식, `[Normal]` 인덱스의 실제 종류(계열이 다르면, 예: BASE FULLTEXT → TARGET `[Normal]`, 채우지 않고 INDEX로 만들며 종류 미확인 안내를 단다).
   - 채우지 못한 속성은 그 문장의 `notes`에 `[MD 기반 미확인] 컬럼 \`c\`: default, charset, collation` 형식으로 적는다. 타입에 해당하지 않는 속성(정수 컬럼의 charset 등)은 적지 않는다.
@@ -334,7 +336,7 @@ interface Statement {
 - **업로드 제한**: 파일당 20 MB, UTF-8만 허용(BOM은 제거).
 - **업로드 응답**: 파일별로 `ok | duplicate | error`와 파싱 경고(객체, 줄 번호, 사유) 목록을 담는다.
 - **diff 결과 캐시**: `(base, target, 전환 매핑, 수동 rename 매핑과 그 방향)` 키로 메모리 LRU에 캐시한다. 버전 내용은 불변이라 무효화 조건은 rename 변경과 Database 이름 변경(응답 메타에 이름이 들어 있어 PATCH 시 diff 캐시를 비운다)이다.
-- **수동 rename 의 역방향**: (base, target) 쌍에 수동 매핑을 저장한 적이 없으면(`rename_mapping_sets`, 빈 목록 저장도 저장이다) 역쌍(target, base)의 수동 매핑을 뒤집어 적용한다. column/index 의 `table` 은 새 TARGET 쪽 이름으로, 테이블 대응은 뒤집은 수동 테이블 rename 이 우선이고 없으면 이 방향의 DMS 테이블 rename 을 쓴다. 응답 rename 은 `source: 'manual'`, `reversed: true`. 저장(PUT)은 그 쌍에만 한다. 역쌍 사본을 저장했다가 모두 해제해도 역쌍 매핑이 되살아나지 않는다. 뒤집는 것은 역쌍 diff 에서 실제로 적용된 rename(diff 결과의 rename op)뿐이다 — 저장 검증 이전에 남은 `c→b, a→b` 는 정방향이 `a→b` 만 적용하므로 역방향도 `b→a` 만 쓴다(2026-10-11 개정, 2·3회차 보강).
+- **수동 rename 의 역방향**: (base, target) 쌍에 수동 매핑을 저장한 적이 없으면(`rename_mapping_sets`, 빈 목록 저장도 저장이다) 역쌍(target, base)의 수동 매핑을 뒤집어 적용한다. column/index 의 `table` 은 새 TARGET 쪽 이름으로, 테이블 대응은 뒤집은 수동 테이블 rename 이 우선이고 없으면 이 방향의 DMS 테이블 rename 을 쓴다. 응답 rename 은 `source: 'manual'`, `reversed: true`. 저장(PUT)은 그 쌍에만 한다. 역쌍 사본을 저장했다가 모두 해제해도 역쌍 매핑이 되살아나지 않는다. 뒤집는 것은 역쌍 diff 에서 실제로 적용된 rename(diff 결과의 rename op)뿐이다 — 저장 검증 이전에 남은 `c→b, a→b` 는 정방향이 `a→b` 만 적용하므로 역방향도 `b→a` 만 쓴다(2026-10-11 개정, 2·3회차 보강). 이때 이 방향의 DMS 매핑도 정방향에서 최종 적용된 것만 쓴다 — DMS `members→member` 를 수동 `members→zcustomer` 로 덮었으면 역방향은 `zcustomer→members` 만 쓰고 DMS `member→members` 는 뒤집지 않는다(4회차 개정).
 - **수동 테이블 rename 과 DMS 컬럼 대응**: DMS 컬럼·인덱스 매핑의 `table` 은 DMS 테이블 대응의 TARGET 이름이다. 수동 테이블 rename 이 같은 원본을 다른 이름으로 덮으면(DMS `members→member` 를 수동 `members→customer` 로) 최종 테이블 대응으로 `table` 을 다시 정한다(`customer`). 원본 테이블이 갈 곳이 없으면 그 매핑은 뺀다. PUT 은 이렇게 옮긴 DMS 매핑도 DMS 에서 온 것으로 보고 저장하지 않는다(2026-10-11 3회차 개정).
 - **같은 대상 매핑 거부**: 같은 이름으로 가는 매핑(같은 kind·table·to, 예: `c→b`, `a→b`)이 둘 이상이고 그중 수동 매핑이 있으면 PUT 을 400(`같은 이름(b)으로 가는 매핑이 여러 개입니다 …`)으로 거부한다. diff 는 하나만 적용하므로 뒤집은 역방향과 어긋나기 때문이다(DMS 매핑 중 수동 매핑으로 덮이지 않은 것도 센다).
 - 입력 검증은 서버의 zod 스키마로 한다. core는 의존성이 없으므로 타입만 공유한다.
