@@ -1,4 +1,4 @@
-import type { SchemaModel, SourceFormat, Table, View } from '@tdm/core';
+import type { Routine, SchemaModel, SourceFormat, Table, View } from '@tdm/core';
 import { all, one, run, tx, type Db } from '../db/connection';
 import { AppError } from '../errors';
 import { getSchema } from './catalog';
@@ -21,9 +21,12 @@ export interface VersionSummary extends VersionMeta {
   changedObjects: number; // 직전 버전 대비 추가·삭제·변경된 객체 수
 }
 
+export type ObjectKind = 'table' | 'view' | 'function' | 'procedure';
+const ROUTINE_KINDS: ReadonlySet<string> = new Set(['function', 'procedure']);
+
 export interface VersionObject {
   objectId: number;
-  kind: 'table' | 'view';
+  kind: ObjectKind;
   name: string;
   revisionNo: number;
 }
@@ -64,22 +67,29 @@ export function getVersionMeta(db: Db, id: number): VersionMeta {
 export function listVersions(db: Db, schemaId: number): VersionSummary[] {
   getSchema(db, schemaId);
   const metas = all<MetaRecord>(db, `${META_SQL} WHERE v.schema_id = ? ORDER BY v.version_no`, schemaId).map(toMeta);
-  const links = all<{ version_id: number; object_id: number; content_hash: string }>(db, `
-    SELECT vo.version_id, r.object_id, r.content_hash
+  const links = all<{ version_id: number; object_id: number; content_hash: string; kind: string }>(db, `
+    SELECT vo.version_id, r.object_id, r.content_hash, o.kind
       FROM version_objects vo JOIN object_revisions r ON r.id = vo.revision_id
+      JOIN objects o ON o.id = r.object_id
       JOIN schema_versions v ON v.id = vo.version_id WHERE v.schema_id = ?`, schemaId);
   const byVersion = new Map<number, Map<number, string>>();
+  const routineIds = new Set<number>();
   for (const l of links) {
     const objects = byVersion.get(Number(l.version_id)) ?? new Map<number, string>();
     objects.set(Number(l.object_id), l.content_hash);
     byVersion.set(Number(l.version_id), objects);
+    if (ROUTINE_KINDS.has(l.kind)) routineIds.add(Number(l.object_id));
   }
   let previous = new Map<number, string>(); // object_id -> content_hash (중간 버전 삭제 시 과대 계산 방지)
+  let previousFormat: SourceFormat | undefined;
   const summaries = metas.map((meta) => {
     const current = byVersion.get(meta.id) ?? new Map<number, string>();
-    const objectIds = new Set([...previous.keys(), ...current.keys()]);
-    const changedObjects = [...objectIds].filter((o) => previous.get(o) !== current.get(o)).length;
+    // MD 에는 루틴이 없으므로 MD 가 낀 쌍에서는 루틴을 변경으로 세지 않는다 (diff 의 routinesUnknown 과 같은 기준)
+    const skipRoutines = meta.sourceFormat === 'md' || previousFormat === 'md';
+    const objectIds = [...new Set([...previous.keys(), ...current.keys()])].filter((o) => !(skipRoutines && routineIds.has(o)));
+    const changedObjects = objectIds.filter((o) => previous.get(o) !== current.get(o)).length;
     previous = current;
+    previousFormat = meta.sourceFormat;
     return { ...meta, changedObjects };
   });
   return summaries.reverse();
@@ -87,17 +97,19 @@ export function listVersions(db: Db, schemaId: number): VersionSummary[] {
 
 export function loadVersion(db: Db, id: number): VersionDetail {
   const version = getVersionMeta(db, id);
-  const rows = all<{ object_id: number; kind: 'table' | 'view'; name: string; revision_no: number; model_json: string }>(db, `
+  const rows = all<{ object_id: number; kind: ObjectKind; name: string; revision_no: number; model_json: string }>(db, `
     SELECT o.id AS object_id, o.kind, o.name, r.revision_no, r.model_json
       FROM version_objects vo
       JOIN object_revisions r ON r.id = vo.revision_id
       JOIN objects o ON o.id = r.object_id
      WHERE vo.version_id = ? ORDER BY o.kind, o.name`, id);
-  const model: SchemaModel = { name: version.schemaName, tables: [], views: [] };
+  // MD 출처는 루틴을 알 수 없다 (diff 가 루틴을 비교하지 않도록 표시)
+  const model: SchemaModel = { name: version.schemaName, tables: [], views: [], routines: [], ...(version.sourceFormat === 'md' ? { routinesUnknown: true } : {}) };
   for (const r of rows) {
-    const obj = JSON.parse(r.model_json) as Table | View;
+    const obj = JSON.parse(r.model_json) as Table | View | Routine;
     if (obj.kind === 'table') model.tables.push(obj);
-    else model.views.push(obj);
+    else if (obj.kind === 'view') model.views.push(obj);
+    else model.routines.push(obj);
   }
   const objects = rows.map((r) => ({ objectId: Number(r.object_id), kind: r.kind, name: r.name, revisionNo: Number(r.revision_no) }));
   return { version, model, objects };

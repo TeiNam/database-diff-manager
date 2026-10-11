@@ -38,7 +38,7 @@ function legacyDb(): Db {
 describe('마이그레이션 003 (001+002 상태에서 올리기)', () => {
   it('사용자는 보존하고(대소문자 중복은 먼저 생긴 것만), 세션·업로드 데이터는 비운다', () => {
     const db = legacyDb();
-    migrate(db);
+    migrate(db, 3);
     expect(userVersion(db)).toBe(3);
     expect(all(db, 'SELECT id, username, password_hash, role, disabled, typeof(disabled) AS t, created_at FROM users ORDER BY id')).toEqual([
       { id: 1, username: 'admin', password_hash: 'hash-a', role: 'admin', disabled: 0, t: 'integer', created_at: '2026-01-01' },
@@ -63,9 +63,9 @@ describe('마이그레이션 003 (001+002 상태에서 올리기)', () => {
     expect(indexes).toEqual(expect.arrayContaining(['ix_sessions_expires', 'ix_sessions_user', 'ix_revisions_history', 'ux_renames', 'ix_renames_target', 'ix_version_objects_revision']));
   });
 
-  it('새 DB 에서도 001→003 이 적용되고 업로드가 동작한다', () => {
+  it('새 DB 에서도 001→최신(004) 이 적용되고 업로드가 동작한다', () => {
     const db = openDb(':memory:');
-    expect(userVersion(db)).toBe(3);
+    expect(userVersion(db)).toBe(4);
     const userId = createUser(db, { username: 'admin', passwordHash: 'h', role: 'admin' }).id;
     const r = ingest(db, { databaseName: 'db', schemaName: 'app', filename: 'a.sql', text: 'CREATE TABLE `t` (\n  `x` int\n);', userId });
     expect(r).toMatchObject({ status: 'ok', versionNo: 1 });
@@ -77,7 +77,7 @@ describe('마이그레이션 003 (001+002 상태에서 올리기)', () => {
     const db = openDb(':memory:');
     expect(() => applyMigration(db, 99, "-- foreign_keys: off\nINSERT INTO sessions VALUES ('x', 12345, '2099');")).toThrow('외래 키');
     expect(count(db, 'sessions')).toBe(0);
-    expect(userVersion(db)).toBe(3);
+    expect(userVersion(db)).toBe(4);
     expect(one<{ foreign_keys: number }>(db, 'PRAGMA foreign_keys')!.foreign_keys).toBe(1);
     expect(db.isTransaction).toBe(false);
   });

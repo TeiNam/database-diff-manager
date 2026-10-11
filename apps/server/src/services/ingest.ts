@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalJson, parseMdDump, parseSqlDump, type ParsedDump, type ParseWarning, type SchemaModel, type SourceFormat, type Table, type View } from '@tdm/core';
+import { canonicalJson, parseMdDump, parseSqlDump, type ParsedDump, type ParseWarning, type Routine, type SchemaModel, type SourceFormat, type Table, type View } from '@tdm/core';
 import { one, run, tx, type Db } from '../db/connection';
 import { AppError } from '../errors';
 import { ensureDatabase, ensureSchema } from '../repos/catalog';
@@ -27,9 +27,15 @@ export function formatOf(filename: string): SourceFormat {
   return ext as SourceFormat;
 }
 
-// 덤프 안 객체 순서가 바뀌어도 같은 모델로 본다
+// 객체 종류 (objects.kind)
+export const isRoutine = (obj: Table | View | Routine): obj is Routine => obj.kind === 'function' || obj.kind === 'procedure';
+// 루틴 이름은 대소문자를 구분하지 않는다
+const objectKey = (obj: Table | View | Routine) => `${obj.kind}:${isRoutine(obj) ? obj.name.toLowerCase() : obj.name}`;
+
+// 덤프 안 객체 순서가 바뀌어도 같은 모델로 본다. 루틴이 없으면 루틴 지원 전과 같은 해시가 나오도록 키를 넣지 않는다
 export function modelHash(model: SchemaModel): string {
-  return sha256(canonicalJson({ tables: byName(model.tables), views: byName(model.views) }));
+  const routines = model.routines.length ? [...model.routines].sort((a, b) => (objectKey(a) < objectKey(b) ? -1 : objectKey(a) > objectKey(b) ? 1 : 0)) : undefined;
+  return sha256(canonicalJson({ tables: byName(model.tables), views: byName(model.views), routines }));
 }
 
 function parse(format: SourceFormat, text: string): ParsedDump {
@@ -38,8 +44,8 @@ function parse(format: SourceFormat, text: string): ParsedDump {
 
 function assertUniqueNames(model: SchemaModel): void {
   const seen = new Set<string>();
-  for (const obj of [...model.tables, ...model.views]) {
-    const key = `${obj.kind}:${obj.name}`;
+  for (const obj of [...model.tables, ...model.views, ...model.routines]) {
+    const key = objectKey(obj);
     if (seen.has(key)) throw new AppError(400, `같은 이름의 객체가 두 번 정의되어 있습니다: ${obj.name}`);
     seen.add(key);
   }
@@ -48,7 +54,7 @@ function assertUniqueNames(model: SchemaModel): void {
 export function ingest(db: Db, input: IngestInput): IngestResult {
   const format = formatOf(input.filename);
   const { model, warnings } = parse(format, input.text);
-  if (!model.tables.length && !model.views.length) throw new AppError(400, '파일에서 테이블이나 뷰를 찾지 못했습니다');
+  if (!model.tables.length && !model.views.length && !model.routines.length) throw new AppError(400, '파일에서 테이블이나 뷰를 찾지 못했습니다');
   assertUniqueNames(model);
   const hash = modelHash(model);
   return tx(db, () => {
@@ -63,7 +69,7 @@ export function ingest(db: Db, input: IngestInput): IngestResult {
       schemaId, versionNo, format, input.filename, sha256(input.text), hash, input.note ?? null, input.userId, new Date().toISOString(),
     ).lastInsertRowid;
     run(db, 'INSERT INTO schema_version_sources (version_id, source_text) VALUES (?, ?)', versionId, input.text);
-    for (const obj of [...model.tables, ...model.views]) linkObject(db, schemaId, versionId, obj);
+    for (const obj of [...model.tables, ...model.views, ...model.routines]) linkObject(db, schemaId, versionId, obj);
     return { status: 'ok', versionId, versionNo, warnings };
   });
 }
@@ -75,9 +81,13 @@ function takeNumber(db: Db, sql: string, id: number): number {
   return Number(r.n);
 }
 
+// 루틴은 이름 대소문자만 바뀌어도 같은 객체다 (객체 이름은 처음 표기를 유지하고 리비전 모델에 새 표기가 남는다)
+const FIND_OBJECT = 'SELECT id FROM objects WHERE schema_id = ? AND kind = ? AND name = ?';
+const FIND_ROUTINE = 'SELECT id FROM objects WHERE schema_id = ? AND kind = ? AND name = ? COLLATE NOCASE ORDER BY id LIMIT 1';
+
 // 객체 내용 해시가 직전 리비전과 같으면 그 리비전을 재사용하고, 다르면 새 리비전을 만든다
-function linkObject(db: Db, schemaId: number, versionId: number, obj: Table | View): void {
-  const objectId = Number(one<{ id: number }>(db, 'SELECT id FROM objects WHERE schema_id = ? AND kind = ? AND name = ?', schemaId, obj.kind, obj.name)?.id
+function linkObject(db: Db, schemaId: number, versionId: number, obj: Table | View | Routine): void {
+  const objectId = Number(one<{ id: number }>(db, isRoutine(obj) ? FIND_ROUTINE : FIND_OBJECT, schemaId, obj.kind, obj.name)?.id
     ?? run(db, 'INSERT INTO objects (schema_id, kind, name) VALUES (?, ?, ?)', schemaId, obj.kind, obj.name).lastInsertRowid);
   const json = canonicalJson(obj);
   const contentHash = sha256(json);
@@ -87,6 +97,6 @@ function linkObject(db: Db, schemaId: number, versionId: number, obj: Table | Vi
     ? Number(last.id)
     : run(db, 'INSERT INTO object_revisions (object_id, revision_no, content_hash, fidelity, parse_error, model_json) VALUES (?, ?, ?, ?, ?, ?)',
         objectId, takeNumber(db, 'UPDATE objects SET next_revision_no = next_revision_no + 1 WHERE id = ? RETURNING next_revision_no - 1 AS n', objectId),
-        contentHash, obj.fidelity, obj.parseError ?? null, json).lastInsertRowid;
+        contentHash, isRoutine(obj) ? 'full' : obj.fidelity, obj.parseError ?? null, json).lastInsertRowid;
   run(db, 'INSERT INTO version_objects (version_id, schema_id, object_id, revision_id) VALUES (?, ?, ?, ?)', versionId, schemaId, objectId, revisionId);
 }

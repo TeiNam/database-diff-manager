@@ -80,6 +80,6 @@ describe('ingest', () => {
 
   it('modelHash는 객체 순서에 무관하다', () => {
     const t = (name: string) => ({ kind: 'table' as const, name, columns: [], indexes: [], foreignKeys: [], checks: [], options: [], fidelity: 'full' as const });
-    expect(modelHash({ name: 's', tables: [t('a'), t('b')], views: [] })).toBe(modelHash({ name: 's', tables: [t('b'), t('a')], views: [] }));
+    expect(modelHash({ name: 's', tables: [t('a'), t('b')], views: [], routines: [] })).toBe(modelHash({ name: 's', tables: [t('b'), t('a')], views: [], routines: [] }));
   });
 });
