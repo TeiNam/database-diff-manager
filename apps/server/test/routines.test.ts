@@ -9,7 +9,7 @@ import { objectHistory } from '../src/repos/objects';
 import { createUser } from '../src/repos/users';
 import { listVersions, loadVersion } from '../src/repos/versions';
 import { ingest, modelHash } from '../src/services/ingest';
-import { loggedInApp, multipart, SAMPLE_SQL, sampleText } from './helpers';
+import { ingestLegacy, loggedInApp, multipart, SAMPLE_SQL, sampleText } from './helpers';
 
 // td-export 0.1.52 실제 출력 (함수 tax, 프로시저 mark_paid)
 const shop = (ext: 'sql' | 'md') => readFileSync(fileURLToPath(new URL(`../../../packages/core/test/fixtures/td-export-0152/shop.${ext}`, import.meta.url)), 'utf8');
@@ -29,12 +29,12 @@ describe('마이그레이션 004 (objects.kind 에 function·procedure 추가)',
     db.exec('PRAGMA foreign_keys = ON');
     migrate(db, 3);
     const userId = createUser(db, { username: 'admin', passwordHash: 'h', role: 'admin' }).id;
-    ingest(db, { databaseName: 'db', schemaName: 'app', filename: 'a.sql', text: sampleText(SAMPLE_SQL), userId });
+    ingestLegacy(db, { databaseName: 'db', schemaName: 'app', filename: 'a.sql', text: sampleText(SAMPLE_SQL), userId });
     const before = snapshot(db);
     expect(() => run(db, "INSERT INTO objects (schema_id, kind, name) VALUES (1, 'function', 'f')")).toThrow(/CHECK/);
 
     migrate(db);
-    expect(userVersion(db)).toBe(6);
+    expect(userVersion(db)).toBe(7);
     expect(snapshot(db)).toEqual(before);
     expect(all(db, 'PRAGMA foreign_key_check')).toEqual([]);
     expect(one<{ foreign_keys: number }>(db, 'PRAGMA foreign_keys')!.foreign_keys).toBe(1);

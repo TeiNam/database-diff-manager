@@ -21,9 +21,12 @@ beforeEach(() => {
 });
 
 describe('ingest', () => {
-  it('첫 업로드는 v1, 33개 객체를 리비전 1로 저장한다', () => {
+  it('첫 업로드는 v1, 33개 객체를 리비전 1로 저장한다 — td-export 0.1.15 SQL 은 끝을 확인할 수 없다는 unverified 경고 (15회차 3)', () => {
     const r = upload(SAMPLE_SQL, SQL);
-    expect(r).toMatchObject({ status: 'ok', versionNo: 1, warnings: [] });
+    expect(r).toMatchObject({ status: 'ok', versionNo: 1 });
+    expect(r.warnings.map((w) => w.code)).toEqual(['unverified']);
+    expect(r.warnings[0].message).toContain('0.1.15');
+    expect(r.warnings[0].message).toContain('수동 확인');
     expect(count(db, 'objects')).toBe(33);
     expect(count(db, 'object_revisions')).toBe(33);
     expect(count(db, 'version_objects')).toBe(33);
@@ -76,12 +79,14 @@ describe('ingest', () => {
   it('입력 오류', () => {
     expect(() => upload('a.xlsx', 'x')).toThrow('지원하지 않는 파일 형식');
     expect(() => upload('empty.sql', 'SET NAMES utf8mb4;')).toThrow('테이블이나 뷰를 찾지 못했습니다');
-    expect(() => upload('empty.md', '')).toThrow('테이블이나 뷰를 찾지 못했습니다');
+    expect(() => upload('empty.md', '')).toThrow('스키마 정의서가 아닙니다'); // 비스키마 검사가 객체 0개 검사보다 먼저다 (15회차)
     expect(() => upload('dup.sql', 'CREATE TABLE `a` (\n  `x` int\n);\nCREATE TABLE `a` (\n  `y` int\n);')).toThrow('같은 이름의 객체');
   });
 
-  it('식별할 수 없는 문장이 있으면 거부한다 (13회차 1)', () => {
-    expect(() => upload('junk.sql', 'This is not a schema dump')).toThrow('식별할 수 없는 문장');
+  it('식별할 수 없는 문장·스키마 정의가 아닌 문장이 있으면 거부한다 (13회차 1, 15회차: 첫 단어로 판정)', () => {
+    expect(() => upload('junk.sql', 'This is not a schema dump')).toThrow('스키마 정의가 아닌');
+    expect(() => upload('show.sql', 'SHOW CREATE TABLE a;\n')).toThrow('스키마 정의가 아닌');
+    expect(() => upload('broken.sql', 'CREATE TABLE oops (;\n')).toThrow('식별할 수 없는 문장');
     // 정상 객체와 섞여 있어도 거부한다 (불완전한 TARGET 으로 기존 객체를 삭제하지 않도록)
     expect(() => upload('mixed.sql', 'CREATE TABLE `a` (\n  `x` int\n);\nThis is not a schema dump;')).toThrow('줄 4');
     expect(count(db, 'schema_versions')).toBe(0);
@@ -108,15 +113,16 @@ describe('ingest', () => {
     expect(r.status).toBe('ok');
     expect(r.warnings.map((w) => w.code)).toContain('incomplete');
     const [target, base] = listVersions(db, 1).map((v) => loadVersion(db, v.id).model);
-    expect(target.incomplete).toMatchObject({ objects: ['chat_history'] });
-    expect(base.incomplete).toBeUndefined();
+    expect(target.evidence).toMatchObject({ level: 'incomplete', objects: ['chat_history'] });
+    expect(base.evidence?.level).toBe('unknown');
     const stmts = generateDdl(diffSchemas(base, target));
     expect(stmts.filter((s) => !s.comment && /DROP\s+(TABLE|VIEW|COLUMN)/.test(s.sql))).toEqual([]);
   });
 
   it('모델이 같아도 완전성이 다르면 duplicate 로 합치지 않는다 (14회차 1)', () => {
     const md = sampleText(SAMPLE_MD);
-    const cut = md.replace(/\n \n\s*$/, '\n');
+    // 마지막 Index 줄이 중간에서 끊긴 MD (끝 줄 ' ' 만 없는 MD 는 완결된 줄로 끝나 완전하다 — 15회차)
+    const cut = `${md.slice(0, md.lastIndexOf('('))}(`;
     expect(upload(SAMPLE_MD, cut)).toMatchObject({ status: 'ok', versionNo: 1 });
     expect(upload(SAMPLE_MD, md)).toMatchObject({ status: 'ok', versionNo: 2 });
     expect(upload(SAMPLE_MD, md)).toMatchObject({ status: 'duplicate', versionNo: 2 });

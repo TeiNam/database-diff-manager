@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { canonicalJson, parseMdDump, routineNameKey, parseSqlDump, UNIDENTIFIED_NAME, type ParsedDump, type ParseWarning, type Routine, type SchemaModel, type SourceFormat, type Table, type View } from '@tdm/core';
+import { canonicalJson, parseMdDump, routineNameKey, parseSqlDump, UNIDENTIFIED_NAME, type ParsedDump, type ParseWarning, type Routine, type SchemaEvidence, type SchemaModel, type SourceFormat, type Table, type View } from '@tdm/core';
 import { all, one, run, tx, type Db } from '../db/connection';
 import { AppError } from '../errors';
 import { ensureDatabase, ensureSchema } from '../repos/catalog';
+import { evidenceJson, saveEvidence, storedEvidenceJson } from '../repos/evidence';
 
 export interface IngestInput {
   databaseName: string;
@@ -40,7 +41,7 @@ export function modelHash(model: SchemaModel): string {
   return sha256(canonicalJson({ tables: byName(model.tables), views: byName(model.views), routines }));
 }
 
-function parse(format: SourceFormat, text: string): ParsedDump {
+export function parseSource(format: SourceFormat, text: string): ParsedDump {
   return format === 'sql' ? parseSqlDump(text) : parseMdDump(text);
 }
 
@@ -66,6 +67,17 @@ function withEmptySchemaWarning(format: SourceFormat, { model, warnings }: Parse
   return [...warnings, { code: 'empty-schema', kind: 'schema', object: model.name, line: 1, message: '객체가 0개인 빈 스키마입니다 — 이 버전을 TARGET 으로 비교하면 객체 삭제는 수동 확인으로 막힙니다' }];
 }
 
+// 파서가 판정하지 못한 모델 (파서는 항상 판정하므로 방어용)
+const UNJUDGED: SchemaEvidence = { level: 'unknown', reason: '완전성 판정이 없습니다', objects: [] };
+
+// 완전하다는 증거도 불완전하다는 증거도 없는 파일(td-export 0.1.15 SQL 등)은 받되, 이 버전을 TARGET 으로 비교하면 삭제 문장이
+// 수동 확인이 된다고 안내한다 (15회차 3)
+function withUnverifiedWarning(model: SchemaModel, warnings: ParseWarning[]): ParseWarning[] {
+  if (model.evidence?.level !== 'unknown') return warnings;
+  const message = `${model.evidence.reason ?? '완전한 덤프인지 확인할 수 없습니다'} — 이 버전을 TARGET 으로 비교하면 DROP TABLE·VIEW·ROUTINE·COLUMN·PARTITION 은 수동 확인 문장으로 나옵니다 (td-export 0.1.30+ 로 다시 추출하면 실행 문장으로 나옵니다)`;
+  return [...warnings, { code: 'unverified', kind: 'schema', object: model.name, line: 1, message }];
+}
+
 function assertUniqueNames(model: SchemaModel): void {
   const seen = new Set<string>();
   for (const obj of [...model.tables, ...model.views, ...model.routines]) {
@@ -77,21 +89,21 @@ function assertUniqueNames(model: SchemaModel): void {
 
 export function ingest(db: Db, input: IngestInput): IngestResult {
   const format = formatOf(input.filename);
-  const parsed = parse(format, input.text);
+  const parsed = parseSource(format, input.text);
   const { model } = parsed;
-  assertIdentified(parsed);
-  const warnings = withEmptySchemaWarning(format, parsed);
   assertSchemaDump(parsed);
+  assertIdentified(parsed);
+  const warnings = withUnverifiedWarning(model, withEmptySchemaWarning(format, parsed));
   assertUniqueNames(model);
   const hash = modelHash(model);
-  // 끊긴 파일 등 완전성을 확인하지 못한 버전은 사유를 저장해 diff 가 TARGET 일 때 파괴적 문장을 막는다
-  const incomplete = model.incomplete ? JSON.stringify(model.incomplete) : null;
+  // 완전성 증거를 버전마다 저장해 diff 가 TARGET 일 때 증거가 complete 가 아니면 부재 기반 파괴 문장을 막는다 (15회차)
+  const evidence = model.evidence ?? UNJUDGED;
   return tx(db, () => {
     const schemaId = ensureSchema(db, ensureDatabase(db, input.databaseName), input.schemaName);
     const latest = one<{ id: number; version_no: number; model_hash: string; source_format: SourceFormat }>(db,
       'SELECT id, version_no, model_hash, source_format FROM schema_versions WHERE schema_id = ? ORDER BY version_no DESC LIMIT 1', schemaId);
-    // 모델이 같아도 완전성이 다르면(끊긴 파일 → 완전한 파일) 새 버전이다
-    if (latest && latest.model_hash === hash && knowsRoutines(latest.source_format) === knowsRoutines(format) && storedIncomplete(db, latest.id) === incomplete) return { status: 'duplicate', versionId: Number(latest.id), versionNo: Number(latest.version_no), warnings };
+    // 모델이 같아도 완전성 증거가 다르면(끊긴 파일·0.1.15 형식 → 완전한 파일) 새 버전이다
+    if (latest && latest.model_hash === hash && knowsRoutines(latest.source_format) === knowsRoutines(format) && storedEvidenceJson(db, latest.id) === evidenceJson(evidence)) return { status: 'duplicate', versionId: Number(latest.id), versionNo: Number(latest.version_no), warnings };
     const versionNo = takeNumber(db, 'UPDATE schemas SET next_version_no = next_version_no + 1 WHERE id = ? RETURNING next_version_no - 1 AS n', schemaId);
     const versionId = run(db, `
       INSERT INTO schema_versions (schema_id, version_no, source_format, source_filename, source_sha256, model_hash, note, uploaded_by, uploaded_at)
@@ -99,15 +111,13 @@ export function ingest(db: Db, input: IngestInput): IngestResult {
       schemaId, versionNo, format, input.filename, sha256(input.text), hash, input.note ?? null, input.userId, new Date().toISOString(),
     ).lastInsertRowid;
     run(db, 'INSERT INTO schema_version_sources (version_id, source_text) VALUES (?, ?)', versionId, input.text);
-    if (incomplete !== null) run(db, 'INSERT INTO schema_version_incomplete (version_id, incomplete_json) VALUES (?, ?)', versionId, incomplete);
+    saveEvidence(db, versionId, evidence, 'ingest');
     const routineIds = routineObjectIds(db, schemaId);
     for (const obj of [...model.tables, ...model.views, ...model.routines]) linkObject(db, schemaId, versionId, obj, routineIds);
     return { status: 'ok', versionId, versionNo, warnings };
   });
 }
 
-const storedIncomplete = (db: Db, versionId: number): string | null =>
-  one<{ incomplete_json: string }>(db, 'SELECT incomplete_json FROM schema_version_incomplete WHERE version_id = ?', versionId)?.incomplete_json ?? null;
 
 // 번호 카운터를 같은 트랜잭션 안에서 1 올리고 올리기 전 값을 쓴다 (지운 번호를 다시 쓰지 않는다)
 function takeNumber(db: Db, sql: string, id: number): number {

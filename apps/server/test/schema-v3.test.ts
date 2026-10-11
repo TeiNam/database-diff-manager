@@ -7,6 +7,7 @@ import { objectHistory } from '../src/repos/objects';
 import { createUser, findLoginCandidate } from '../src/repos/users';
 import { deleteVersion, getSource, listVersions, loadVersion } from '../src/repos/versions';
 import { ingest } from '../src/services/ingest';
+import { ingestLegacy } from './helpers';
 
 const count = (db: Db, table: string) => one<{ n: number }>(db, `SELECT COUNT(*) AS n FROM ${table}`)!.n;
 const userVersion = (db: Db) => one<{ user_version: number }>(db, 'PRAGMA user_version')!.user_version;
@@ -63,9 +64,9 @@ describe('마이그레이션 003 (001+002 상태에서 올리기)', () => {
     expect(indexes).toEqual(expect.arrayContaining(['ix_sessions_expires', 'ix_sessions_user', 'ix_revisions_history', 'ux_renames', 'ix_renames_target', 'ix_version_objects_revision']));
   });
 
-  it('새 DB 에서도 001→최신(006) 이 적용되고 업로드가 동작한다', () => {
+  it('새 DB 에서도 001→최신(007) 이 적용되고 업로드가 동작한다', () => {
     const db = openDb(':memory:');
-    expect(userVersion(db)).toBe(6);
+    expect(userVersion(db)).toBe(7);
     const userId = createUser(db, { username: 'admin', passwordHash: 'h', role: 'admin' }).id;
     const r = ingest(db, { databaseName: 'db', schemaName: 'app', filename: 'a.sql', text: 'CREATE TABLE `t` (\n  `x` int\n);', userId });
     expect(r).toMatchObject({ status: 'ok', versionNo: 1 });
@@ -77,7 +78,7 @@ describe('마이그레이션 003 (001+002 상태에서 올리기)', () => {
     const db = openDb(':memory:');
     expect(() => applyMigration(db, 99, "-- foreign_keys: off\nINSERT INTO sessions VALUES ('x', 12345, '2099');")).toThrow('외래 키');
     expect(count(db, 'sessions')).toBe(0);
-    expect(userVersion(db)).toBe(6);
+    expect(userVersion(db)).toBe(7);
     expect(one<{ foreign_keys: number }>(db, 'PRAGMA foreign_keys')!.foreign_keys).toBe(1);
     expect(db.isTransaction).toBe(false);
   });
@@ -260,13 +261,13 @@ describe('마이그레이션 005 (rename_mapping_sets)', () => {
     db.exec('PRAGMA foreign_keys = ON');
     migrate(db, 4);
     const userId = createUser(db, { username: 'admin', passwordHash: 'h', role: 'admin' }).id;
-    const up = (text: string) => ingest(db, { databaseName: 'db', schemaName: 'app', filename: 'a.sql', text, userId }).versionId;
+    const up = (text: string) => ingestLegacy(db, { databaseName: 'db', schemaName: 'app', filename: 'a.sql', text, userId }).versionId;
     const a = up(T('int'));
     const b = up(T('bigint'));
     run(db, `INSERT INTO rename_mappings (base_version_id, target_version_id, kind, table_name, old_name, new_name, created_by)
              VALUES (?, ?, 'table', NULL, 'x', 'y', ?)`, a, b, userId);
     migrate(db);
-    expect(userVersion(db)).toBe(6);
+    expect(userVersion(db)).toBe(7);
     expect(all(db, 'SELECT base_version_id AS base, target_version_id AS target FROM rename_mapping_sets')).toEqual([{ base: a, target: b }]);
     deleteVersion(db, b);
     expect(count(db, 'rename_mapping_sets')).toBe(0);

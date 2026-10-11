@@ -6,6 +6,7 @@ import { hashPassword } from '../src/auth/password';
 import type { Config } from '../src/config';
 import { openDb, type Db } from '../src/db/connection';
 import { createUser, type Role } from '../src/repos/users';
+import { ingest } from '../src/services/ingest';
 
 export const PASSWORD = 'password-1234';
 export const CSRF = { 'x-requested-with': 'tdm' };
@@ -69,4 +70,15 @@ export function multipart(fields: Record<string, string>, files: { filename: str
 // DMS 전환 매핑 픽스처 (core 테스트와 공유): mapping.json, as-is.sql, to-be.sql
 export function dmsFixture(name: 'mapping.json' | 'as-is.sql' | 'to-be.sql'): string {
   return readFileSync(fileURLToPath(new URL(`../../../packages/core/test/fixtures/dms/${name}`, import.meta.url)), 'utf8');
+}
+
+// 옛 스키마(user_version < 7)에서 업로드한 것처럼 저장한다: 지금의 ingest 는 완전성 증거(007)를 함께 쓰므로, 그 표를 잠시 만들었다가
+// 지워 옛 앱이 남긴 상태(증거 행 없음)로 되돌린다
+export function ingestLegacy(db: Db, input: Parameters<typeof ingest>[1]): ReturnType<typeof ingest> {
+  db.exec(`CREATE TABLE schema_version_evidence (version_id INTEGER PRIMARY KEY, level TEXT NOT NULL, evidence_json TEXT NOT NULL, judged_by TEXT NOT NULL) STRICT`);
+  try {
+    return ingest(db, input);
+  } finally {
+    db.exec('DROP TABLE schema_version_evidence');
+  }
 }
