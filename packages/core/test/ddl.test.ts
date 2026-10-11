@@ -214,6 +214,26 @@ describe('생성 컬럼 저장 방식 변경', () => {
   });
 });
 
+describe('파티션 키 컬럼 rename·삭제 (5회차 2)', () => {
+  const t = (cols: string, key: string, part: string) => parseSqlDump(`CREATE TABLE \`t\` (\n  \`id\` int NOT NULL,\n${cols},\n  PRIMARY KEY (\`id\`,${key})\n) ENGINE=InnoDB\n/*!50100 ${part} */;`).model;
+
+  it('삭제·REMOVE PARTITIONING 도 같은 ALTER 에 넣는다 (MySQL 8.0/8.4 실측)', () => {
+    const base = t('  `a` int NOT NULL,\n  `b` int NOT NULL', '`a`,`b`', 'PARTITION BY HASH ((`id` + `a`))\nPARTITIONS 2');
+    const [drop] = generateDdl(diffSchemas(base, t('  `b` int NOT NULL', '`b`', 'PARTITION BY HASH (`id`)\nPARTITIONS 2')));
+    expect(drop.sql).toBe('ALTER TABLE `t`\n  DROP PRIMARY KEY,\n  DROP COLUMN `a`,\n  ADD PRIMARY KEY (`id`,`b`)\n  PARTITION BY HASH (`id`)\nPARTITIONS 2');
+    const target = parseSqlDump('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `a2` int NOT NULL,\n  `b` int NOT NULL,\n  PRIMARY KEY (`id`,`a2`,`b`)\n) ENGINE=InnoDB;').model;
+    const stmts = generateDdl(diffSchemas(base, target, [{ kind: 'column', table: 't', from: 'a', to: 'a2' }]));
+    expect(stmts.map((s) => s.sql)).toEqual(['ALTER TABLE `t`\n  RENAME COLUMN `a` TO `a2`\n  REMOVE PARTITIONING']);
+  });
+
+  it('RANGE COLUMNS 의 따옴표 없는 컬럼 이름도 파티션 키로 본다', () => {
+    const part = (c: string) => `PARTITION BY RANGE  COLUMNS(${c})\n(PARTITION p1 VALUES LESS THAN ('2026-01-01') ENGINE = InnoDB,\n PARTITION p2 VALUES LESS THAN (MAXVALUE) ENGINE = InnoDB)`;
+    const stmts = generateDdl(diffSchemas(t('  `d` date NOT NULL', '`d`', part('d')), t('  `d2` date NOT NULL', '`d2`', part('d2')), [{ kind: 'column', table: 't', from: 'd', to: 'd2' }]));
+    expect(stmts).toHaveLength(1);
+    expect(stmts[0].sql).toMatch(/^ALTER TABLE `t`\n {2}RENAME COLUMN `d` TO `d2`\n {2}PARTITION BY RANGE {2}COLUMNS\(d2\)/);
+  });
+});
+
 describe('맞바꾸기 묶음의 이름 충돌 전파', () => {
   const t = (name: string, cols: string) => `CREATE TABLE \`${name}\` (\n  \`id\` int NOT NULL,\n${cols},\n  PRIMARY KEY (\`id\`)\n) ENGINE=InnoDB;`;
   const base = parseSqlDump([t('a', '  `x` int NOT NULL,\n  `payload` varchar(10) NOT NULL'), t('b', '  `x` int NOT NULL,\n  `y` int NOT NULL'),

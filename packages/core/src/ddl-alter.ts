@@ -1,10 +1,10 @@
 // 변경 테이블 하나의 ALTER TABLE 문장들 (스펙 4.6의 5·6단계)
 import { baseColumns, charsetOptions, charsetPlan, type CharsetPlan } from './charset-ddl';
 import type { Change, OptionChange, TableDiff } from './diff';
-import { quoteIdent as q, quoteString } from './lexer';
+import { quoteIdent as q, quoteString, tokenize } from './lexer';
 import type { Column, Index, IndexKind, Table } from './model';
 import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated, indexNote, printable } from './partial-fill';
-import { partitionBodies } from './partition-ddl';
+import { partitionBodies, partitionRedefinition } from './partition-ddl';
 import { printCheck, printColumn, printIndexParts } from './print';
 
 // 문장 본문: sql은 ';' 없음(delimited 제외). comment=true면 '-- ' 주석 줄로만 이루어진다
@@ -65,15 +65,31 @@ export function alterStatements(d: TableDiff): StatementBody[] {
   const main = alterClauses(d, options, plan?.columns ?? new Set());
   const blocked = [...main.missing, ...main.storage, ...main.virtual];
   const out: StatementBody[] = plan?.convert ? [convertBody(d.name, plan.convert, plan.notes, blocked)] : [];
+  // 파티션 함수가 쓰는 컬럼을 rename·삭제하면 파티션 재정의를 같은 ALTER 에 넣어야 한다 (따로 실행하면 error 3855)
+  const keyColumns = main.clauses.length ? partitionKeyChanges(d) : [];
+  const redefinition = keyColumns.length ? partitionRedefinition(d) : undefined;
   if (main.clauses.length) {
-    const sql = alter(d.name, main.clauses);
-    const notes = [...(plan && !plan.convert ? plan.notes : []), ...main.notes];
+    const sql = alter(d.name, main.clauses) + (redefinition ? `\n  ${redefinition}` : '');
+    const notes = [...(plan && !plan.convert ? plan.notes : []), ...(redefinition ? [partitionKeyNote(keyColumns)] : []), ...main.notes];
     const reason = main.missing.length ? generatedReason(d.name, main.missing) : main.storage.length || main.virtual.length ? storageReason(d.name, main.storage, main.virtual) : undefined;
     out.push(reason ? manualBody(reason, sql, notes) : sqlBody(sql, notes));
   }
   out.push(...optionNotes(options).map(commentBody));
+  if (redefinition) return out;
   for (const p of partitionBodies(d)) out.push(p.sql.startsWith('--') ? commentBody(p.sql) : sqlBody(p.sql, p.notes));
   return out;
+}
+
+const partitionKeyNote = (columns: string[]): string =>
+  `파티션 함수가 쓰는 컬럼(${columns.join(', ')})을 바꾸므로 파티션 재정의를 같은 ALTER 에 넣습니다 (따로 실행하면 error 3855)`;
+
+// BASE 파티션 식이 쓰는 컬럼 중 rename·삭제되는 컬럼 (BASE 이름). RANGE COLUMNS(d) 처럼 따옴표 없는 이름도 본다
+function partitionKeyChanges(d: TableDiff): string[] {
+  const expr = d.partition?.from?.expr;
+  if (expr === undefined) return [];
+  const used = new Set(tokenize(expr).filter((t) => t.t === 'ident' || t.t === 'word').map((t) => t.v.toLowerCase()));
+  const changed = d.columns.flatMap((c) => (c.op === 'rename' ? [c.oldName!] : c.op === 'drop' ? [c.name] : []));
+  return changed.filter((n) => used.has(n.toLowerCase()));
 }
 
 // 본 ALTER가 수동 확인 문장이면 앞선 CONVERT TO도 실행하지 않도록 함께 수동 확인으로 돌린다

@@ -1,0 +1,4 @@
+[
+  { "kind": "column", "table": "chat_history", "from": "create_at", "to": "created_at" },
+  { "kind": "column", "table": "chat_history", "from": "update_at", "to": "updated_at" }
+]

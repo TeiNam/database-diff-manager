@@ -60,14 +60,21 @@ export const partitionStatements = (d: TableDiff): string[] => partitionBodies(d
 export const listPartitionStatements = (table: string, a: PartitionDef[], b: PartitionDef[], range = true): string[] =>
   listPartitionBodies(table, a, b, range).map((s) => s.sql);
 
+// 파티션을 통째로 없애거나 다시 정하는 절 (REMOVE PARTITIONING · PARTITION BY …). 파티션 단위 변경이면 undefined
+export function partitionRedefinition(d: TableDiff): string | undefined {
+  const p = d.partition;
+  if (!p) return undefined;
+  if (!p.to) return 'REMOVE PARTITIONING';
+  const isSame = p.from && p.from.method === p.to.method && p.from.expr === p.to.expr && subpartitionKey(p.from) === subpartitionKey(p.to);
+  return isSame ? undefined : p.to.clause;
+}
+
 export function partitionBodies(d: TableDiff): PartitionStatement[] {
   const p = d.partition;
   if (!p) return [];
   const table = q(d.name);
-  if (!p.to) return [{ sql: `ALTER TABLE ${table} REMOVE PARTITIONING` }];
-  if (!p.from || p.from.method !== p.to.method || p.from.expr !== p.to.expr || subpartitionKey(p.from) !== subpartitionKey(p.to)) {
-    return [{ sql: `ALTER TABLE ${table} ${p.to.clause}` }];
-  }
+  const redefinition = partitionRedefinition(d);
+  if (redefinition !== undefined || !p.from || !p.to) return [{ sql: `ALTER TABLE ${table} ${redefinition}` }];
   if (HASH_METHOD_RE.test(p.to.method)) return hashBodies(table, p.from, p.to);
   return listPartitionBodies(table, p.from.partitions, p.to.partitions, p.to.method.startsWith('RANGE'));
 }
