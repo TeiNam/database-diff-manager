@@ -34,6 +34,17 @@ describe('DdlTab', () => {
     await vi.waitFor(() => expect(writeText).toHaveBeenLastCalledWith('-- 전체 DDL\n'));
   });
 
+  it('MD 출처(partial) diff 의 블록 복사에도 [MD 기반] 안내를 붙인다 (11회차 2)', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    const data = { ...(DATA as object), diff: { partial: true, tables: [], views: [] } } as never;
+    mockApi({ '/api/diff?base=11&target=12': data });
+    renderWithProviders(<DdlTab data={data} />, { route: ROUTE, path: '/db/:dbId/schema/:schemaId' });
+    await user.click(within(screen.getByRole('region', { name: '~ TABLE orders' })).getByRole('button', { name: '복사' }));
+    await vi.waitFor(() => expect(writeText).toHaveBeenLastCalledWith(expect.stringMatching(/^-- \[MD 기반\][^\n]*\n\n-- \[~\] TABLE orders\n/)));
+  });
+
   it('방향 전환은 base·target을 바꾸고, 다운로드 파일명은 스키마와 버전으로 만든다', async () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
     // URL 생성자는 유지한 채 객체 URL 함수만 대체한다

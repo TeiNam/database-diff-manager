@@ -45,12 +45,13 @@ function CopyButton({ getText, label = '복사', disabled = false }: { getText: 
 // 파일명에 쓸 수 없는 문자를 '_'로 바꾼다
 const safeFileName = (name: string) => name.replace(/[\\/:*?"<>|\s]/g, '_');
 
-function StatementBlock({ st, refresh }: { st: Statement; refresh: () => Promise<DiffResponse> }) {
+// partial: MD 출처 diff 면 한 문장만 복사해도 전체 DDL 처럼 [MD 기반] 안내를 맨 앞에 붙인다
+function StatementBlock({ st, partial, refresh }: { st: Statement; partial: boolean; refresh: () => Promise<DiffResponse> }) {
   const header = `${MARK[st.op]} ${st.kind.toUpperCase()} ${st.object}`;
-  const text = renderDdl([st]);
+  const text = renderDdl([st], partial);
   const getText = async () => {
     const fresh = await refresh();
-    if (!fresh.statements.some((x) => renderDdl([x]) === text)) throw new StaleStatementError();
+    if (!fresh.statements.some((x) => renderDdl([x], fresh.diff.partial) === text)) throw new StaleStatementError();
     return text;
   };
   return (
@@ -106,7 +107,7 @@ export function DdlTab({ data }: { data: DiffResponse }) {
       {data.statements.length === 0 ? (
         <p className={s.empty}>적용할 DDL이 없습니다</p>
       ) : (
-        data.statements.map((st, i) => <StatementBlock key={i} st={st} refresh={refresh} />)
+        data.statements.map((st, i) => <StatementBlock key={i} st={st} partial={data.diff.partial} refresh={refresh} />)
       )}
     </section>
   );
