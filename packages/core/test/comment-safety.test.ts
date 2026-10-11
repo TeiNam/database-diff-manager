@@ -8,7 +8,7 @@ import { parseSqlDump, splitStatements } from '../src/parse-dump';
 import { commentPart } from './helpers';
 import { cols, ID, info, MD_OK, mdDump, OK_INFO, PRECIOUS } from './injection-fixtures';
 import { parseMdDump } from '../src/parse-md';
-import { isSingleStatement } from '../src/statement-check';
+import { isSingleStatement, UNSAFE_IDENTIFIER_REASON } from '../src/statement-check';
 
 // 개행·CR·블록 주석 끝·문장 끝·백틱·DELIMITER·줄 주석·NUL 을 담은 이름들 (제어 문자는 이스케이프로 만든다)
 const EVIL = [
@@ -80,16 +80,17 @@ describe('주석 주입 방지 (퍼즈)', () => {
     }
   });
 
-  it.each(EVIL.map((n, i) => [n, i] as const))('이름 %j: 실행 문장은 이름을 백틱으로 인용해 한 문장으로 남는다', (name, i) => {
+  // 보수적 이름 규칙(12회차): 위험 글자가 든 이름은 백틱으로 인용해도 실행 문장으로 내보내지 않는다 — 그 이름이 든 문장은 수동 확인
+  it.each(EVIL.map((n, i) => [n, i] as const))('이름 %j: 그 이름이 든 실행 문장은 없고, 남은 실행 문장은 한 문장이다', (name, i) => {
     const { base, target, renames } = schemas(name, i);
-    const stmts = generateDdl(diffSchemas(base, target, renames)).filter((s) => !s.comment);
-    expect(stmts.length).toBeGreaterThan(0);
-    for (const st of stmts) {
+    const stmts = generateDdl(diffSchemas(base, target, renames));
+    expect(stmts.some((s) => s.comment && s.sql.includes(UNSAFE_IDENTIFIER_REASON))).toBe(true);
+    for (const st of stmts.filter((s) => !s.comment)) {
       // mysql 클라이언트처럼 DELIMITER 를 따라 나눈다: SQL_MODE 설정·복원(SET)을 빼면 한 문장
       const parts = splitStatements(statementText(st));
       expect(parts.filter((p) => !/^SET /.test(p.ddl)).length, statementText(st)).toBe(1);
       const idents = parts.flatMap((p) => tokenize(p.ddl).filter((t) => t.t === 'ident').map((t) => t.v));
-      expect(idents.some((v) => v.startsWith(name)), statementText(st)).toBe(true);
+      expect(idents.some((v) => v.startsWith(name)), statementText(st)).toBe(false);
       expect(parts.some((p) => /^DROP TABLE `?precious/i.test(p.ddl))).toBe(false);
     }
   });

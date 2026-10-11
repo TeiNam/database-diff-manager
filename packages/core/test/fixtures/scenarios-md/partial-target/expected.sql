@@ -5,7 +5,7 @@
 -- [MD 기반 미확인] 컬럼 `id`: default
 -- [MD 기반 미확인] 컬럼 `name`: charset, collation, default
 -- [MD 기반 미확인] 인덱스 `PRIMARY`: partDetails, comment
--- [수동 확인 필요] items: 생성 컬럼(`dbl`)의 표현식을 알 수 없습니다. /* 표현식 미상 */를 채운 뒤 실행하세요
+-- [수동 확인 필요] items: 생성 컬럼(`dbl`)의 표현식을 알 수 없습니다. 아래 SQL 의 '표현식 미상' 주석 자리를 채운 뒤 실행하세요
 -- CREATE TABLE `items` (
 --   `id` int NOT NULL,
 --   `name` varchar(30) NOT NULL,

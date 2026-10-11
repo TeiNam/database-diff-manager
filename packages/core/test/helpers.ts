@@ -40,11 +40,22 @@ export function scenarioValues(name: string): ScenarioValues | undefined {
   return hasFixture(rel) ? (JSON.parse(fixture(rel)) as ScenarioValues) : undefined;
 }
 
-// 수동 확인 시나리오 (선택): 생성 DDL 이 실행하지 않아 BASE 그대로 남아야 하는 테이블 (이름순)
-export function scenarioManual(name: string): string[] {
-  const rel = `scenarios/${name}/manual.json`;
-  return hasFixture(rel) ? (JSON.parse(fixture(rel)) as string[]) : [];
+// 수동 확인 시나리오 (선택): 생성 DDL 이 실행하지 않아 BASE 그대로 남아야 하는 객체 (이름순). manual.json 은 테이블 이름 배열이거나
+// { tables, views, routines } 다 (routines 는 '종류 이름')
+export interface ScenarioManual {
+  tables: string[];
+  views: string[];
+  routines: string[];
 }
+
+export function scenarioManualObjects(name: string): ScenarioManual {
+  const rel = `scenarios/${name}/manual.json`;
+  if (!hasFixture(rel)) return { tables: [], views: [], routines: [] };
+  const raw = JSON.parse(fixture(rel)) as string[] | Partial<ScenarioManual>;
+  return Array.isArray(raw) ? { tables: raw, views: [], routines: [] } : { tables: raw.tables ?? [], views: raw.views ?? [], routines: raw.routines ?? [] };
+}
+
+export const scenarioManual = (name: string): string[] => scenarioManualObjects(name).tables;
 
 export function scenario(name: string) {
   const dir = `scenarios/${name}`;

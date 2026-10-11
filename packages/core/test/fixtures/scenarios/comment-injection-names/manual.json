@@ -1,1 +1,1 @@
-["pe\nDROP TABLE precious;"]
+{"tables":["ev\nDROP TABLE precious;","old\n-- x\nDROP TABLE precious","pe\nDROP TABLE precious;"],"views":["v\nDROP TABLE precious;"],"routines":["function fn\nDELIMITER ;\nDROP TABLE precious;"]}

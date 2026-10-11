@@ -18,8 +18,11 @@ const HEX_BIT = /0x[0-9A-Fa-f]+|0b[01]+|[xX]'[0-9A-Fa-f]*'|[bB]'[01]*'/y;
 const ESCAPES: Record<string, string> = { '0': '\0', n: '\n', r: '\r', t: '\t', Z: '\x1a', b: '\b' };
 
 // 문자열 규칙. noBackslashEscapes: SQL_MODE 의 NO_BACKSLASH_ESCAPES (백슬래시를 이스케이프로 보지 않음)
+// discardVersioned: 버전 번호가 붙은 버전 주석(/*!NNNNN …*/)을 그 버전보다 낮은 서버처럼 주석으로 건너뛴다 (첫 '*/' 까지 —
+// 서버는 그 안의 따옴표를 보지 않는다). 번호 없는 '/*!' 는 어느 서버든 실행하므로 그대로 토큰으로 읽는다
 export interface LexMode {
   noBackslashEscapes?: boolean;
+  discardVersioned?: boolean;
 }
 
 export function tokenize(src: string, mode: LexMode = {}): Token[] {
@@ -33,7 +36,7 @@ export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
   while (i < src.length) {
     const c = src[i];
     if (/\s/.test(c)) { i++; continue; }
-    if (src.startsWith('/*!', i)) {
+    if (src.startsWith('/*!', i) && !(mode.discardVersioned === true && DIGIT.test(src[i + 3] ?? ''))) {
       i += 3;
       while (i < src.length && DIGIT.test(src[i])) i++;
       versioned++;

@@ -1,6 +1,7 @@
 // 출력 DDL 에 따옴표 없이 들어가는 입력 값의 화이트리스트 (MD·SQL 덤프 출처 공통, 스펙 4.6 주입 방지).
 // 이름은 quoteIdent, 문자열은 quoteString 으로 인용하므로 여기서는 인용하지 않고 그대로 찍는 값만 본다.
 // 맞지 않으면 UnsafeValueError 를 던진다 — 파서가 그 객체를 parse-error 로 남긴다
+import { scanGaps } from './comment-scan';
 import { LexError, tokenize, type Token } from './lexer';
 
 export class UnsafeValueError extends Error {}
@@ -47,10 +48,12 @@ function hasComment(src: string, toks: Token[]): boolean {
 
 // 식(Default 식, 인덱스 식, 생성 컬럼 식, CHECK 식)과 뷰 본문: 문장 끝(;)·주석·괄호 불균형·클라이언트 명령(DELIMITER, '\\g' 같은
 // 백슬래시 명령)이 있으면 거부한다. 한 식 안에서는 어느 것도 나올 수 없다.
-// allowComments: SHOW CREATE VIEW 본문처럼 주석이 문장 경계를 바꾸지 않는 출처 (최종 단일 문장 검사가 다시 본다)
+// allowComments: SHOW CREATE VIEW 본문처럼 주석이 문장 경계를 바꾸지 않는 출처 (최종 단일 문장 검사가 다시 본다). 그때도 주석은
+// 평평해야 한다 — 주석 안 '/*', hint 안 백슬래시·delimiter 는 mysql 클라이언트의 주석 경계를 바꾼다 (comment-scan, 12회차)
 export function assertExpression(src: string, what: string, opts: { allowComments?: boolean } = {}): string {
   const toks = lex(src, what);
   if (!opts.allowComments && hasComment(src, toks)) return fail(what, src);
+  if (opts.allowComments && !scanGaps(src, toks).safe) return fail(what, src);
   let depth = 0;
   for (const t of toks) {
     if (t.t === 'word' && CLIENT_COMMAND.test(t.v)) return fail(what, src);
