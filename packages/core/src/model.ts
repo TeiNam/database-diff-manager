@@ -147,4 +147,11 @@ export interface SchemaModel {
   views: View[];
   routines: Routine[];
   routinesUnknown?: boolean; // 출처(MD)에 루틴 정보가 없어 루틴을 알 수 없음
+  // 원문이 완전한 td-export 스키마 출력임을 확인하지 못함 (파일 끊김·트레일러 없음·비스키마 문장 등). TARGET 이면 파괴적 문장을 막는다
+  incomplete?: SchemaIncomplete;
+}
+
+export interface SchemaIncomplete {
+  reason: string;
+  objects: string[]; // 정의가 끊겼을 수 있는 객체 (이 객체의 문장은 모두 수동 확인)
 }

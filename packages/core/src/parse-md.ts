@@ -1,6 +1,7 @@
 // td-export Markdown 정의서 → SchemaModel (partial: 일부 속성은 알 수 없음)
+import { hasMdStructure, isClosedSection, mdIncomplete, TABLE_LIST_HEADING } from './completeness';
 import { quoteString, tokenize } from './lexer';
-import type { Column, ForeignKey, Index, IndexField, IndexPart, Table, View } from './model';
+import type { Column, ForeignKey, Index, IndexField, IndexPart, SchemaIncomplete, Table, View } from './model';
 import { normalizeType } from './normalize';
 import type { ParsedDump, ParseWarning } from './parse-dump';
 import { REF_ACTIONS } from './parse-table';
@@ -58,9 +59,11 @@ interface Section {
 export function parseMdDump(text: string): ParsedDump {
   const lines = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').split('\n');
   const realNames = new Map<string, string>(); // 앵커(소문자) → 원래 이름
+  const anchors: string[] = []; // Table List 의 모든 앵커 (섹션 누락 판정)
   for (const l of lines) {
     const m = TABLE_LIST_RE.exec(l);
     const name = m ? listedName(m[1], m[2]) : undefined;
+    if (m) anchors.push(m[2]);
     if (m && name !== undefined) realNames.set(m[2], name);
   }
   const tables: Table[] = [];
@@ -69,7 +72,7 @@ export function parseMdDump(text: string): ParsedDump {
   const secs = sections(lines);
   const format = detectFormat(secs);
   for (const sec of secs) {
-    if (sec.heading === 'Table List') continue;
+    if (sec.heading === TABLE_LIST_HEADING) continue;
     const name = realNames.get(sec.heading) ?? sec.heading;
     try {
       const obj = parseSection(name, sec.body, format);
@@ -84,7 +87,23 @@ export function parseMdDump(text: string): ParsedDump {
       else tables.push({ kind: 'table', columns: [], indexes: [], foreignKeys: [], checks: [], options: [], ...failed });
     }
   }
-  return { model: { name: (lines[0] ?? '').trim(), tables, views, routines: [], routinesUnknown: true }, warnings };
+  const model = { name: (lines[0] ?? '').trim(), tables, views, routines: [], routinesUnknown: true };
+  const incomplete = mdCompleteness(lines, secs, anchors, realNames);
+  if (!incomplete) return { model, warnings };
+  const code = incomplete.structured ? 'incomplete' : 'non-schema';
+  const { structured: _, ...flag } = incomplete;
+  return { model: { ...model, incomplete: flag }, warnings: [...warnings, { code, kind: 'schema', object: model.name, line: lines.length, message: flag.reason }] };
+}
+
+// 구조(제목·Table List)가 없으면 비스키마, Table List 의 섹션 누락·마지막 섹션 미종료는 불완전 (14회차 1)
+function mdCompleteness(lines: string[], secs: Section[], anchors: string[], realNames: Map<string, string>): (SchemaIncomplete & { structured: boolean }) | undefined {
+  const structured = hasMdStructure(lines, secs.map((sec) => sec.heading));
+  const headings = new Set(secs.map((sec) => sec.heading));
+  const missing = anchors.filter((a) => !headings.has(a)).map((a) => realNames.get(a) ?? a);
+  const last = secs.at(-1);
+  const openLast = last && last.heading !== TABLE_LIST_HEADING && !isClosedSection(last.body) ? realNames.get(last.heading) ?? last.heading : undefined;
+  const flag = mdIncomplete({ structured, missing, openLast });
+  return flag && { ...flag, structured };
 }
 
 // '이름 (코멘트)' 에서 이름: 소문자로 바꾸면 앵커와 같아지는 ' (' 앞부분. 맞는 곳이 없으면 첫 ' (' 앞

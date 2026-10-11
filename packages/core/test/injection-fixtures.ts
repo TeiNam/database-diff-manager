@@ -34,7 +34,7 @@ export const MD_VIEW_INJECTIONS: Record<string, string> = {
 
 export function mdDump(sections: Record<string, string>): string {
   const names = Object.keys(sections);
-  return `s\n===\n\n## Table List\n${names.map((n) => `- [${n} ()](#${n})`).join('\n')}\n\n${names.map((n) => `## ${n}\n${sections[n]}`).join('')}`;
+  return `s\n===\n\n## Table List\n${names.map((n) => `- [${n} ()](#${n})`).join('\n')}\n\n${names.map((n) => `## ${n}\n${sections[n]}\n \n`).join('')}`; // 섹션은 td-export 처럼 ' ' 줄로 끝낸다
 }
 
 export const sqlTable = (cols: string, tail = 'ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci') =>

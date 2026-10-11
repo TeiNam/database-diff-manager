@@ -68,6 +68,16 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
         ))}
       </ul>
       {routinesUnknown && <p className={s.notice} role="note">MD 출처라 루틴은 비교하지 않음 — td-export MD 에는 함수·프로시저가 없습니다</p>}
+      {data.diff.targetIncomplete && (
+        <p className={s.notice} role="note">
+          TARGET 이 불완전합니다 ({data.diff.targetIncomplete}) — 객체·컬럼 삭제와 끊긴 객체의 문장은 실행하지 않고 수동 확인으로 돌렸습니다
+        </p>
+      )}
+      {data.baseModel.incomplete && (
+        <p className={s.notice} role="note">
+          BASE 가 불완전합니다 ({data.baseModel.incomplete.reason}) — BASE 에 빠진 객체의 CREATE 가 실제 DB 에서 '이미 존재' 오류로 실패할 수 있습니다
+        </p>
+      )}
       {entries.length === 0 ? (
         <p className={s.empty}>두 버전 사이에 변경 사항이 없습니다</p>
       ) : (

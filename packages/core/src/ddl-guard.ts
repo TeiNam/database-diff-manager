@@ -39,22 +39,29 @@ function guardWith(checked: Statement[], unsafe: Statement[], diff: SchemaDiff, 
   const unsafeOf = (kind: Statement['kind']) => unsafe.filter((st) => st.kind === kind).map((st) => st.object);
   const views = viewConflicts(diff.views, localSchemas(diff), new Set([...blockedNames(diff, tables), ...unparsed.views, ...unsafeOf('view')]), [...unparsed.functions, ...unsafeOf('function')]);
   for (const n of pairs.relations) if (!views.has(n)) views.set(n, { reason: pairReason(n), notes: [PAIR_NOTE] });
-  if (diff.targetIncomplete) for (const v of diff.views) if (v.op === 'drop' && !views.has(v.name)) views.set(v.name, incompleteConflict(diff, v.name));
+  if (diff.targetIncomplete) {
+    for (const v of diff.views) if ((v.op === 'drop' || isSuspect(diff, v.name)) && !views.has(v.name)) views.set(v.name, incompleteConflict(diff, v.name));
+  }
   const out = tables.size || views.size ? guard(checked, tables, views) : checked;
   // 마지막 방어선: 막은 뒤의 문장도 다시 확인한다
   return out.map((st) => {
     if (!isRoutineStatement(st)) return st;
     if (pairs.routines.has(routinePairKey(st))) return toManual(st, pairReason(st.object), [PAIR_NOTE]);
-    if (diff.targetIncomplete && st.op === 'drop') return toManual(st, incompleteConflict(diff, st.object).reason, [INCOMPLETE_NOTE]);
+    if (diff.targetIncomplete && (st.op === 'drop' || isSuspect(diff, st.object))) return toManual(st, incompleteConflict(diff, st.object).reason, [INCOMPLETE_NOTE]);
     return st;
   }).map(singleOrManual);
 }
 
-// 불완전한 TARGET (식별 불가 파싱 실패 문장·객체 0개): 객체 DROP 은 TARGET 이 정말 그 객체를 뺀 것인지 알 수 없어 실행하지 않는다
-const INCOMPLETE_NOTE = 'TARGET 이 불완전하면 객체 삭제(DROP TABLE·VIEW·ROUTINE)를 실행하지 않습니다';
+// 불완전한 TARGET (식별 불가 파싱 실패 문장·객체 0개·원문 판정): 객체 DROP·DROP COLUMN 은 TARGET 이 정말 그것을 뺀 것인지 알 수 없어
+// 실행하지 않는다. 정의가 끊겼을 수 있는 객체(incompleteObjects)는 생성·변경 문장도 실행하지 않는다 (14회차 1)
+const INCOMPLETE_NOTE = 'TARGET 이 불완전하면 객체 삭제(DROP TABLE·VIEW·ROUTINE)·컬럼 삭제와 끊긴 객체의 문장을 실행하지 않습니다';
+const isSuspect = (diff: SchemaDiff, name: string): boolean => Boolean(diff.incompleteObjects?.includes(name));
 const incompleteConflict = (diff: SchemaDiff, name: string): Conflict => (
-  { reason: `${name}: TARGET 이 불완전해 삭제하지 않습니다 (${diff.targetIncomplete}) — TARGET 파일을 확인하세요`, notes: [INCOMPLETE_NOTE] }
+  { reason: `${name}: TARGET 이 불완전해 실행하지 않습니다 (${diff.targetIncomplete}) — TARGET 파일을 확인하세요`, notes: [INCOMPLETE_NOTE] }
 );
+// 불완전한 TARGET 에서 막을 테이블: 삭제·끊긴 객체·컬럼을 지우는 변경
+const incompleteBlocked = (diff: SchemaDiff, d: TableDiff): boolean =>
+  d.op === 'drop' || isSuspect(diff, d.name) || d.columns.some((c) => c.op === 'drop');
 
 function toManual(st: Statement, reason: string, notes: string[] = []): Statement {
   if (st.comment) return st;
@@ -93,7 +100,7 @@ function seedConflicts(diff: SchemaDiff, stmts: Statement[], unsafe: Statement[]
   }
   for (const t of diff.manualTables) addConflict(out, t.table, t.reason, t.note);
   if (diff.targetIncomplete) {
-    for (const d of diff.tables) if (d.op === 'drop') addConflict(out, d.name, incompleteConflict(diff, d.name).reason, INCOMPLETE_NOTE);
+    for (const d of diff.tables) if (incompleteBlocked(diff, d)) addConflict(out, d.name, incompleteConflict(diff, d.name).reason, INCOMPLETE_NOTE);
   }
   // 생성 문장이 수동 확인(주석)인 새 테이블: 이유(파싱 실패, MD 생성식 미상·파싱 실패 등)와 무관하게 CREATE 를 실행하지 않으므로
   // 그 테이블을 참조하는 FK(바뀌는 FK 는 DROP/ADD 를 함께)·읽는 뷰도 막는다. 실제로 만든 문장으로 판정해 이유가 늘어도 빠지지 않는다

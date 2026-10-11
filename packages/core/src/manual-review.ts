@@ -1,7 +1,7 @@
 // 생성 DDL 을 그대로 실행하면 실패하거나 의미가 바뀌는 테이블을 찾는다 (generateDdl 이 그 테이블 문장을 수동 확인으로 바꾼다)
 import { fkAutoNameCollides } from './auto-name';
 import type { TableDiff } from './diff';
-import { quoteIdent as q, quotedIdentifiers } from './lexer';
+import { LexError, quoteIdent as q, quotedIdentifiers, tokenize } from './lexer';
 import type { Index, SchemaModel, Table } from './model';
 
 export interface ManualTable {
@@ -12,7 +12,34 @@ export interface ManualTable {
 
 export function findManualTables(base: SchemaModel, target: SchemaModel, tables: TableDiff[]): ManualTable[] {
   const altered = tables.filter((d) => (d.op === 'modify' || d.op === 'rename') && d.from && d.to);
-  return [...altered.flatMap((d) => [...fkNameCollision(d), ...reusedNameDependents(base, tables, d)]), ...nonStandardFkKeys(target, tables)];
+  return [...altered.flatMap((d) => [...fkNameCollision(d), ...reusedNameDependents(base, tables, d), ...nondeterministicDefaults(d)]), ...nonStandardFkKeys(target, tables)];
+}
+
+// 비결정 함수: 기존 테이블에 이 함수가 든 DEFAULT 식 컬럼을 ADD 하면 binlog 가 켜진 서버(8.4 기본 ROW 포맷 포함)에서
+// error 1674 로 실패한다 (8.4 실측 — uuid·uuid_short·rand·random_bytes·sysdate·user 계열. now()·curdate()·connection_id() 등은 성공).
+// CREATE TABLE·MODIFY·SET DEFAULT 는 해당하지 않는다
+const NONDETERMINISTIC_FUNCTIONS: ReadonlySet<string> = new Set(['uuid', 'uuid_short', 'rand', 'random_bytes', 'sysdate', 'user', 'current_user', 'session_user', 'system_user']);
+
+const callsNondeterministic = (expr: string): string | undefined => {
+  try {
+    return tokenize(expr).find((t) => t.t === 'word' && NONDETERMINISTIC_FUNCTIONS.has(t.v.toLowerCase()))?.v;
+  } catch (e) {
+    if (e instanceof LexError) return undefined;
+    throw e;
+  }
+};
+
+function nondeterministicDefaults(d: TableDiff): ManualTable[] {
+  const hits = d.columns.flatMap((c) => {
+    const fn = c.op === 'add' && c.to?.default?.startsWith('(') ? callsNondeterministic(c.to.default) : undefined;
+    return fn === undefined ? [] : [`${c.name}(${fn.toLowerCase()})`];
+  });
+  if (!hits.length) return [];
+  return [{
+    table: d.name,
+    reason: `${d.name}: 비결정 함수 DEFAULT 식 컬럼(${hits.join(', ')})을 기존 테이블에 추가하면 binlog 가 켜진 서버에서 error 1674 로 실패합니다 — 컬럼을 DEFAULT 없이 추가하고 값을 채운 뒤 ALTER COLUMN … SET DEFAULT 로 바꾸는 등 직접 작성하세요`,
+    note: '비결정 함수(uuid·rand·sysdate·user 등) DEFAULT 식은 ADD COLUMN 때 행마다 다른 값이 되어 복제에 안전하지 않습니다 (error 1674)',
+  }];
 }
 
 function fkNameCollision(d: TableDiff): ManualTable[] {

@@ -25,7 +25,8 @@ describe.each(MD_SCENARIOS)('골든(MD TARGET): %s', (name) => {
 
 const MD_HEAD = '# s\n\n## Table List\n- [t ()](#t)\n\n## t\n**Information**\n|Table type|Engine|Row format|Collate|Comment|\n|---|---|---|---|---|\n' +
   '|BASE TABLE|InnoDB|Dynamic|utf8mb4_0900_ai_ci||\n\n**Columns**\n|Name|Type|Nullable|Default|Charset|Collation|Key|Extra|Comment|\n|---|---|---|---|---|---|---|---|---|\n';
-const mdTable = (rows: string) => parseMdDump(MD_HEAD + rows).model;
+const MD_END = '\n \n'; // td-export 섹션 끝 줄 (없으면 끊긴 MD 로 본다)
+const mdTable = (rows: string) => parseMdDump(MD_HEAD + rows + MD_END).model;
 const sqlTable = (cols: string) =>
   parseSqlDump(`CREATE TABLE \`t\` (\n${cols}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`).model;
 
@@ -113,7 +114,7 @@ describe('generateDdl: 테이블 문자셋 변경', () => {
 
   it('본 ALTER가 수동 확인이면 CONVERT도 수동 확인', () => {
     const base = sqlTable('  `a` int NOT NULL');
-    const md = (MD_HEAD + '|a|int|NO|||||||\n|v|int|YES|||||VIRTUAL GENERATED||\n').replace('|utf8mb4_0900_ai_ci||', '|utf8mb4_unicode_ci||');
+    const md = (MD_HEAD + '|a|int|NO|||||||\n|v|int|YES|||||VIRTUAL GENERATED||\n' + MD_END).replace('|utf8mb4_0900_ai_ci||', '|utf8mb4_unicode_ci||');
     const stmts = generateDdl(diffSchemas(base, parseMdDump(md).model));
     expect(stmts.map((s) => [s.comment, s.sql.split('\n')[1]])).toEqual([
       [true, '-- ALTER TABLE `t` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci'],
@@ -495,6 +496,13 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     const sqls = (object: string) => cardOf('card-parent-child-drop', 'table', object).statements.map((s) => s.sql.split('\n').join(' '));
     expect(sqls('p')).toEqual(['ALTER TABLE `p`   ADD COLUMN `memo` varchar(50) DEFAULT NULL']);
     expect(sqls('q')).toEqual(['ALTER TABLE `d`   DROP FOREIGN KEY `fk_d_q`', 'ALTER TABLE `q`   MODIFY COLUMN `id` bigint NOT NULL']);
+  });
+
+  it('FK 를 유지하는 부모 변경(참조 컬럼 rename·COMMENT·DEFAULT·위치)은 자식 FK 해제를 넣지 않고, 타입 변경만 넣는다 (14회차 2, 8.4 실측)', () => {
+    const sqls = (object: string) => cardOf('card-parent-rename-keep-fk', 'table', object).statements.map((s) => s.sql.split('\n').join(' '));
+    expect(sqls('p')).toEqual(['ALTER TABLE `p`   RENAME COLUMN `id` TO `new_id`']);
+    expect(sqls('q')).toEqual(["ALTER TABLE `q`   MODIFY COLUMN `id` int NOT NULL DEFAULT '0' COMMENT '키' AFTER `name`"]);
+    expect(sqls('r')).toEqual(['ALTER TABLE `e`   DROP FOREIGN KEY `fk_e_r`', 'ALTER TABLE `r`   MODIFY COLUMN `id` bigint NOT NULL']);
   });
 
   it('의존 매칭은 문장의 object 와 related 이름 모두를 본다: 맞바꾸기 뒤 coupon 을 읽는 새 뷰 카드는 묶음 RENAME 을 넣는다 (13회차 3)', () => {

@@ -95,7 +95,7 @@ describe('FK 자동 이름 보정이 다른 FK 이름과 겹칠 때 (4회차 5)'
 describe('MD 출처 CHECK 안내 (4회차 6)', () => {
   const md = '# s\n\n## Table List\n- [t ()](#t)\n\n## t\n**Information**\n|Table type|Engine|Row format|Collate|Comment|\n|---|---|---|---|---|\n'
     + '|BASE TABLE|InnoDB|Dynamic|utf8mb4_0900_ai_ci||\n\n**Columns**\n|Name|Type|Nullable|Default|Charset|Collation|Key|Extra|Comment|\n|---|---|---|---|---|---|---|---|---|\n'
-    + '|id|int|NO||||PRI|||\n|b|int|NO||||||\n';
+    + '|id|int|NO||||PRI|||\n|b|int|NO||||||\n\n \n';
   const base = dump(tbl('t', '  `id` int NOT NULL,\n  `a` int NOT NULL,\n  PRIMARY KEY (`id`)'));
 
   it('컬럼 rename 이 있으면 CHECK 오류 3959 가능성을 한 줄 덧붙인다', () => {
@@ -270,5 +270,29 @@ describe('불완전한 TARGET 의 객체 삭제 차단 (13회차 1)', () => {
     const d = diffSchemas(base, dump(customers));
     expect(d.targetIncomplete).toBeUndefined();
     expect(drops(generateDdl(d)).filter((s) => !s.comment).map((s) => s.object).sort()).toEqual(['f', 'orders', 'orders', 'v']);
+  });
+});
+
+describe('비결정 DEFAULT 식 ADD COLUMN (14회차 3, 8.4 binlog ROW 실측 error 1674)', () => {
+  const base = dump(tbl('t', '  `id` int NOT NULL,\n  PRIMARY KEY (`id`)'));
+  const withColumn = (col: string) => dump(tbl('t', `  \`id\` int NOT NULL,\n${col},\n  PRIMARY KEY (\`id\`)`));
+
+  it.each([
+    '  `u` binary(16) DEFAULT (uuid_to_bin(uuid()))',
+    '  `r` double DEFAULT (rand())',
+    '  `s` datetime DEFAULT (sysdate())',
+    '  `w` varchar(90) DEFAULT (current_user())',
+    "  `c` varchar(90) DEFAULT (concat(_utf8mb4'x',uuid_short()))",
+  ])('%s: 기존 테이블에 ADD 하면 수동 확인', (col) => {
+    const stmts = generateDdl(diffSchemas(base, withColumn(col)));
+    expect(runnable(stmts, ['t'])).toEqual([]);
+    expect(stmts[0].sql).toContain('1674');
+  });
+
+  it('결정적 식(now()·식)·MODIFY 로 바꾸는 DEFAULT·새 테이블 CREATE 는 그대로 실행한다', () => {
+    expect(runnable(generateDdl(diffSchemas(base, withColumn('  `n` datetime DEFAULT (now())'))), ['t'])).toHaveLength(1);
+    const withU = (def: string) => dump(tbl('t', `  \`id\` int NOT NULL,\n  \`u\` binary(16) ${def},\n  PRIMARY KEY (\`id\`)`));
+    expect(runnable(generateDdl(diffSchemas(withU('DEFAULT NULL'), withU('DEFAULT (uuid_to_bin(uuid()))'))), ['t'])).toHaveLength(1);
+    expect(runnable(generateDdl(diffSchemas(dump(), withColumn('  `u` binary(16) DEFAULT (uuid_to_bin(uuid()))'))), ['t'])).toHaveLength(1);
   });
 });
