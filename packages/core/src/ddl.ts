@@ -166,8 +166,10 @@ function createRoutine(r: Routine): StatementBody {
 }
 
 // partial 출처 테이블은 알 수 없는 속성을 안내하고, 생성 컬럼 표현식을 모르면 수동 확인으로 돌린다
+// 파싱 실패 테이블은 출처와 무관하게 실행하지 않는다 (SQL 출처는 원문을 주석으로 보여 준다). 의존 문장 전파는 ddl-guard 가 한다
 function createTable(t: Table): StatementBody {
   if (t.parseError && t.fidelity === 'partial') return commentBody(`-- [수동 확인 필요] ${t.name}: 파싱할 수 없는 MD 정의입니다. 원문을 확인하세요`);
+  if (t.parseError) return manualBody(`${t.name}: 파싱할 수 없는 테이블 정의입니다 — 원문을 확인해 직접 실행하세요`, printTable(t));
   const columns = t.columns.map((c) => fillColumn(c));
   const indexes = t.indexes.map((i) => fillIndex(i));
   const notes = [tableNote(t), ...columns.map(columnNote), ...indexes.map(indexNote)].filter((n): n is string => n !== undefined);

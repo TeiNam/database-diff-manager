@@ -181,3 +181,33 @@ describe('FK 가 참조하는 부모 UNIQUE 교체 (8회차 5, 8.4 restrict_fk_o
     expect(blocked('UNIQUE KEY `uq` (`code`)', 'KEY `uq` (`code`)', noFk)).toBe(false);
   });
 });
+
+describe('파싱 실패 객체는 출처와 무관하게 수동 확인, 의존 문장에도 전파 (9회차 6)', () => {
+  const peTable = tbl('pe', "  `id` int NOT NULL,\n  `a` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix` (`a`) /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"y\": 2}' */");
+  const view = (name: string, body: string) => `CREATE ALGORITHM=UNDEFINED DEFINER=\`root\`@\`%\` SQL SECURITY DEFINER VIEW \`${name}\` AS ${body};`;
+
+  it('SQL 출처의 파싱 실패 새 테이블 CREATE 는 주석 처리한 수동 확인, 그 테이블을 읽는 뷰·참조하는 FK 도 막는다', () => {
+    const base = dump(tbl('m', '  `id` int NOT NULL,\n  PRIMARY KEY (`id`)'));
+    const target = dump(tbl('m', '  `id` int NOT NULL,\n  PRIMARY KEY (`id`)'), peTable,
+      tbl('c', '  `id` int NOT NULL,\n  `pe_id` int NOT NULL,\n  KEY `fk_c_pe` (`pe_id`),\n  CONSTRAINT `fk_c_pe` FOREIGN KEY (`pe_id`) REFERENCES `pe` (`id`)'),
+      view('v', 'select `pe`.`id` AS `id` from `pe`'), view('w', 'select `m`.`id` AS `id` from `m`'));
+    const stmts = generateDdl(diffSchemas(base, target));
+    expect(runnable(stmts, ['pe', 'c'])).toEqual([]);
+    const pe = stmts.find((s) => s.object === 'pe')!;
+    expect(pe.sql).toMatch(/^-- \[수동 확인 필요\] pe: /);
+    expect(pe.sql).toContain('-- CREATE TABLE `pe` (');
+    expect(stmts.filter((s) => s.kind === 'view').map((s) => [s.object, s.comment])).toEqual([['v', true], ['w', false]]);
+  });
+
+  it('파싱 실패 새 함수를 부르는 뷰, 파싱 실패 뷰를 읽는 뷰도 막는다', () => {
+    const fn = 'CREATE DEFINER=`root`@`%` FUNCTION `f` RETURNS int RETURN 1';
+    const base = dump(tbl('m', '  `id` int NOT NULL'));
+    const target = dump(tbl('m', '  `id` int NOT NULL'), `DELIMITER ;;\n${fn};;\nDELIMITER ;`,
+      view('calls', 'select `f`() AS `x`'), 'CREATE VIEW `bad` ???;', view('reads_bad', 'select `bad`.`x` AS `x` from `bad`'));
+    const parsed = diffSchemas(base, target);
+    expect(parsed.routines.map((r) => [r.name, Boolean(r.to?.parseError)])).toEqual([['f', true]]);
+    const stmts = generateDdl(parsed);
+    const views = Object.fromEntries(stmts.filter((s) => s.kind === 'view').map((s) => [s.object, s.comment]));
+    expect(views).toEqual({ bad: true, calls: true, reads_bad: true });
+  });
+});
