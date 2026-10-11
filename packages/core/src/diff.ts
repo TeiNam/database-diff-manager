@@ -125,7 +125,7 @@ export function diffTable(b: Table, t: Table, renames: RenameMapping[] = []): Ta
   if (b.parseError || t.parseError) return { ...base, unparsed: printTable(b) !== printTable(t) };
   const skipped = new Set<string>();
   const columns = matchByName(b.columns, t.columns, mappingOf(renames, 'column', t.name), (x, y) =>
-    fieldDiff(withImpliedCharset(x), withImpliedCharset(y), COLUMN_FIELDS, skipped, 'column.'), overlapOf(renames, t.name),
+    columnFields(withImpliedCharset(x), withImpliedCharset(y), skipped), overlapOf(renames, t.name),
   );
   const baseOrder = columns.pairs.map(([, y]) => y.name);
   const targetOrder = t.columns.map((c) => c.name).filter((n) => baseOrder.includes(n));
@@ -247,6 +247,15 @@ function fieldDiff<T extends object>(
     }
     return !eq(f, a[f], b[f]);
   });
+}
+
+// 생성식을 모르는 쪽(MD)이 있어도 생성 여부·저장 방식(VIRTUAL/STORED)은 비교한다. 표현식만 skipped 로 남긴다
+function columnFields(a: Column, b: Column, skipped: Set<string>): string[] {
+  const fields = fieldDiff(a, b, COLUMN_FIELDS, skipped, 'column.');
+  const isPartial = a.unknown?.includes('generated') || b.unknown?.includes('generated');
+  const storage = (c: Column) => (c.generated ? (c.generated.stored ? 'STORED' : 'VIRTUAL') : '');
+  if (!isPartial || storage(a) === storage(b)) return fields;
+  return COLUMN_FIELDS.filter((f) => f === 'generated' || fields.includes(f));
 }
 
 function indexFields(a: Index, b: Index, skipped: Set<string>): string[] {

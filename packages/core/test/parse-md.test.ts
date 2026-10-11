@@ -292,3 +292,47 @@ describe('parseMdDump: 셀 끝 백슬래시·식별자 백슬래시·Normal↔Fu
   });
 });
 
+
+// 같은 DB(tdm_md)를 td-export 0.1.36 / 0.1.52 로 뽑은 SQL·MD: 공백 테이블명, 백슬래시·서식 문자, 생성 컬럼
+describe.each(['0136', '0152'])('td-export %s 이스케이프 샘플', (v) => {
+  const sql = parseSqlDump(fixture(`td-export-${v}/escapes.sql`)).model;
+  const md = parseMdDump(fixture(`td-export-${v}/escapes.md`)).model;
+  const esc = md.tables.find((t) => t.name === 'esc')!;
+  const c = (name: string) => esc.columns.find((x) => x.name === name)!;
+
+  it('같은 DB 의 SQL 과 비교하면 변경이 없다', () => {
+    expect(diffSchemas(sql, md).tables.map((t) => [t.op, t.name])).toEqual([]);
+  });
+
+  it('공백이 든 테이블명을 원문 그대로 읽는다', () => {
+    expect(md.tables.map((t) => t.name)).toEqual(['esc', 'Order Items']);
+    expect(md.tables[1].options.find((o) => o.key === 'COMMENT')?.value).toBe("'a * b <i>x</i>'");
+  });
+
+  it('셀 이스케이프를 풀고 SQL 리터럴로 해석한다', () => {
+    expect(c('path').default).toBe("'C:\\\\temp'");
+    expect(c('star').comment).toBe('see [doc](http://e.x) `code` <b>');
+    expect(esc.indexes.map((i) => i.name)).toEqual(['PRIMARY', 'fx', 'ix*1']);
+  });
+
+  it("생성식 안의 'invisible' 은 INVISIBLE 속성이 아니다", () => {
+    expect([c('g1').invisible, c('g2').invisible, c('hid').invisible]).toEqual([false, true, true]);
+  });
+});
+
+describe('MD 생성 컬럼 저장 방식', () => {
+  const sql = parseSqlDump(fixture('td-export-0152/escapes.sql')).model;
+  const md = (from: string, to: string) => parseMdDump(fixture('td-export-0152/escapes.md').replace(from, to)).model;
+
+  it('VIRTUAL → STORED 변경은 generated 변경으로 나오고 표현식은 미확인으로 남는다', () => {
+    const d = diffSchemas(sql, md('|VIRTUAL GENERATED concat', '|STORED GENERATED concat'));
+    const [t] = d.tables;
+    expect(t.columns.map((x) => [x.name, x.fields])).toEqual([['g1', ['generated']]]);
+    expect(t.skipped).toContain('column.generated');
+  });
+
+  it('생성 컬럼이 일반 컬럼이 되면 generated 변경이다', () => {
+    const d = diffSchemas(sql, md('|STORED GENERATED INVISIBLE (\\`id\\` \\* 2)|', '|INVISIBLE|'));
+    expect(d.tables[0].columns.map((x) => [x.name, x.fields])).toEqual([['g2', ['generated']]]);
+  });
+});

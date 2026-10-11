@@ -172,3 +172,12 @@ describe('뷰 DEFINER 안내', () => {
     for (const v of views) expect(v.notes).toEqual(['DEFINER 없이 생성합니다 — 실행한 사용자가 DEFINER 가 됩니다']);
   });
 });
+
+describe('생성 컬럼 저장 방식 변경', () => {
+  it('VIRTUAL ↔ STORED 는 MODIFY 로 바꿀 수 없어 수동 확인 문장으로 낸다', () => {
+    const t = (kind: string) => parseSqlDump(`CREATE TABLE \`t\` (\n  \`a\` int NOT NULL,\n  \`g\` int GENERATED ALWAYS AS ((\`a\` * 2)) ${kind}\n) ENGINE=InnoDB;`).model;
+    const [st] = generateDdl(diffSchemas(t('VIRTUAL'), t('STORED')));
+    expect(st.comment).toBe(true);
+    expect(st.sql).toContain('-- [수동 확인 필요] t: 생성 컬럼(`g`)의 VIRTUAL↔STORED 변경은 MODIFY 로 할 수 없습니다');
+  });
+});
