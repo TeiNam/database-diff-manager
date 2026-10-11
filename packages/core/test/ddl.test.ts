@@ -93,6 +93,23 @@ describe('generateDdl: 테이블 문자셋 변경', () => {
     expect(s.notes).toBeUndefined();
   });
 
+  it('CONVERT 로 키 한도를 넘는 인덱스는 같은 ALTER 에서 CONVERT 앞에 DROP, 뒤에 ADD (8회차 4)', () => {
+    const base = charsetTable('  `a` varchar(1000) NOT NULL,\n  KEY `ix` (`a`)', 'DEFAULT CHARSET=latin1');
+    const target = charsetTable('  `a` varchar(1000) NOT NULL,\n  KEY `ix` (`a`(191))', UTF8MB4);
+    expect(generateDdl(diffSchemas(base, target)).map((s) => s.sql)).toEqual([
+      'ALTER TABLE `t`\n  DROP INDEX `ix`,\n  CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci,\n  ADD INDEX `ix` (`a`(191))',
+    ]);
+  });
+
+  it('새·바뀌는 컬럼을 쓰는 인덱스가 있으면 인덱스 절을 옮기지 않는다 (8회차 4)', () => {
+    const base = charsetTable('  `a` varchar(10) NOT NULL,\n  KEY `ix` (`a`)', 'DEFAULT CHARSET=latin1');
+    const target = charsetTable('  `a` varchar(10) NOT NULL,\n  `b` int NOT NULL,\n  KEY `ix` (`a`,`b`)', UTF8MB4);
+    expect(generateDdl(diffSchemas(base, target)).map((s) => s.sql)).toEqual([
+      'ALTER TABLE `t` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci',
+      'ALTER TABLE `t`\n  DROP INDEX `ix`,\n  ADD COLUMN `b` int NOT NULL,\n  ADD INDEX `ix` (`a`,`b`)',
+    ]);
+  });
+
   it('본 ALTER가 수동 확인이면 CONVERT도 수동 확인', () => {
     const base = sqlTable('  `a` int NOT NULL');
     const md = (MD_HEAD + '|a|int|NO|||||||\n|v|int|YES|||||VIRTUAL GENERATED||\n').replace('|utf8mb4_0900_ai_ci||', '|utf8mb4_unicode_ci||');
@@ -386,6 +403,34 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     const { statements, dependencies } = cardOf('routines', 'view', 'order_net');
     expect(dependencies).toContain('net');
     expect(statements.at(-1)?.object).toBe('order_net');
+  });
+
+  it('같은 이름을 다른 종류로 바꾸면 카드에 옛 객체 삭제를 넣는다: 테이블→뷰, 뷰→테이블, 뷰 삭제 + rename into (8회차 1)', () => {
+    const sqls = (name: string, kind: 'table' | 'view') => cardOf(name, kind, 'x').statements.map((s) => s.sql.split('\n')[0]);
+    expect(sqls('table-to-view', 'view')).toEqual(['DROP TABLE `x`', expect.stringMatching(/^CREATE OR REPLACE .* VIEW `x`/)]);
+    expect(sqls('view-to-table', 'table')).toEqual(['DROP VIEW `x`', 'CREATE TABLE `x` (']);
+    expect(sqls('view-drop-rename-into', 'table')).toEqual(['DROP VIEW `x`', 'RENAME TABLE `y` TO `x`']);
+    // 반대 방향 카드는 새 객체 문장을 끌어오지 않는다
+    expect(cardOf('table-to-view', 'table', 'x').statements.map((s) => s.sql)).toEqual(['DROP TABLE `x`']);
+  });
+
+  it('이름을 비우는 테이블 rename 도 그 이름을 차지하는 뷰 카드에 넣는다 (8회차 1)', () => {
+    const base = parseSqlDump('CREATE TABLE `x` (\n  `a` int NOT NULL\n) ENGINE=InnoDB;').model;
+    const target = parseSqlDump('CREATE TABLE `z` (\n  `a` int NOT NULL\n) ENGINE=InnoDB;\nCREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `x` AS select 1 AS `a`;').model;
+    const stmts = generateDdl(diffSchemas(base, target, [{ kind: 'table', from: 'x', to: 'z' }]));
+    expect(objectStatements(stmts, 'view', 'x').statements.map((s) => s.sql.split('\n')[0])).toEqual(['RENAME TABLE `x` TO `z`', expect.stringMatching(/VIEW `x`/)]);
+  });
+
+  it('뷰 의존은 FROM/JOIN 테이블과 함수 호출만: 별칭·컬럼명·문자열의 같은 이름은 빼고 실제 참조는 넣는다 (8회차 2)', () => {
+    const table = (name: string, cols: string) => `CREATE TABLE \`${name}\` (\n${cols}\n) ENGINE=InnoDB;\n`;
+    const view = (body: string) => `CREATE ALGORITHM=UNDEFINED DEFINER=\`root\`@\`%\` SQL SECURITY DEFINER VIEW \`report\` AS ${body};`;
+    const base = parseSqlDump(table('chat_log', '  `a` int NOT NULL,\n  `b` int') + table('t', '  `chat_log` int') + view('select 1 AS `a`')).model;
+    const body = "select 1 AS `chat_log`,`t`.`chat_log` AS `c`,'`chat_log`' AS `s` from `t` /* `chat_log` */";
+    const target = parseSqlDump(table('chat_log', '  `a` int NOT NULL') + table('t', '  `chat_log` int,\n  `d` int') + view(body)).model;
+    const stmts = generateDdl(diffSchemas(base, target));
+    const { dependencies, statements } = objectStatements(stmts, 'view', 'report');
+    expect(dependencies).toEqual(['t']);
+    expect(statements.some((s) => s.sql.includes('DROP COLUMN'))).toBe(false);
   });
 
   it('의존이 없으면 자기 문장만', () => {

@@ -60,37 +60,57 @@ const storageOf = (c: Column) => (c.generated ? (c.generated.stored ? 'STORED' :
 
 export function alterStatements(d: TableDiff): StatementBody[] {
   if (d.unparsed) return [commentBody(`-- [수동 확인 필요] ${d.name}: 파싱할 수 없는 DDL이 변경되었습니다. 원문을 비교하세요`)];
-  const { plan, options } = planOptions(d);
-  const main = alterClauses(d, options, plan?.columns ?? new Set());
-  return alterBodies(d, plan, options, main);
+  const planned = planOptions(d);
+  const main = alterClauses(d, planned);
+  return alterBodies(d, planned, main);
 }
 
 // 행 저장 형식 옵션: 인덱스 키 길이 한도(COMPACT 767바이트)를 정하므로 CONVERT TO 와 같은 ALTER 에 넣는다.
 // 따로 실행하면 어느 순서든 한쪽 방향에서 실패한다 (COMPACT→DYNAMIC+utf8mb4 는 CONVERT 먼저 error 3886, 반대는 ROW_FORMAT 먼저 1071 — 8.0/8.4 실측)
 const LAYOUT_KEYS = new Set(['ROW_FORMAT', 'KEY_BLOCK_SIZE']);
 
-// 문자셋 계획과 본 ALTER 에 들어갈 옵션. CONVERT 가 있으면 행 저장 형식 옵션은 CONVERT 문장으로 옮긴다
-function planOptions(d: TableDiff): { plan: CharsetPlan | undefined; options: OptionChange[] } {
+interface Planned {
+  plan: CharsetPlan | undefined;
+  options: OptionChange[]; // 본 ALTER 에 들어갈 옵션
+  convert: string[]; // CONVERT 문장의 절 (CONVERT TO …, 행 저장 형식 옵션). CONVERT 가 없으면 빈 배열
+  moved: Set<Change<Index>>; // CONVERT 문장으로 옮긴 인덱스 변경 (DROP 은 CONVERT 앞, ADD 는 뒤)
+}
+
+// 문자셋 계획과 본 ALTER 에 들어갈 옵션. CONVERT 가 있으면 행 저장 형식 옵션과 키 길이에 걸리는 인덱스 변경은 CONVERT 문장으로 옮긴다
+function planOptions(d: TableDiff): Planned {
   const plan = charsetPlan(d);
   const options = charsetOptions(d.options, plan);
-  if (!plan?.convert) return { plan, options };
-  const layout = optionClauses(options.filter((o) => LAYOUT_KEYS.has(o.key)));
-  if (!layout.length) return { plan, options };
-  return { plan: { ...plan, convert: [plan.convert, ...layout].join(', ') }, options: options.filter((o) => !LAYOUT_KEYS.has(o.key)) };
+  if (!plan?.convert) return { plan, options, convert: [], moved: new Set() };
+  const layout = options.filter((o) => LAYOUT_KEYS.has(o.key));
+  return { plan, options: options.filter((o) => !LAYOUT_KEYS.has(o.key)), convert: [plan.convert, ...optionClauses(layout)], moved: convertIndexMoves(d, plan) };
+}
+
+// CONVERT 가 문자 길이를 늘려 BASE 인덱스가 키 한도(3072바이트)를 넘으면 CONVERT 가 error 1071 로 실패한다 (latin1 varchar(1000)
+// 전체 인덱스 → utf8mb4 + 191 prefix). 같은 ALTER 에 DROP INDEX → CONVERT → ADD INDEX 로 넣으면 성공한다 (8.4 실측).
+// 지우거나 다시 만드는 인덱스가 있을 때, 추가할 인덱스가 모두 바뀌지 않는 BASE 컬럼만 쓰면 인덱스 변경 전체를 옮긴다
+// (새·바뀌는 컬럼은 본 ALTER 에서 정의되므로 옮길 수 없고, 일부만 옮기면 FK 가 쓰는 인덱스 교체가 error 1553 으로 실패할 수 있다)
+function convertIndexMoves(d: TableDiff, plan: CharsetPlan): Set<Change<Index>> {
+  const removes = d.indexes.filter((i) => i.op === 'drop' || rebuildsIndex(i));
+  if (!removes.length || !d.from) return new Set();
+  const adds = d.indexes.filter((i) => i.op === 'add' || rebuildsIndex(i));
+  const baseCols = new Set(d.from.columns.map((c) => c.name));
+  const changed = new Set([...d.columns.map((c) => c.name), ...plan.columns]);
+  const stable = (i: Change<Index>) => i.to!.parts.every((p) => p.expr === undefined && p.column !== undefined && baseCols.has(p.column) && !changed.has(p.column));
+  return adds.every(stable) ? new Set([...removes, ...adds]) : new Set();
 }
 
 // 본 ALTER 가 수동 확인 문장이 되는지 (파싱 실패, 생성식 미상, VIRTUAL↔STORED·일반↔VIRTUAL). 그 ALTER 가 만들 컬럼·인덱스를
 // 다른 테이블의 FK·뷰가 쓸 수 있으므로 ddl-guard 가 전파 시드로 쓴다
 export function isAlterBlocked(d: TableDiff): boolean {
   if (d.unparsed) return true;
-  const { plan, options } = planOptions(d);
-  const main = alterClauses(d, options, plan?.columns ?? new Set());
+  const main = alterClauses(d, planOptions(d));
   return main.clauses.length > 0 && main.missing.length + main.storage.length + main.virtual.length > 0;
 }
 
-function alterBodies(d: TableDiff, plan: CharsetPlan | undefined, options: OptionChange[], main: Collected): StatementBody[] {
+function alterBodies(d: TableDiff, planned: Planned, main: Collected): StatementBody[] {
+  const { plan, options } = planned;
   const blocked = [...main.missing, ...main.storage, ...main.virtual];
-  const out: StatementBody[] = plan?.convert ? [convertBody(d.name, plan.convert, plan.notes, blocked)] : [];
+  const out: StatementBody[] = planned.convert.length ? [convertBody(d, planned, blocked)] : [];
   // 파티션 함수가 쓰는 컬럼을 rename·삭제하면 파티션 재정의를 같은 ALTER 에 넣어야 한다 (따로 실행하면 error 3855)
   const keyColumns = main.clauses.length ? partitionKeyChanges(d) : [];
   const redefinition = keyColumns.length ? partitionRedefinition(d) : undefined;
@@ -118,20 +138,31 @@ function partitionKeyChanges(d: TableDiff): string[] {
   return changed.filter((n) => used.has(n.toLowerCase()));
 }
 
+// CONVERT 문장. 옮긴 인덱스 변경이 있으면 DROP → CONVERT → ADD 로 한 ALTER 에 넣는다.
 // 본 ALTER가 수동 확인 문장이면 앞선 CONVERT TO도 실행하지 않도록 함께 수동 확인으로 돌린다
-function convertBody(table: string, sql: string, notes: string[], missing: string[]): StatementBody {
+function convertBody(d: TableDiff, planned: Planned, missing: string[]): StatementBody {
+  const moved = d.indexes.filter((i) => planned.moved.has(i));
+  const notes = [...planned.plan!.notes];
+  const adds = moved.filter((i) => i.op !== 'drop').map((i) => {
+    const idx = fillIndex(i.to!, i.op === 'add' ? undefined : i.from);
+    pushNote(notes, indexNote(idx));
+    return addIndex(idx);
+  });
+  const drops = moved.filter((i) => i.op !== 'add').map((i) => dropIndex(i.oldName ?? i.name, i.from!.kind));
+  const sql = moved.length ? alter(d.name, [...drops, ...planned.convert, ...adds]) : `ALTER TABLE ${q(d.name)} ${planned.convert.join(', ')}`;
   if (!missing.length) return sqlBody(sql, notes);
-  return manualBody(`${table}: 이어지는 ALTER가 수동 확인 문장이므로 함께 확인한 뒤 실행하세요`, sql, notes);
+  return manualBody(`${d.name}: 이어지는 ALTER가 수동 확인 문장이므로 함께 확인한 뒤 실행하세요`, sql, notes);
 }
 
 // 절 순서: 삭제(CHECK·인덱스·컬럼) → 컬럼 추가·변경(TARGET 순서) → 인덱스 추가·rename·가시성 → CHECK 추가 → 옵션
-function alterClauses(d: TableDiff, options: OptionChange[], forced: CharsetPlan['columns']): Collected {
+function alterClauses(d: TableDiff, planned: Planned): Collected {
   const out: Collected = { clauses: [], notes: [], missing: [], storage: [], virtual: [] };
+  const indexes = d.indexes.filter((i) => !planned.moved.has(i));
   for (const c of d.checks) if (c.op === 'drop' || c.op === 'modify') out.clauses.push(`DROP CHECK ${q(c.name)}`);
-  for (const i of d.indexes) if (rebuildsIndex(i) || i.op === 'drop') out.clauses.push(dropIndex(i.oldName ?? i.name, i.from!.kind));
+  for (const i of indexes) if (rebuildsIndex(i) || i.op === 'drop') out.clauses.push(dropIndex(i.oldName ?? i.name, i.from!.kind));
   for (const c of d.columns) if (c.op === 'drop') out.clauses.push(`DROP COLUMN ${q(c.name)}`);
-  columnClauses(d, forced, out);
-  for (const i of d.indexes) {
+  columnClauses(d, planned.plan?.columns ?? new Set(), out);
+  for (const i of indexes) {
     if (i.op === 'add' || rebuildsIndex(i)) {
       const idx = fillIndex(i.to!, i.op === 'add' ? undefined : i.from);
       out.clauses.push(addIndex(idx));
@@ -140,7 +171,7 @@ function alterClauses(d: TableDiff, options: OptionChange[], forced: CharsetPlan
     else if (i.op === 'modify') out.clauses.push(`ALTER INDEX ${q(i.name)} ${i.to!.invisible ? 'INVISIBLE' : 'VISIBLE'}`);
   }
   for (const c of d.checks) if (c.op === 'add' || c.op === 'modify') out.clauses.push(`ADD ${printCheck(c.to!, false)}`);
-  out.clauses.push(...optionClauses(options));
+  out.clauses.push(...optionClauses(planned.options));
   return out;
 }
 

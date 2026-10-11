@@ -3,6 +3,7 @@ import { generateDdl, renderDdl, type Statement } from '../src/ddl';
 import { diffSchemas, type RenameMapping } from '../src/diff';
 import { parseSqlDump } from '../src/parse-dump';
 import { parseMdDump } from '../src/parse-md';
+import { scenario } from './helpers';
 
 const dump = (...sqls: string[]) => parseSqlDump(sqls.join('\n')).model;
 const tbl = (name: string, body: string) => `CREATE TABLE \`${name}\` (\n${body}\n) ENGINE=InnoDB;`;
@@ -143,5 +144,40 @@ describe('식별자 토큰 기준 참조 판정 (5회차 6)', () => {
     const target = t("  `code` int NOT NULL,\n  `tag` varchar(20) GENERATED ALWAYS AS (concat(_utf8mb4'`code`', `id`)) VIRTUAL");
     const d = diffSchemas(base, target, [{ kind: 'column', table: 't', from: 'old', to: 'code', allowOverlap: true }]);
     expect(d.manualTables).toEqual([]);
+  });
+});
+
+describe('fk-retype 묶음 수동 확인 전파 (8회차 3)', () => {
+  it('묶음의 한 테이블 ALTER 가 수동 확인이면 FK 해제·부모 MODIFY·FK 재추가까지 묶음 전체 실행 문장 0', () => {
+    const { base, target } = scenario('fk-retype-generated');
+    const stmts = generateDdl(diffSchemas(base, target));
+    expect(stmts.length).toBeGreaterThan(0);
+    expect(runnable(stmts, ['member', 'point'])).toEqual([]);
+    expect(stmts.find((s) => s.object === 'member')?.sql).toMatch(/^-- \[수동 확인 필요\] member: /);
+  });
+});
+
+describe('FK 가 참조하는 부모 UNIQUE 교체 (8회차 5, 8.4 restrict_fk_on_non_standard_key)', () => {
+  it('바뀌지 않는 자식 FK 가 쓰는 UNIQUE 를 비UNIQUE 로 바꾸면 부모 ALTER 를 수동 확인, 무관한 테이블은 실행', () => {
+    const { base, target } = scenario('fk-unique-replace');
+    const stmts = generateDdl(diffSchemas(base, target));
+    expect(runnable(stmts, ['member'])).toEqual([]);
+    const member = stmts.find((s) => s.object === 'member')!;
+    expect(member.sql).toContain('restrict_fk_on_non_standard_key');
+    expect(member.sql).toContain('coupon');
+    expect(runnable(stmts, ['memo'])).toEqual(['ALTER TABLE `memo`\n  ADD INDEX `ix_memo_id` (`id`)']);
+  });
+
+  const parent = (key: string) => tbl('p', `  \`id\` int NOT NULL,\n  \`code\` varchar(10) NOT NULL,\n  \`n\` int NOT NULL,\n  PRIMARY KEY (\`id\`),\n  ${key}`);
+  const child = tbl('c', '  `id` int NOT NULL,\n  `code` varchar(10) NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix_c` (`code`),\n  CONSTRAINT `fk_c_p` FOREIGN KEY (`code`) REFERENCES `p` (`code`)');
+  const blocked = (from: string, to: string, childTo = child) => runnable(generateDdl(diffSchemas(dump(parent(from), child), dump(parent(to), childTo))), ['p']).length === 0;
+
+  it('부분(prefix) 키·컬럼이 늘어난 UNIQUE 도 막고, 표준 키가 남거나 FK 를 함께 지우면 막지 않는다', () => {
+    expect(blocked('UNIQUE KEY `uq` (`code`)', 'UNIQUE KEY `uq` (`code`(5))')).toBe(true);
+    expect(blocked('UNIQUE KEY `uq` (`code`)', 'UNIQUE KEY `uq` (`code`,`n`)')).toBe(true);
+    expect(blocked('UNIQUE KEY `uq` (`code`)', 'UNIQUE KEY `uq` (`code`) COMMENT \'x\'')).toBe(false);
+    expect(blocked('UNIQUE KEY `uq` (`code`)', 'UNIQUE KEY `uq2` (`code`)')).toBe(false);
+    const noFk = tbl('c', '  `id` int NOT NULL,\n  `code` varchar(10) NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix_c` (`code`)');
+    expect(blocked('UNIQUE KEY `uq` (`code`)', 'KEY `uq` (`code`)', noFk)).toBe(false);
   });
 });

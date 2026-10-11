@@ -2,7 +2,7 @@
 import { fkAutoNameCollides } from './auto-name';
 import type { TableDiff } from './diff';
 import { quoteIdent as q, quotedIdentifiers } from './lexer';
-import type { SchemaModel, Table } from './model';
+import type { ForeignKey, Index, SchemaModel, Table } from './model';
 
 export interface ManualTable {
   table: string; // 문장을 막을 테이블 (TARGET 이름, 삭제 테이블은 BASE 이름)
@@ -12,7 +12,7 @@ export interface ManualTable {
 
 export function findManualTables(base: SchemaModel, tables: TableDiff[]): ManualTable[] {
   const altered = tables.filter((d) => (d.op === 'modify' || d.op === 'rename') && d.from && d.to);
-  return altered.flatMap((d) => [...fkNameCollision(d), ...reusedNameDependents(base, tables, d)]);
+  return altered.flatMap((d) => [...fkNameCollision(d), ...reusedNameDependents(base, tables, d), ...fkKeyReplaced(base, tables, d)]);
 }
 
 function fkNameCollision(d: TableDiff): ManualTable[] {
@@ -55,3 +55,34 @@ function reusedNameDependents(base: SchemaModel, tables: TableDiff[], d: TableDi
 // t 의 FK 가 같은 스키마의 table 컬럼 중 하나를 참조하는지
 const referencesColumns = (t: Table, table: string, columns: string[]): boolean =>
   t.foreignKeys.some((f) => f.refSchema === undefined && f.refTable === table && f.refColumns.some((c) => columns.includes(c)));
+
+// FK 가 참조할 수 있는 표준 키: 참조 컬럼과 같은 컬럼(같은 순서)으로만 된 전체 길이 PRIMARY/UNIQUE
+const isStandardKey = (i: Index, columns: string[]): boolean => (i.kind === 'PRIMARY' || i.kind === 'UNIQUE')
+  && i.parts.length === columns.length && i.parts.every((p, n) => p.expr === undefined && !p.length && p.column === columns[n]);
+
+// 5단계 ALTER 때도 남아 있는 다른(자기 포함) 테이블의 FK 중 d 를 참조하는 것: 자식이 삭제되거나 1단계에서 그 FK 를 해제하면 뺀다
+function liveIncomingFks(base: SchemaModel, tables: TableDiff[], d: TableDiff): { table: string; fk: ForeignKey }[] {
+  const baseName = d.oldName ?? d.name;
+  return base.tables.flatMap((t) => {
+    const child = tables.find((x) => (x.oldName ?? x.name) === t.name && x.op !== 'add');
+    if (child?.op === 'drop') return [];
+    const released = new Set(child?.foreignKeys.filter((c) => c.op === 'drop' || c.op === 'modify').flatMap((c) => [c.name, c.from?.name ?? c.name]) ?? []);
+    return t.foreignKeys.filter((f) => f.refSchema === undefined && f.refTable === baseName && !released.has(f.name)).map((fk) => ({ table: t.name, fk }));
+  });
+}
+
+// 바뀌지 않는 FK 가 쓰는 부모의 표준 키(UNIQUE·PK)를 비UNIQUE·부분 키·컬럼이 다른 키로 바꾸면 MySQL 8.4 기본값
+// restrict_fk_on_non_standard_key=ON 에서 DROP INDEX 가 error 1553 (needed in a foreign key constraint) 로 실패한다 (8.4 실측)
+function fkKeyReplaced(base: SchemaModel, tables: TableDiff[], d: TableDiff): ManualTable[] {
+  if (d.unparsed || d.from!.parseError || d.to!.parseError) return [];
+  const renamed = new Map(d.columns.filter((c) => c.op === 'rename').map((c) => [c.oldName!, c.name]));
+  const broken = liveIncomingFks(base, tables, d).filter(({ fk }) => d.from!.indexes.some((i) => isStandardKey(i, fk.refColumns))
+    && !d.to!.indexes.some((i) => isStandardKey(i, fk.refColumns.map((c) => renamed.get(c) ?? c))));
+  if (!broken.length) return [];
+  const fks = broken.map(({ table, fk }) => `${table}.${fk.name}`).join(', ');
+  return [{
+    table: d.name,
+    reason: `${d.name}: 바뀌지 않는 FK(${fks})가 참조하는 키를 UNIQUE 가 아니거나 부분·다른 컬럼 키로 바꾸면 MySQL 8.4(restrict_fk_on_non_standard_key=ON 기본)에서 error 1553 (needed in a foreign key constraint) 으로 실패합니다 — FK 를 먼저 정리하고 직접 작성하세요`,
+    note: `8.4 restrict_fk_on_non_standard_key: FK ${fks} 는 참조 컬럼과 같은 UNIQUE/PRIMARY 키가 필요합니다`,
+  }];
+}

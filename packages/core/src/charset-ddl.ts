@@ -13,7 +13,7 @@ const UTF8MB4_SUBSETS = ['latin1', 'ascii', 'utf8mb3'];
 export const DATA_NOTE_PREFIX = '[데이터 확인]';
 
 export interface CharsetPlan {
-  convert?: string; // 안전할 때만 만드는 CONVERT TO 문장 (';' 없음)
+  convert?: string; // 안전할 때만 만드는 CONVERT TO 절 ('ALTER TABLE …' 없이)
   columns: Set<string>; // 본 ALTER에서 MODIFY로 다시 정의할 컬럼 (TARGET 이름)
   notes: string[]; // convert가 있으면 CONVERT 문장, 없으면 본 ALTER에 붙인다
 }
@@ -80,7 +80,7 @@ export function charsetPlan(d: TableDiff): CharsetPlan | undefined {
   const narrowed = pairs.filter((p) => p.base && !isLosslessConversion(effective(p.base, from).charset, effective(p.col, to).charset));
   const notes = commonNotes(d);
   const isSafe = isLosslessConversion(from.charset, to.charset) && !narrowed.length && !pairs.some((p) => isExplicit(p.col, to));
-  if (isSafe) return convertPlan(d.name, pairs, from, to, notes);
+  if (isSafe) return convertPlan(pairs, from, to, notes);
   const changed = pairs.filter((p) => p.base && !sameEffective(p, from, to)).map((p) => p.col.name);
   return { columns: new Set(changed), notes: narrowed.length ? [...notes, narrowNote(narrowed, from, to)] : notes };
 }
@@ -112,10 +112,10 @@ function sameEffective(p: ColumnPair, from: TableCharset, to: TableCharset): boo
 
 // CONVERT TO는 같은 ALTER 안의 컬럼 문자셋 지정을 덮어쓰므로 별도 문장으로 먼저 실행한다.
 // 그 뒤 본 ALTER에서 BASE에 명시 문자셋이 있던 컬럼, CONVERT가 넓힌 TEXT 계열 컬럼(TEXT → MEDIUMTEXT 등)을 다시 정의한다
-function convertPlan(table: string, pairs: ColumnPair[], from: TableCharset, to: TableCharset, notes: string[]): CharsetPlan {
+function convertPlan(pairs: ColumnPair[], from: TableCharset, to: TableCharset, notes: string[]): CharsetPlan {
   const restored = pairs.filter((p) => p.base?.charset);
   const texts = from.charset === to.charset ? [] : pairs.filter((p) => p.base && TEXT_TYPE.test(p.col.type) && !p.base.charset);
-  const convert = `ALTER TABLE ${q(table)} CONVERT TO CHARACTER SET ${to.charset}${to.collation ? ` COLLATE ${to.collation}` : ''}`;
+  const convert = `CONVERT TO CHARACTER SET ${to.charset}${to.collation ? ` COLLATE ${to.collation}` : ''}`;
   const textNote = texts.length
     ? [`${DATA_NOTE_PREFIX} CONVERT TO가 넓힌 TEXT 계열 컬럼(${texts.map((p) => q(p.col.name)).join(', ')})을 TARGET 타입으로 되돌립니다. 변환으로 길어진 값이 타입 한도를 넘으면 실패하거나 잘릴 수 있습니다`]
     : [];

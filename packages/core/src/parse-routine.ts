@@ -59,11 +59,20 @@ function returnsType(c: Cursor): string {
   return c.src.slice(first.s, last.e);
 }
 
+// SHOW CREATE 는 특성 COMMENT 를 SQL_MODE 와 무관하게 일반 escaping 으로 낸다 (NO_BACKSLASH_ESCAPES 루틴도 'C:\\new' —
+// 8.4 실측). 그 모드로 토큰을 나눴어도 문자열 원문을 일반 규칙으로 다시 읽는다 (경계는 같다: \ 는 \\, ' 는 '' 로만 나온다)
+function showCreateString(c: Cursor): string {
+  const tok = c.peek();
+  const value = c.string();
+  const [plain] = tokenize(c.src.slice(tok!.s, tok!.e));
+  return plain?.t === 'string' ? plain.v : value;
+}
+
 // 특성은 순서와 무관하게 여러 번 올 수 있다. 특성 키워드가 아닌 첫 토큰부터 본문이다
 function readCharacteristics(c: Cursor): RoutineCharacteristics {
   const ch: RoutineCharacteristics = {};
   for (;;) {
-    if (c.acceptWord('COMMENT')) ch.comment = c.string();
+    if (c.acceptWord('COMMENT')) ch.comment = showCreateString(c);
     else if (c.acceptWord('LANGUAGE', 'SQL')) ch.language = 'SQL';
     else if (c.acceptWord('NOT', 'DETERMINISTIC')) ch.deterministic = false;
     else if (c.acceptWord('DETERMINISTIC')) ch.deterministic = true;
