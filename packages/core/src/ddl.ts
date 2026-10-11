@@ -26,6 +26,8 @@ export interface Statement extends StatementBody {
   // fkDrops / fkAdds: 이 문장이 해제 / 추가하는 FK 가 참조하는 같은 스키마 테이블 (TARGET 이름). 객체 카드 복사 묶음 계산에 쓴다
   fkDrops?: string[];
   fkAdds?: string[];
+  // frees: 이 테이블 rename 이 비우는 BASE 이름 (묶음 안에서 다시 차지하는 이름 제외). 그 이름을 차지하는 다른 객체의 카드 복사에 쓴다
+  frees?: string[];
 }
 
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };
@@ -37,7 +39,7 @@ const PARTIAL_CHECK_NOTE = '-- [MD 기반] MD 출처는 CHECK 를 알 수 없어
 
 export function generateDdl(diff: SchemaDiff): Statement[] {
   const out: Statement[] = [];
-  const table = (d: TableDiff, body: StatementBody & Pick<Statement, 'fkDrops' | 'fkAdds'>) => out.push({ object: d.name, kind: 'table', op: d.op, ...body });
+  const table = (d: TableDiff, body: StatementBody & Pick<Statement, 'fkDrops' | 'fkAdds' | 'frees'>) => out.push({ object: d.name, kind: 'table', op: d.op, ...body });
   const view = (v: ViewDiff, body: StatementBody) => out.push({ object: v.name, kind: 'view', op: v.op, ...body });
   const routine = (r: RoutineDiff, body: StatementBody) => out.push({ object: r.name, kind: r.kind, op: r.op, ...body });
   const altered = diff.tables.filter((d) => d.op === 'modify' || d.op === 'rename');
@@ -73,10 +75,11 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
   const taken = new Set([...diff.objectNames, ...diff.tables.flatMap((d) => [d.name, d.oldName ?? d.name])]);
   for (const g of renameGroups(diff.tables, taken)) {
     const [first] = g.tables;
-    if (g.tables.length === 1) table(first, sqlBody(renameTableSql(g.clauses)));
+    const frees = g.tables.map((d) => d.oldName!).filter((n) => !g.tables.some((d) => d.name === n));
+    if (g.tables.length === 1) table(first, { ...sqlBody(renameTableSql(g.clauses)), frees });
     else {
       const note = `얽힌 테이블 rename 을 한 문장으로 함께 적용합니다: ${g.tables.map((d) => `${d.oldName}→${d.name}`).join(', ')}`;
-      out.push({ object: first.name, kind: 'table', op: 'rename', ...sqlBody(renameTableSql(g.clauses), [note]), related: g.tables.map((d) => d.name) });
+      out.push({ object: first.name, kind: 'table', op: 'rename', ...sqlBody(renameTableSql(g.clauses), [note]), related: g.tables.map((d) => d.name), frees });
     }
   }
   // 4. 테이블 생성 (FK는 8단계에서)
@@ -151,7 +154,7 @@ export const statementText = (s: StatementBody): string => (s.comment || s.delim
 // DELIMITER ;; 로 감싸 mysql 클라이언트에 그대로 붙여 넣을 수 있게 한다. SQL_MODE 를 알면 앞뒤로 설정·복원한다
 function createRoutine(r: Routine): StatementBody {
   if (r.parseError) return commentBody(`-- [수동 확인 필요] ${r.name}: 파싱할 수 없는 루틴입니다. 원문을 확인하세요`);
-  const lines = ['DELIMITER ;;', `${printRoutine(r)};;`, 'DELIMITER ;'];
+  const lines = ['DELIMITER ;;', `${printRoutine(r, { executable: true })};;`, 'DELIMITER ;'];
   const sql = r.sqlMode === undefined
     ? lines
     : [`SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = ${quoteString(r.sqlMode)};`, ...lines, 'SET SQL_MODE = @OLD_SQL_MODE;'];

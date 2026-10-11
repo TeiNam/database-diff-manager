@@ -20,7 +20,8 @@ export const SCENARIOS = ['columns', 'tables', 'rename-table', 'rename-column', 
   'rename-table-fk', 'table-replace-fk', 'table-swap-fk', 'remove-rename-column-order', 'rename-table-check',
   'partition-list-merge', 'partition-hash-named', 'rename-table-fk-auto', 'remove-rename-column-index',
   'generated-stored-convert', 'partition-key-rename', 'fk-type-widen', 'partition-date-bound', 'fk-charset-convert',
-  'fk-drop-parent-widen', 'fk-rename-widen', 'row-format-convert', 'row-format-convert-reverse'];
+  'fk-drop-parent-widen', 'fk-rename-widen', 'row-format-convert', 'row-format-convert-reverse',
+  'table-to-view', 'view-to-table', 'view-drop-rename-into', 'fk-retype-generated', 'convert-index-prefix', 'fk-unique-replace', 'routine-comment-nbe'];
 
 // 값 보존 확인 (선택): base 에 seed 를 넣고 DDL 적용 뒤 query 결과가 rows 와 같아야 한다
 export interface ScenarioValues {
@@ -32,6 +33,12 @@ export interface ScenarioValues {
 export function scenarioValues(name: string): ScenarioValues | undefined {
   const rel = `scenarios/${name}/values.json`;
   return hasFixture(rel) ? (JSON.parse(fixture(rel)) as ScenarioValues) : undefined;
+}
+
+// 수동 확인 시나리오 (선택): 생성 DDL 이 실행하지 않아 BASE 그대로 남아야 하는 테이블 (이름순)
+export function scenarioManual(name: string): string[] {
+  const rel = `scenarios/${name}/manual.json`;
+  return hasFixture(rel) ? (JSON.parse(fixture(rel)) as string[]) : [];
 }
 
 export function scenario(name: string) {

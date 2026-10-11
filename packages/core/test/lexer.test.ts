@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { quotedIdentifiers, quoteIdent, quoteString, tableReferences, tokenize } from '../src/lexer';
+import { quotedIdentifiers, quoteIdent, quoteString, tableReferences, tokenize, viewReferences } from '../src/lexer';
 
 describe('tokenize', () => {
   it('식별자·문자열·단어·숫자·기호를 구분한다', () => {
@@ -54,5 +54,13 @@ describe('tableReferences · quotedIdentifiers (5회차 6)', () => {
     expect(quotedIdentifiers("concat(_utf8mb4'`x`', `y`)")).toEqual(['y']);
     expect(quotedIdentifiers("'abc")).toBeUndefined();
     expect(tableReferences("from `a` where 'x")).toBeUndefined();
+  });
+});
+
+describe('viewReferences (8회차 2)', () => {
+  it('FROM/JOIN 테이블과 함수 호출만 내고 별칭·컬럼·문자열은 뺀다', () => {
+    const body = "select `shop`.`tax`(`o`.`amt`) AS `chat_log`,'`log`' AS `s` from (`o` join `shop`.`m`) where coalesce(`o`.`x`, 0)";
+    expect(viewReferences(body)).toEqual(['o', 'm', 'tax', 'coalesce']);
+    expect(viewReferences("from `a` where 'x")).toBeUndefined();
   });
 });

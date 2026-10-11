@@ -1,0 +1,18 @@
+/* Database : shop */
+SET NAMES utf8mb4;
+
+CREATE TABLE `config` (
+  `id` int NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+/* Routines */
+SET @OLD_ROUTINE_SQL_MODE = @@SQL_MODE, SQL_MODE = 'NO_BACKSLASH_ESCAPES,STRICT_TRANS_TABLES';
+DELIMITER ;;
+CREATE DEFINER=`root`@`localhost` FUNCTION `win_path`() RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
+    DETERMINISTIC
+    COMMENT 'C:\\new it''s'
+RETURN 'C:\temp';;
+DELIMITER ;
+SET SQL_MODE = @OLD_ROUTINE_SQL_MODE;

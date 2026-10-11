@@ -2,6 +2,7 @@
 // 원칙: MySQL 로 검증한 패턴만 실행 SQL 로 내고, 얽힌 조합은 관련 객체 전체를 막는다
 import type { Statement } from './ddl';
 import { commentBody, isAlterBlocked, manualBody } from './ddl-alter';
+import { retypeGroups } from './fk-retype';
 import type { SchemaDiff, TableDiff, ViewDiff } from './diff';
 import { quoteIdent as q, tableReferences } from './lexer';
 import { renameGroups } from './table-rename';
@@ -64,13 +65,15 @@ function blockedNames(diff: SchemaDiff, conflicts: Conflicts): Set<string> {
 
 // 더 이상 늘지 않을 때까지 넓힌다: 막힌 테이블이 든 얽힌 rename 묶음의 모든 테이블 (묶음 RENAME 이 실행되지 않으면
 // 다른 테이블의 ALTER 가 엉뚱한 테이블의 데이터를 바꾼다), 막힌 테이블(본 ALTER 만 막힌 테이블 포함)을 참조하는 FK 를
-// 바꾸거나 새로 추가하는 테이블
+// 바꾸거나 새로 추가하는 테이블, 막힌 테이블(본 ALTER 만 막힌 테이블 포함)이 든 fk-retype 묶음의 모든 테이블 (묶음은 FK 해제 →
+// 부모·자식 MODIFY → FK 재추가가 함께 실행돼야 한다. 한 테이블 MODIFY 만 빠지면 재추가가 error 3780 으로 실패해 FK 가 사라진다)
 function spreadConflicts(diff: SchemaDiff, seeds: Conflicts, alterBlocked: ReadonlySet<string>): Conflicts {
   if (!seeds.size && !alterBlocked.size) return seeds;
   const out = new Map(seeds);
   const groups = renameGroups(diff.tables, new Set());
   // 새 테이블도 8단계에서 FK 를 추가하므로 함께 본다
   const changed = diff.tables.filter((d) => d.op !== 'drop');
+  const retyped = [...new Map([...retypeGroups(diff.tables).values()].map((g) => [g.join('\n'), g])).values()];
   for (;;) {
     const before = out.size;
     const blocked = blockedNames(diff, out);
@@ -83,6 +86,14 @@ function spreadConflicts(diff: SchemaDiff, seeds: Conflicts, alterBlocked: Reado
       }
     }
     const referenced = new Set([...blocked, ...alterBlocked]);
+    for (const g of retyped) {
+      const hit = g.find((n) => referenced.has(n));
+      if (hit === undefined) continue;
+      for (const n of g) {
+        if (out.has(n)) continue;
+        out.set(n, { reason: `${n}: FK 로 묶여 컬럼 타입이 함께 바뀌는 테이블(${g.join(', ')}) 중 ${hit} 의 문장이 수동 확인이라 실행하지 않습니다 — 직접 작성하세요`, notes: [`FK 해제·컬럼 변경·FK 재추가는 묶음(${g.join(', ')})을 함께 실행해야 합니다 (error 3780)`] });
+      }
+    }
     for (const d of changed) {
       const refs = out.has(d.name) ? [] : referencingFks(d, referenced);
       if (!refs.length) continue;

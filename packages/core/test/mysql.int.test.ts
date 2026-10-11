@@ -8,7 +8,8 @@ import { splitStatements } from '../src/parse-dump';
 import { parseCreateTable } from '../src/parse-table';
 import { parseCreateView } from '../src/parse-view';
 import { parseRoutine } from '../src/parse-routine';
-import { fixture, scenario, SCENARIOS, scenarioValues } from './helpers';
+import { routineLexMode } from '../src/normalize';
+import { fixture, scenario, scenarioManual, SCENARIOS, scenarioValues } from './helpers';
 
 const TARGETS = [
   { name: 'MySQL 8.0', port: 33080 },
@@ -51,9 +52,14 @@ suite.each(TARGETS)('$name', ({ port }) => {
     const { base, target, renames } = scenario(name);
     await apply(generateDdl(diffSchemas(base, target, renames)));
 
-    const after = diffSchemas(await dumpSchema(conn, db), target);
+    const dumped = await dumpSchema(conn, db);
+    const after = diffSchemas(dumped, target);
     const changed = { tables: after.tables.map((t) => t.name), views: after.views.map((v) => v.name), routines: after.routines.map((r) => `${r.kind} ${r.name} ${r.fields.join(',')}`) };
-    expect(changed).toEqual({ tables: [], views: [], routines: [] });
+    // 수동 확인 테이블만 TARGET 과 다르고, 그 테이블은 반쯤 적용되지 않고 BASE 그대로여야 한다
+    const manual = scenarioManual(name);
+    expect(changed).toEqual({ tables: manual, views: [], routines: [] });
+    const touched = diffSchemas(base, dumped).tables.map((t) => t.name).filter((n) => manual.includes(n));
+    expect(touched).toEqual([]);
     if (values) {
       const [rows] = await conn.query<RowDataPacket[]>(values.query);
       expect(rows.map((r) => ({ ...r }))).toEqual(values.rows);
@@ -102,7 +108,8 @@ async function dumpRoutines(conn: Connection, db: string): Promise<Routine[]> {
     for (const row of rows) {
       const [created] = await conn.query<RowDataPacket[]>(`SHOW CREATE ${kind} \`${String(row.Name)}\``);
       const ddl = String(created[0][kind === 'FUNCTION' ? 'Create Function' : 'Create Procedure']);
-      out.push({ ...parseRoutine(ddl), sqlMode: String(created[0].sql_mode) });
+      const sqlMode = String(created[0].sql_mode);
+      out.push({ ...parseRoutine(ddl, routineLexMode(sqlMode)), sqlMode });
     }
   }
   return out;

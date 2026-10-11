@@ -123,15 +123,19 @@ export function quotedIdentifiers(src: string): string[] | undefined {
 
 const TABLE_KEYWORD = /^(FROM|JOIN|STRAIGHT_JOIN)$/i;
 
-// SELECT 본문에서 FROM/JOIN 뒤에 오는 테이블 이름 (`schema`.`table` 은 table). 토큰으로 나눌 수 없으면 undefined
-export function tableReferences(src: string): string[] | undefined {
-  let tokens: Token[];
+const tryTokenize = (src: string): Token[] | undefined => {
   try {
-    tokens = tokenize(src);
+    return tokenize(src);
   } catch (e) {
     if (e instanceof LexError) return undefined;
     throw e;
   }
+};
+
+// SELECT 본문에서 FROM/JOIN 뒤에 오는 테이블 이름 (`schema`.`table` 은 table). 토큰으로 나눌 수 없으면 undefined
+export function tableReferences(src: string): string[] | undefined {
+  const tokens = tryTokenize(src);
+  if (!tokens) return undefined;
   const out: string[] = [];
   tokens.forEach((tok, i) => {
     if (tok.t !== 'word' || !TABLE_KEYWORD.test(tok.v)) return;
@@ -143,4 +147,17 @@ export function tableReferences(src: string): string[] | undefined {
     out.push(qualified ? tokens[j + 2].v : first.v);
   });
   return out;
+}
+
+// '(' 앞에 오지만 함수 이름이 아닌 키워드
+const NOT_CALL = /^(FROM|JOIN|STRAIGHT_JOIN|IN|ON|AS|AND|OR|NOT|XOR|EXISTS|WHERE|SELECT|USING|ANY|ALL|SOME|UNION|VALUES|OVER|WINDOW|LATERAL|WITH|INTERVAL|HAVING|BY|THEN|ELSE|WHEN|CASE|IS)$/i;
+
+// 뷰 본문이 쓰는 객체 이름: FROM/JOIN 뒤 테이블·뷰와 `이름`( 형태의 함수 호출 (`schema`.`fn`( 은 fn).
+// 별칭(AS 뒤)·컬럼 참조(`t`.`c`)·문자열·주석 안의 이름은 빼고, 토큰으로 나눌 수 없으면 undefined
+export function viewReferences(src: string): string[] | undefined {
+  const tokens = tryTokenize(src);
+  const tables = tableReferences(src);
+  if (!tokens || !tables) return undefined;
+  const calls = tokens.filter((tok, i) => (tok.t === 'ident' || (tok.t === 'word' && !NOT_CALL.test(tok.v))) && tokens[i + 1]?.t === 'op' && tokens[i + 1].v === '(').map((tok) => tok.v);
+  return [...new Set([...tables, ...calls])];
 }

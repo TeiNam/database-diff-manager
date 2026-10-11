@@ -242,4 +242,18 @@ describe('리뷰 반영', () => {
     // 같은 본문끼리는 차이가 없다 (diff 도 그 SQL_MODE 로 본문을 읽는다)
     expect(diffSchemas(m, m).routines).toEqual([]);
   });
+
+  it('NO_BACKSLASH_ESCAPES 루틴의 COMMENT: SHOW CREATE 형식(일반 escaping)으로 읽고, 생성 DDL 은 그 모드에 맞춰 \' 만 두 배로 쓴다 (8회차 6)', () => {
+    // MySQL 8.4 실측: 그 모드로 COMMENT 'C:\new it''s' 를 만들면 저장값은 C:\new it's, SHOW CREATE 는 'C:\\new it''s' 로 낸다
+    const ddl = "CREATE DEFINER=`root`@`%` FUNCTION `f`() RETURNS int\n    NO SQL\n    COMMENT 'C:\\\\new it''s'\nRETURN 1";
+    const { model: m, warnings } = dump(routineBlock(ddl, 'STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES'));
+    expect(warnings).toEqual([]);
+    const [r] = m.routines;
+    expect(r.characteristics.comment).toBe("C:\\new it's");
+    expect(printRoutine(r)).toContain("COMMENT 'C:\\\\new it''s'");
+    const [create] = generateDdl(diffSchemas(model(), model(r)));
+    expect(create.sql).toContain("    COMMENT 'C:\\new it''s'\n");
+    // 모드가 없으면 일반 escaping
+    expect(generateDdl(diffSchemas(model(), model({ ...r, sqlMode: 'STRICT_TRANS_TABLES' })))[0].sql).toContain("COMMENT 'C:\\\\new it''s'");
+  });
 });
