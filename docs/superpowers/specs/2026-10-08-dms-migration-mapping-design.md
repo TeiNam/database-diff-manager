@@ -48,7 +48,7 @@ BASE(As-Is)·TARGET(To-Be) 스키마는 지금처럼 각각 업로드하고, 매
 - **모든 `object-locator` 는 As-Is 이름 기준이다.** 컬럼 룰의 테이블은 테이블 rename 을 거쳐 To-Be 테이블을 찾는다.
 - 이름 비교는 **대소문자를 무시**한다. 샘플의 컬럼명은 전부 대문자(`PRM_ID`)이고 MySQL 컬럼명은 대소문자를 구분하지 않는다. 테이블명도 같은 규칙을 쓰되, 정확히 일치하는 것을 먼저 고른다.
 - locator 의 `%` 와일드카드는 selection 에서만 지원한다. transformation 의 와일드카드(예: 모든 테이블 이름 소문자화)는 경고로 남긴다.
-- 같은 대상에 대한 rename 룰이 둘 이상이면 rule-id 가 큰 쪽을 쓰고 경고한다.
+- 같은 대상에 대한 rename(·remove-column) 룰이 둘 이상이면 AWS DMS 와 같이 rule-id 가 **낮은** 쪽을 쓰고 경고한다 (DMS User Guide, Transformation rules and actions — `rule-id`: "AWS DMS applies the transformation rule with the lower rule-id").
 - JSON 이 아니거나 `rules` 배열이 없으면 업로드를 거부한다(400). 룰은 20,000개까지.
 
 ## 3. 데이터 모델과 적용 범위

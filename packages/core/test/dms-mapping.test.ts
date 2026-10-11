@@ -43,10 +43,10 @@ describe('parseDmsMapping: 규칙', () => {
     expect(mapping.tables).toEqual([{ ruleId: '7', from: 'a', to: 'b' }]);
   });
 
-  it('같은 대상의 rename 이 겹치면 rule-id 가 큰 쪽을 쓰고 경고 (대소문자 무시)', () => {
+  it('같은 대상의 rename 이 겹치면 AWS DMS 처럼 rule-id 가 낮은 쪽을 쓰고 경고 (대소문자 무시)', () => {
     const { mapping, warnings } = parse([tableRename(9, 'tb_a', 'new_a'), tableRename(3, 'TB_A', 'old_a')]);
-    expect(mapping.tables).toEqual([{ ruleId: '9', from: 'tb_a', to: 'new_a' }]);
-    expect(warnings).toEqual([{ ruleId: '3', code: 'duplicate', message: '같은 대상의 룰이 겹쳐 rule 9 를 사용합니다' }]);
+    expect(mapping.tables).toEqual([{ ruleId: '3', from: 'TB_A', to: 'old_a' }]);
+    expect(warnings).toEqual([{ ruleId: '9', code: 'duplicate', message: '같은 대상의 룰이 겹쳐 rule-id 가 낮은 rule 3 만 적용합니다' }]);
   });
 
   it('transformation 의 와일드카드, 필수 값 누락, 다른 스키마는 경고', () => {
@@ -108,24 +108,24 @@ describe('parseDmsMapping: 중복', () => {
     rule(id, { 'rule-type': 'transformation', 'rule-target': 'column', 'object-locator': { 'schema-name': 'legacy', 'table-name': 't', 'column-name': name }, 'rule-action': 'remove-column' });
   const schema = (id: number, value: string) =>
     rule(id, { 'rule-type': 'transformation', 'rule-target': 'schema', 'object-locator': { 'schema-name': 'legacy' }, 'rule-action': 'rename', value });
-  const dup = (loser: string, winner: string) => [{ ruleId: loser, code: 'duplicate', message: `같은 대상의 룰이 겹쳐 rule ${winner} 를 사용합니다` }];
+  const dup = (loser: string, winner: string) => [{ ruleId: loser, code: 'duplicate', message: `같은 대상의 룰이 겹쳐 rule-id 가 낮은 rule ${winner} 만 적용합니다` }];
 
   it('column rename', () => {
     const { mapping, warnings } = parse([col(2, 'A', 'x'), col(8, 'a', 'y')]);
-    expect(mapping.columns).toEqual([{ ruleId: '8', table: 't', from: 'a', to: 'y' }]);
-    expect(warnings).toEqual(dup('2', '8'));
+    expect(mapping.columns).toEqual([{ ruleId: '2', table: 't', from: 'A', to: 'x' }]);
+    expect(warnings).toEqual(dup('8', '2'));
   });
 
   it('remove-column', () => {
     const { mapping, warnings } = parse([rm(5, 'c'), rm(4, 'C')]);
-    expect(mapping.removedColumns).toEqual([{ ruleId: '5', table: 't', column: 'c' }]);
-    expect(warnings).toEqual(dup('4', '5'));
+    expect(mapping.removedColumns).toEqual([{ ruleId: '4', table: 't', column: 'C' }]);
+    expect(warnings).toEqual(dup('5', '4'));
   });
 
   it('schema rename', () => {
     const { mapping, warnings } = parse([schema(1, 'old'), schema(2, 'new')]);
-    expect(mapping.toSchema).toBe('new');
-    expect(warnings).toEqual(dup('1', '2'));
+    expect(mapping.toSchema).toBe('old');
+    expect(warnings).toEqual(dup('2', '1'));
   });
 });
 
