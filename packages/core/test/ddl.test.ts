@@ -316,7 +316,8 @@ describe('FK 재생성 시 FK 가 만든 인덱스 이름 고정', () => {
   it('FK 삭제만 하거나 인덱스 이름이 FK 이름과 같으면 고정하지 않는다', () => {
     const named = (act: string) => parseSqlDump(`CREATE TABLE \`c\` (\n  \`id\` int NOT NULL,\n  \`pid\` int NOT NULL,\n  KEY \`fk_c\` (\`pid\`),\n  CONSTRAINT \`fk_c\` FOREIGN KEY (\`pid\`) REFERENCES \`p\` (\`id\`)${act}\n) ENGINE=InnoDB;`).model;
     expect(generateDdl(diffSchemas(named(''), named(' ON DELETE CASCADE')))[0].sql).toBe('ALTER TABLE `c`\n  DROP FOREIGN KEY `fk_c`');
-    const noFk = parseSqlDump('CREATE TABLE `c` (\n  `id` int NOT NULL,\n  `pid` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `pid` (`pid`)\n) ENGINE=InnoDB;').model;
+    // FK 만 지우는 TARGET 은 완전한 덤프여야 실행 문장이다 (부재 기반 FK 삭제, 17회차 3)
+    const noFk = parseSqlDump(tdExport('CREATE TABLE `c` (\n  `id` int NOT NULL,\n  `pid` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `pid` (`pid`)\n) ENGINE=InnoDB;')).model;
     expect(generateDdl(diffSchemas(c(''), noFk))[0].sql).toBe('ALTER TABLE `c`\n  DROP FOREIGN KEY `c_ibfk_1`');
   });
 });
