@@ -16,7 +16,9 @@ const namesOf = (st: Statement): string[] => st.related ?? [st.object];
 const blocksIncomingFks = (st: Statement) => st.kind === 'table' && st.op !== 'add' && !st.fkDrops && !st.fkAdds && !st.keepsIncomingFks;
 
 // 들어오는 FK(카드에 해제 문장이 생기는 FK: 삭제되는 테이블의 FK 전부, 바뀌는 테이블의 삭제·변경 FK)와 충돌하지 않는 변경 테이블 (TARGET 이름).
-// 충돌: 테이블 rename·삭제, 파싱 실패, 파티션·옵션(COMMENT 제외 — 엔진·문자셋 변환 등) 변경, 참조 컬럼의 삭제와 FK 를 유지할 수 없는
+// rename 된 테이블도 본 ALTER 는 같은 규칙으로 본다 — 들어오는 FK 의 참조 테이블은 BASE 이름이라 그 테이블의 BASE 이름(oldName)으로
+// 찾는다 (맞바꾸기면 물리 테이블을 따라간다). RENAME TABLE 자체는 MySQL 이 FK 참조를 옮기므로 충돌이 아니다 (15·16회차, 17회차 4).
+// 충돌: 테이블 삭제, 파싱 실패, 파티션·옵션(COMMENT 제외 — 엔진·문자셋 변환 등) 변경, 참조 컬럼의 삭제와 FK 를 유지할 수 없는
 // 변경(타입·문자셋·콜레이션·NULL 성 등 FK_KEEPING_FIELDS 밖), 참조 컬럼을 담은 인덱스의 삭제·변경·rename. 참조 컬럼의 단순 rename·
 // COMMENT·DEFAULT 변경·위치 이동은 InnoDB 가 자식 FK 를 유지·따라 옮긴다 (8.4 실측, 14회차 2). fk-retype 묶음은 depends 로 따로 묶인다
 export function incomingFkSafeTables(diff: SchemaDiff): Set<string> {
@@ -30,7 +32,7 @@ export function incomingFkSafeTables(diff: SchemaDiff): Set<string> {
       referenced.set(fk.refTable, cols);
     }
   }
-  return new Set(diff.tables.filter((d) => d.op === 'modify' && !conflictsWithIncoming(d, referenced.get(d.name))).map((d) => d.name));
+  return new Set(diff.tables.filter((d) => (d.op === 'modify' || d.op === 'rename') && !conflictsWithIncoming(d, referenced.get(d.oldName ?? d.name))).map((d) => d.name));
 }
 
 // 참조 컬럼에서 바뀌어도 자식 FK 가 유지되는 속성 (rename 은 op 로 따로 본다)

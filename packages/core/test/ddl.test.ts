@@ -529,6 +529,26 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     }
   });
 
+  it('rename 뒤 본 ALTER 도 BASE 이름으로 들어오는 FK 충돌을 판정한다: 무관한 컬럼 추가는 삭제되는 자식의 FK 해제를 넣지 않는다 (17회차 4, 8.4 실측)', () => {
+    const one = cardOf('card-parent-rename-add-child-drop', 'table', 'p2');
+    expect(one.statements.map((s) => s.sql.split('\n').join(' '))).toEqual(['RENAME TABLE `p` TO `p2`', 'ALTER TABLE `p2`   ADD COLUMN `memo` varchar(50) DEFAULT NULL']);
+    expect(one.dependencies).toEqual([]);
+    for (const object of ['p', 'q']) {
+      const { statements, dependencies } = cardOf('card-swap-rename-add-child-drop', 'table', object);
+      expect(statements.some((s) => s.sql.includes('DROP FOREIGN KEY')), object).toBe(false);
+      expect(statements.map((s) => s.sql.split('\n')[0]), object).toEqual(['RENAME TABLE `p` TO `__tdm_tmp_1`, `q` TO `p`, `__tdm_tmp_1` TO `q`', 'ALTER TABLE `q`', 'ALTER TABLE `p`']);
+      expect(dependencies, object).toEqual([object === 'p' ? 'q' : 'p']);
+    }
+  });
+
+  it('rename 된 부모의 참조 컬럼 타입 변경은 BASE 이름으로 찾아 충돌로 본다: 자식 FK 해제를 넣는다 (17회차 4)', () => {
+    const { base, target, renames } = scenario('card-parent-rename-add-child-drop');
+    const retyped = parseSqlDump(fixture('scenarios/card-parent-rename-add-child-drop/target.sql').replace('`id` int NOT NULL', '`id` bigint NOT NULL')).model;
+    expect(target.tables[0].name).toBe('p2');
+    const stmts = generateDdl(diffSchemas(base, retyped, renames));
+    expect(objectStatements(stmts, 'table', 'p2').statements.map((s) => s.sql.split('\n').join(' '))).toContain('ALTER TABLE `c`   DROP FOREIGN KEY `fk_c_p`');
+  });
+
   it('의존 매칭은 문장의 object 와 related 이름 모두를 본다: 맞바꾸기 뒤 coupon 을 읽는 새 뷰 카드는 묶음 RENAME 을 넣는다 (13회차 3)', () => {
     const { statements, dependencies } = cardOf('card-view-swap-rename', 'view', 'v_coupon');
     expect(statements.map((s) => s.sql.split('\n')[0])).toEqual([expect.stringMatching(/^RENAME TABLE `coupon` TO `__tdm_tmp_1`/), expect.stringMatching(/VIEW `v_coupon`/)]);
