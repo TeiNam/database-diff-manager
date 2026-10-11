@@ -211,3 +211,33 @@ describe('파싱 실패 객체는 출처와 무관하게 수동 확인, 의존 �
     expect(views).toEqual({ bad: true, calls: true, reads_bad: true });
   });
 });
+
+describe('FK 표준 키 검사 일반화 (9회차 5)', () => {
+  const blocked = (name: string) => {
+    const { base, target, renames } = scenario(name);
+    return diffSchemas(base, target, renames).manualTables.map((t) => t.table).sort();
+  };
+
+  it('부모 UNIQUE 제거 + 자식 FK 재생성(ON DELETE 변경): 자식·부모 모두 수동 확인 (8.4 error 6125 로 FK 소실 방지)', () => {
+    expect(blocked('fk-unique-replace-cascade')).toEqual(['coupon', 'member']);
+    const { base, target } = scenario('fk-unique-replace-cascade');
+    const reason = diffSchemas(base, target).manualTables[0].reason;
+    expect(reason).toContain('restrict_fk_on_non_standard_key=ON');
+    expect(reason).toContain('8.0 은 실행 가능');
+  });
+
+  it('새 테이블의 FK 가 비UNIQUE 부모 컬럼을 참조하면 그 새 테이블을 막는다', () => {
+    const base = dump(tbl('p', '  `id` int NOT NULL,\n  `code` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix_code` (`code`)'));
+    const target = dump(tbl('p', '  `id` int NOT NULL,\n  `code` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix_code` (`code`)'),
+      tbl('c', '  `code` int NOT NULL,\n  KEY `fk_c_p` (`code`),\n  CONSTRAINT `fk_c_p` FOREIGN KEY (`code`) REFERENCES `p` (`code`)'));
+    expect(diffSchemas(base, target).manualTables.map((t) => t.table)).toEqual(['c']);
+  });
+
+  it('표준 키가 TARGET 에 있거나, 비표준 FK 를 아무 문장도 건드리지 않으면 막지 않는다', () => {
+    const parent = (extra: string) => tbl('p', `  \`id\` int NOT NULL,\n  \`code\` int NOT NULL,\n  \`n\` int DEFAULT NULL,\n  PRIMARY KEY (\`id\`),\n  KEY \`ix_code\` (\`code\`)${extra}`);
+    const child = tbl('c', '  `code` int NOT NULL,\n  KEY `fk_c_p` (`code`),\n  CONSTRAINT `fk_c_p` FOREIGN KEY (`code`) REFERENCES `p` (`code`)');
+    // 부모의 무관한 인덱스 추가는 FK 와 관계없다
+    expect(diffSchemas(dump(parent(''), child), dump(parent(',\n  KEY `ix_n` (`n`)'), child)).manualTables).toEqual([]);
+    expect(blocked('fk-type-widen')).toEqual([]);
+  });
+});

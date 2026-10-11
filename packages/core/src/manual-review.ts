@@ -2,7 +2,7 @@
 import { fkAutoNameCollides } from './auto-name';
 import type { TableDiff } from './diff';
 import { quoteIdent as q, quotedIdentifiers } from './lexer';
-import type { ForeignKey, Index, SchemaModel, Table } from './model';
+import type { Index, SchemaModel, Table } from './model';
 
 export interface ManualTable {
   table: string; // 문장을 막을 테이블 (TARGET 이름, 삭제 테이블은 BASE 이름)
@@ -10,9 +10,9 @@ export interface ManualTable {
   note: string;
 }
 
-export function findManualTables(base: SchemaModel, tables: TableDiff[]): ManualTable[] {
+export function findManualTables(base: SchemaModel, target: SchemaModel, tables: TableDiff[]): ManualTable[] {
   const altered = tables.filter((d) => (d.op === 'modify' || d.op === 'rename') && d.from && d.to);
-  return altered.flatMap((d) => [...fkNameCollision(d), ...reusedNameDependents(base, tables, d), ...fkKeyReplaced(base, tables, d)]);
+  return [...altered.flatMap((d) => [...fkNameCollision(d), ...reusedNameDependents(base, tables, d)]), ...nonStandardFkKeys(target, tables)];
 }
 
 function fkNameCollision(d: TableDiff): ManualTable[] {
@@ -56,33 +56,35 @@ function reusedNameDependents(base: SchemaModel, tables: TableDiff[], d: TableDi
 const referencesColumns = (t: Table, table: string, columns: string[]): boolean =>
   t.foreignKeys.some((f) => f.refSchema === undefined && f.refTable === table && f.refColumns.some((c) => columns.includes(c)));
 
-// FK 가 참조할 수 있는 표준 키: 참조 컬럼과 같은 컬럼(같은 순서)으로만 된 전체 길이 PRIMARY/UNIQUE
-const isStandardKey = (i: Index, columns: string[]): boolean => (i.kind === 'PRIMARY' || i.kind === 'UNIQUE')
-  && i.parts.length === columns.length && i.parts.every((p, n) => p.expr === undefined && !p.length && p.column === columns[n]);
+// FK 가 참조할 수 있는 표준 키: 참조 컬럼과 같은 컬럼(같은 순서)으로만 된 전체 길이 PRIMARY/UNIQUE.
+// MD(partial) 인덱스는 종류(Normal = INDEX|UNIQUE)·키 파트 상세를 모를 수 있어, 컬럼이 같으면 표준 키일 수 있다고 본다 (판정 불가 → 막지 않음)
+const isStandardKey = (i: Index, columns: string[]): boolean => {
+  const vague = Boolean(i.unknown?.includes('kind') || i.unknown?.includes('partDetails'));
+  return (i.kind === 'PRIMARY' || i.kind === 'UNIQUE' || (vague && i.kind === 'INDEX'))
+    && i.parts.length === columns.length && i.parts.every((p, n) => p.expr === undefined && (vague || !p.length) && p.column === columns[n]);
+};
 
-// 5단계 ALTER 때도 남아 있는 다른(자기 포함) 테이블의 FK 중 d 를 참조하는 것: 자식이 삭제되거나 1단계에서 그 FK 를 해제하면 뺀다
-function liveIncomingFks(base: SchemaModel, tables: TableDiff[], d: TableDiff): { table: string; fk: ForeignKey }[] {
-  const baseName = d.oldName ?? d.name;
-  return base.tables.flatMap((t) => {
-    const child = tables.find((x) => (x.oldName ?? x.name) === t.name && x.op !== 'add');
-    if (child?.op === 'drop') return [];
-    const released = new Set(child?.foreignKeys.filter((c) => c.op === 'drop' || c.op === 'modify').flatMap((c) => [c.name, c.from?.name ?? c.name]) ?? []);
-    return t.foreignKeys.filter((f) => f.refSchema === undefined && f.refTable === baseName && !released.has(f.name)).map((fk) => ({ table: t.name, fk }));
-  });
-}
+const indexColumns = (i: Index | undefined): string[] => i?.parts.flatMap((p) => (p.column === undefined ? [] : [p.column])) ?? [];
 
-// 바뀌지 않는 FK 가 쓰는 부모의 표준 키(UNIQUE·PK)를 비UNIQUE·부분 키·컬럼이 다른 키로 바꾸면 MySQL 8.4 기본값
-// restrict_fk_on_non_standard_key=ON 에서 DROP INDEX 가 error 1553 (needed in a foreign key constraint) 로 실패한다 (8.4 실측)
-function fkKeyReplaced(base: SchemaModel, tables: TableDiff[], d: TableDiff): ManualTable[] {
-  if (d.unparsed || d.from!.parseError || d.to!.parseError) return [];
-  const renamed = new Map(d.columns.filter((c) => c.op === 'rename').map((c) => [c.oldName!, c.name]));
-  const broken = liveIncomingFks(base, tables, d).filter(({ fk }) => d.from!.indexes.some((i) => isStandardKey(i, fk.refColumns))
-    && !d.to!.indexes.some((i) => isStandardKey(i, fk.refColumns.map((c) => renamed.get(c) ?? c))));
-  if (!broken.length) return [];
-  const fks = broken.map(({ table, fk }) => `${table}.${fk.name}`).join(', ');
-  return [{
-    table: d.name,
-    reason: `${d.name}: 바뀌지 않는 FK(${fks})가 참조하는 키를 UNIQUE 가 아니거나 부분·다른 컬럼 키로 바꾸면 MySQL 8.4(restrict_fk_on_non_standard_key=ON 기본)에서 error 1553 (needed in a foreign key constraint) 으로 실패합니다 — FK 를 먼저 정리하고 직접 작성하세요`,
-    note: `8.4 restrict_fk_on_non_standard_key: FK ${fks} 는 참조 컬럼과 같은 UNIQUE/PRIMARY 키가 필요합니다`,
-  }];
+// MySQL 8.4 기본값 restrict_fk_on_non_standard_key=ON 에서는 부모에 참조 컬럼과 정확히 같은 PRIMARY/UNIQUE 가 없으면 FK 추가가
+// error 6125 로, 그런 FK 가 쓰는 부모 인덱스 삭제가 error 1553 으로 실패한다 (8.0 은 둘 다 실행된다 — 8.4 실측).
+// TARGET 에 존재할 모든 FK(유지·재생성·신규) 중 TARGET 부모에 표준 키가 없는 것을, 생성 DDL 이 그 FK 를 추가(새 테이블·새·바뀐·
+// 재생성 FK)하거나 부모의 참조 컬럼 인덱스를 바꾸면 자식(바뀌는 경우)과 부모(바뀌는 경우)의 문장 전체를 수동 확인으로 묶는다
+function nonStandardFkKeys(target: SchemaModel, tables: TableDiff[]): ManualTable[] {
+  const changed = (name: string) => tables.find((d) => d.name === name && d.op !== 'drop' && !d.unparsed);
+  return target.tables.flatMap((child) => child.foreignKeys.flatMap((fk): ManualTable[] => {
+    const parent = fk.refSchema === undefined && !child.parseError ? target.tables.find((t) => t.name === fk.refTable) : undefined;
+    if (!parent || parent.parseError || parent.indexes.some((i) => isStandardKey(i, fk.refColumns))) return [];
+    const c = changed(child.name);
+    const p = changed(parent.name);
+    const addsFk = c?.op === 'add' || Boolean(c?.foreignKeys.some((f) => f.name === fk.name && (f.op === 'add' || f.op === 'modify')));
+    const touchesKey = (p?.op === 'modify' || p?.op === 'rename') && p.indexes.some((i) => (i.op !== 'rename' || i.fields.length > 0)
+      && [...indexColumns(i.from), ...indexColumns(i.to)].some((col) => fk.refColumns.includes(col)));
+    if (!addsFk && !touchesKey) return [];
+    const label = `${child.name}.${fk.name}`;
+    const reason = (table: string) => `${table}: FK(${label})가 참조하는 ${parent.name}(${fk.refColumns.join(', ')}) 에 TARGET 에서 같은 컬럼의 UNIQUE/PRIMARY 키가 없습니다. MySQL 8.4 restrict_fk_on_non_standard_key=ON(기본)에서 실패하고(FK 추가 error 6125, 부모 인덱스 삭제 error 1553), 8.0 은 실행 가능합니다 — FK 와 부모 키를 함께 확인해 직접 작성하세요`;
+    const note = `8.4 restrict_fk_on_non_standard_key: FK ${label} 는 참조 컬럼과 같은 UNIQUE/PRIMARY 키가 필요합니다 (8.0 은 실행 가능)`;
+    const blocked = [...new Set([...(c ? [child.name] : []), ...(touchesKey ? [parent.name] : [])])];
+    return blocked.map((table) => ({ table, reason: reason(table), note }));
+  }));
 }

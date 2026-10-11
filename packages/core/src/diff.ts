@@ -116,7 +116,7 @@ export function diffSchemas(base: SchemaModel, target: SchemaModel, renames: Ren
     routines: routinesUnknown ? [] : diffRoutines(base.routines ?? [], target.routines ?? []),
     routinesUnknown,
     objectNames: [...new Set(all.map((o) => o.name))],
-    manualTables: findManualTables(base, tables),
+    manualTables: findManualTables(base, target, tables),
   };
 }
 
