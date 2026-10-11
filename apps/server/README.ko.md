@@ -35,6 +35,7 @@ nginx·ALB 같은 리버스 프록시 뒤에 두면 모든 요청의 소켓 주�
 - **스키마 업그레이드**: `src/db/migrations/NNN_*.sql` 을 기동 시 `PRAGMA user_version` 기준으로 적용합니다. 첫 줄이 `-- foreign_keys: off` 인 파일은 외래 키를 끈 채(테이블 재생성용) 실행하고, 커밋 전에 `PRAGMA foreign_key_check` 로 검증한 뒤 `VACUUM` 합니다. 업그레이드 전에 백업하세요.
 - 마이그레이션 003(스키마 v3)은 사용자 계정을 보존하고(대소문자만 다른 사용자명은 먼저 만든 것만 남김), 모든 세션을 끊으며, **업로드 데이터**(Database·Schema·버전·rename·DMS 매핑)를 **비웁니다**. 정의서를 다시 올리세요.
 - 마이그레이션 004 는 MySQL 루틴(`function`·`procedure`, td-export 0.1.52+)을 저장할 수 있도록 `objects` 를 다시 만듭니다. 데이터는 모두 보존합니다.
+- 마이그레이션 005 는 수동 rename 을 명시적으로 저장한 쌍(빈 목록 저장 포함)을 기록하는 `rename_mapping_sets` 를 추가합니다. 매핑이 있던 기존 쌍은 채워 둡니다.
 - DB 의 `user_version` 이 서버가 아는 최신 마이그레이션보다 크면(구 버전 이미지로 내려간 경우 등) 기동을 거부합니다. 그 버전에서 받아 둔 백업으로 복원하세요.
 - 연결 설정: WAL, `synchronous=NORMAL`, `journal_size_limit=64MB`, `busy_timeout=5000`, `foreign_keys=ON`. 종료 시 `PRAGMA optimize` 를 실행합니다.
 
@@ -60,7 +61,7 @@ nginx·ALB 같은 리버스 프록시 뒤에 두면 모든 요청의 소켓 주�
 
 역할: `admin`(계정 관리 포함 전부), `dba`(데이터 변경 전부), `viewer`(읽기 전용). `PUT /diff/renames`(rename 매핑 저장)는 admin·dba 만 할 수 있습니다. 모든 라우트는 로그인·권한을 본문을 파싱하기 전(`onRequest`)에 확인하므로, 익명 요청은 401, viewer 는 403 을 본문(JSON·업로드 multipart)을 읽기 전에 받습니다. BASE 와 TARGET 이 같은 버전이면 400 입니다.
 
-전환 매핑은 Schema 쌍(As-Is → To-Be)에 붙습니다. 같은 쌍에 다시 올리면 리비전이 늘고, BASE 버전이 From Schema, TARGET 버전이 To Schema 에 속하면 최신 리비전이 자동 적용됩니다. BASE·TARGET 이 반대이면 역쌍의 DMS 매핑과 수동 rename 을 뒤집어 rename 으로 반영해 되돌리기 DDL 에도 RENAME 이 나옵니다(그 쌍에 저장된 수동 매핑이 있으면 그것을 쓰고, 없을 때만 역쌍에 저장된 수동 매핑을 뒤집어 `reversed: true` 로 돌려줌). 전환 표는 정방향 쌍에서만 만듭니다. `GET /diff` 의 `renames` 항목에는 `source: 'dms' | 'manual'` 이 붙습니다. `PUT /diff/renames` 는 수동 rename 만 저장하며, DMS 에서 온 rename 과 같은 항목은 500개 한도를 적용하기 전에 서버가 거릅니다.
+전환 매핑은 Schema 쌍(As-Is → To-Be)에 붙습니다. 같은 쌍에 다시 올리면 리비전이 늘고, BASE 버전이 From Schema, TARGET 버전이 To Schema 에 속하면 최신 리비전이 자동 적용됩니다. BASE·TARGET 이 반대이면 역쌍의 DMS 매핑과 수동 rename 을 뒤집어 rename 으로 반영해 되돌리기 DDL 에도 RENAME 이 나옵니다(그 쌍에 저장된 수동 매핑이 있으면 그것을 쓰고, 그 쌍에 저장한 적이 없을 때만 — 빈 목록 저장도 저장입니다 — 역쌍에 저장된 수동 매핑을 뒤집어 `reversed: true` 로 돌려줌. 컬럼·인덱스 rename 의 테이블은 뒤집은 수동 테이블 rename, 없으면 DMS 테이블 rename 으로 대응시킴). 전환 표는 정방향 쌍에서만 만듭니다. `GET /diff` 의 `renames` 항목에는 `source: 'dms' | 'manual'` 이 붙습니다. `PUT /diff/renames` 는 수동 rename 만 저장하며, DMS 에서 온 rename 과 같은 항목은 500개 한도를 적용하기 전에 서버가 거릅니다. 같은 이름으로 가는 매핑이 둘 이상(그중 수동 매핑 포함)이면 400 으로 거부합니다.
 
 ## 테스트
 
