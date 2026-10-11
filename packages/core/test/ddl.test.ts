@@ -434,6 +434,30 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(statements.some((s) => s.sql.includes('DROP COLUMN'))).toBe(false);
   });
 
+  it('카드에 테이블 문장이 들어가면 그 테이블의 FK 해제·재추가도 함께 넣는다 — 새 자식 테이블, FK 컬럼 교체 (11회차 7)', () => {
+    const { statements, dependencies } = cardOf('card-view-fk-closure', 'view', 'v');
+    expect(dependencies).toEqual(['c', 'c2']);
+    expect(statements.map((s) => s.sql.split('\n').slice(0, 2).join(' '))).toEqual([
+      'ALTER TABLE `c2`   DROP FOREIGN KEY `fk_c2_p`',
+      'CREATE TABLE `c` (   `id` int NOT NULL,',
+      'ALTER TABLE `c2`   DROP INDEX `ix_c2_p`,',
+      'ALTER TABLE `c2`   ADD CONSTRAINT `fk_c2_p` FOREIGN KEY (`new_pid`) REFERENCES `p` (`id`)',
+      'ALTER TABLE `c`   ADD CONSTRAINT `fk_c_p` FOREIGN KEY (`pid`) REFERENCES `p` (`id`)',
+      expect.stringMatching(/VIEW `v`/),
+    ]);
+  });
+
+  it('다른 스키마로 한정된 참조(`ext`.`t`)는 로컬 t 의존이 아니다 (11회차 6)', () => {
+    const table = (cols: string) => `/* Database : shop */\nCREATE TABLE \`t\` (\n${cols}\n) ENGINE=InnoDB;\n`;
+    const view = (body: string) => `CREATE ALGORITHM=UNDEFINED DEFINER=\`root\`@\`%\` SQL SECURITY DEFINER VIEW \`v\` AS ${body};`;
+    const base = parseSqlDump(table('  `id` int NOT NULL,\n  `payload` int') + view('select 1 AS `a`')).model;
+    const target = parseSqlDump(table('  `id` int NOT NULL') + view('select `x`.`id` AS `a`,`ext`.`f`() AS `b` from `ext`.`t` `x`')).model;
+    const stmts = generateDdl(diffSchemas(base, target));
+    expect(objectStatements(stmts, 'view', 'v').dependencies).toEqual([]);
+    const local = parseSqlDump(table('  `id` int NOT NULL') + view('select `x`.`id` AS `a` from `shop`.`t` `x`')).model;
+    expect(objectStatements(generateDdl(diffSchemas(base, local)), 'view', 'v').dependencies).toEqual(['t']);
+  });
+
   it('이름 비우기 의존은 같은 이름 공간(테이블↔뷰)끼리만: 테이블 p 삭제 + 프로시저 p 추가 카드에 DROP TABLE 을 넣지 않는다 (9회차 1)', () => {
     const { statements, dependencies } = cardOf('card-table-proc-same-name', 'procedure', 'p');
     expect(statements.map((s) => s.kind)).toEqual(['procedure']);

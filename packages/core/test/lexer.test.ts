@@ -22,6 +22,16 @@ describe('tokenize', () => {
     expect(tokenize('/* Table : x */ CREATE -- 끝\n').map((t) => t.v)).toEqual(['CREATE']);
   });
 
+  it('-- 뒤에 공백·탭·개행·제어 문자가 오거나 입력이 끝나면 주석이다 (MySQL 서버 규칙, 11회차 3)', () => {
+    expect(tokenize('a --\tb\nc').map((t) => t.v)).toEqual(['a', 'c']);
+    expect(tokenize('a --\nb').map((t) => t.v)).toEqual(['a', 'b']);
+    expect(tokenize('a --\r\nb').map((t) => t.v)).toEqual(['a', 'b']);
+    expect(tokenize('a --\u0001 b\nc').map((t) => t.v)).toEqual(['a', 'c']);
+    expect(tokenize('a --').map((t) => t.v)).toEqual(['a']);
+    expect(tokenize('1--1').map((t) => t.v)).toEqual(['1', '-', '-', '1']);
+    expect(tokenize('a --b').map((t) => t.v)).toEqual(['a', '-', '-', 'b']);
+  });
+
   it('백슬래시 이스케이프를 디코딩한다', () => {
     expect(tokenize("'a\\nb\\\\c'")[0].v).toBe('a\nb\\c');
   });
@@ -62,6 +72,13 @@ describe('viewReferences (8회차 2, 10회차 2)', () => {
     const body = "select `shop`.`tax`(`o`.`amt`) AS `chat_log`,'`log`' AS `s` from (`o` join `shop`.`m`) where coalesce(`o`.`x`, 0)";
     expect(viewReferences(body)).toEqual({ relations: ['o', 'm'], routines: ['tax', 'coalesce'] });
     expect(viewReferences("from `a` where 'x")).toBeUndefined();
+  });
+
+  it('현재 스키마 목록을 주면 다른 스키마로 한정된 테이블·함수는 로컬 참조가 아니다 (11회차 6)', () => {
+    const body = "select `ext`.`fn`(`t`.`a`) AS `x`,`shop`.`g`() AS `y`,`h`() AS `z` from ((`ext`.`t` join `shop`.`m`) join `u`)";
+    expect(viewReferences(body, new Set(['shop']))).toEqual({ relations: ['m', 'u'], routines: ['g', 'h'] });
+    expect(viewReferences(body, new Set())).toEqual({ relations: ['u'], routines: ['h'] });
+    expect(objectReferences(body, ['t', 'fn'], new Set(['shop']))).toEqual({ relations: ['m', 'u'], routines: ['g', 'h'] });
   });
 
   it('토큰으로 나눌 수 없으면 후보 중 `이름` 이 나오는 것을 양쪽 모두로 본다 (안전 쪽)', () => {

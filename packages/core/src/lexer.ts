@@ -46,7 +46,7 @@ export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
       i = end + 2;
       continue;
     }
-    if (src.startsWith('-- ', i) || c === '#') {
+    if (isDashComment(src, i) || c === '#') {
       const end = src.indexOf('\n', i);
       i = end < 0 ? src.length : end + 1;
       continue;
@@ -81,6 +81,11 @@ export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
     i++;
   }
 }
+
+// '--' 줄 주석: 뒤에 공백·탭·개행 같은 공백 문자나 제어 문자가 오거나 입력이 끝나야 한다 (MySQL 서버 sql_lex.cc 규칙).
+// mysql 클라이언트는 제어 문자 뒤를 주석으로 보지 않으므로 최종 단일 문장 검사(statement-check)가 제어 문자 섞인 주석을 따로 거부한다
+const DASH_COMMENT_NEXT = /[\x00-\x20\x7f]/;
+const isDashComment = (src: string, i: number): boolean => src.startsWith('--', i) && (i + 2 >= src.length || DASH_COMMENT_NEXT.test(src[i + 2]));
 
 function hexBitLiteral(src: string, at: number): string | undefined {
   HEX_BIT.lastIndex = at;
@@ -148,10 +153,15 @@ const tryTokenize = (src: string): Token[] | undefined => {
   }
 };
 
-// SELECT 본문에서 FROM/JOIN 뒤에 오는 테이블 이름 (`schema`.`table` 은 table). 토큰으로 나눌 수 없으면 undefined
-export function tableReferences(src: string): string[] | undefined {
+// SELECT 본문에서 FROM/JOIN 뒤에 오는 테이블 이름 (`schema`.`table` 은 table). 토큰으로 나눌 수 없으면 undefined.
+// local: 현재 스키마 이름들. 주면 다른 스키마로 한정된 참조(`ext`.`t`)는 로컬 객체가 아니므로 뺀다 (SHOW CREATE VIEW 는 현재 스키마
+// 한정자를 생략하고 다른 스키마만 한정한다). 주지 않으면 한정자를 보지 않는다
+export function tableReferences(src: string, local?: ReadonlySet<string>): string[] | undefined {
   const tokens = tryTokenize(src);
-  if (!tokens) return undefined;
+  return tokens && relationNames(tokens, local);
+}
+
+function relationNames(tokens: Token[], local?: ReadonlySet<string>): string[] {
   const out: string[] = [];
   tokens.forEach((tok, i) => {
     if (tok.t !== 'word' || !TABLE_KEYWORD.test(tok.v)) return;
@@ -159,35 +169,40 @@ export function tableReferences(src: string): string[] | undefined {
     while (tokens[j]?.v === '(' && tokens[j].t === 'op') j++;
     const first = tokens[j];
     if (first?.t !== 'ident') return;
-    const qualified = tokens[j + 1]?.t === 'op' && tokens[j + 1].v === '.' && tokens[j + 2]?.t === 'ident';
+    const qualified = isOp(tokens[j + 1], '.') && tokens[j + 2]?.t === 'ident';
+    if (qualified && !isLocal(first.v, local)) return;
     out.push(qualified ? tokens[j + 2].v : first.v);
   });
   return out;
 }
 
+const isOp = (t: Token | undefined, v: string): boolean => t?.t === 'op' && t.v === v;
+const isLocal = (schema: string, local?: ReadonlySet<string>): boolean => local === undefined || local.has(schema);
+
 // '(' 앞에 오지만 함수 이름이 아닌 키워드
 const NOT_CALL = /^(FROM|JOIN|STRAIGHT_JOIN|IN|ON|AS|AND|OR|NOT|XOR|EXISTS|WHERE|SELECT|USING|ANY|ALL|SOME|UNION|VALUES|OVER|WINDOW|LATERAL|WITH|INTERVAL|HAVING|BY|THEN|ELSE|WHEN|CASE|IS)$/i;
 
 // 뷰 본문이 쓰는 객체 이름. relations: FROM/JOIN 뒤 테이블·뷰 (테이블·뷰 이름 공간), routines: `이름`( 형태의 함수 호출
-// (`schema`.`fn`( 은 fn. 함수 이름 공간 — 같은 이름의 테이블과 무관하다)
+// (`schema`.`fn`( 은 fn. 함수 이름 공간 — 같은 이름의 테이블과 무관하다). local 은 tableReferences 와 같다 (다른 스키마 함수도 뺀다)
 export interface References {
   relations: string[];
   routines: string[];
 }
 
 // 별칭(AS 뒤)·컬럼 참조(`t`.`c`)·문자열·주석 안의 이름은 빼고, 토큰으로 나눌 수 없으면 undefined
-export function viewReferences(src: string): References | undefined {
+export function viewReferences(src: string, local?: ReadonlySet<string>): References | undefined {
   const tokens = tryTokenize(src);
-  const tables = tableReferences(src);
-  if (!tokens || !tables) return undefined;
-  const calls = tokens.filter((tok, i) => (tok.t === 'ident' || (tok.t === 'word' && !NOT_CALL.test(tok.v))) && tokens[i + 1]?.t === 'op' && tokens[i + 1].v === '(').map((tok) => tok.v);
-  return { relations: [...new Set(tables)], routines: [...new Set(calls)] };
+  if (!tokens) return undefined;
+  const qualifier = (i: number) => (isOp(tokens[i - 1], '.') && (tokens[i - 2]?.t === 'ident' || tokens[i - 2]?.t === 'word') ? tokens[i - 2].v : undefined);
+  const calls = tokens.filter((tok, i) => (tok.t === 'ident' || (tok.t === 'word' && !NOT_CALL.test(tok.v))) && isOp(tokens[i + 1], '(')
+    && (qualifier(i) === undefined || isLocal(qualifier(i)!, local))).map((tok) => tok.v);
+  return { relations: [...new Set(relationNames(tokens, local))], routines: [...new Set(calls)] };
 }
 
 // 뷰 본문이 쓰는 객체 이름 (viewReferences). 토큰으로 나눌 수 없으면 후보 중 `이름` 이 나오기만 해도 양쪽 모두로 본다 (안전 쪽).
 // 뷰 생성 순서·객체 카드 복사 묶음·수동 확인 전파가 같은 판정을 쓰도록 한곳에 둔다
-export function objectReferences(body: string, candidates: Iterable<string>): References {
-  const refs = viewReferences(body);
+export function objectReferences(body: string, candidates: Iterable<string>, local?: ReadonlySet<string>): References {
+  const refs = viewReferences(body, local);
   if (refs) return refs;
   const hits = [...new Set(candidates)].filter((n) => body.includes(quoteIdent(n)));
   return { relations: hits, routines: hits };

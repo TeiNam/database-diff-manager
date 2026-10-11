@@ -2,7 +2,7 @@
 import { renamedFkNames } from './auto-name';
 import { guardStatements } from './ddl-guard';
 import { RETYPED_FIELD, retypeGroups } from './fk-retype';
-import { type Op, type RoutineDiff, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
+import { localSchemas, type Op, type RoutineDiff, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
 import { commentLine } from './comment-text';
 import { alter, alterStatements, inheritCollation, manualBody, manualNote, sqlBody, type StatementBody } from './ddl-alter';
 import { objectReferences, quoteIdent as q, quoteString, type References } from './lexer';
@@ -104,7 +104,8 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
   for (const r of diff.routines) if (r.op !== 'drop') routine(r, createRoutine(r.to!));
   // 9. 뷰 생성·교체 (뷰가 참조하는 뷰를 먼저)
   const names = [...diff.objectNames, ...diff.routines.map((r) => r.name)];
-  const reads = new Map(diff.views.filter((x) => x.op !== 'drop').map((v) => [v, objectReferences(v.to!.body, names)]));
+  const local = localSchemas(diff);
+  const reads = new Map(diff.views.filter((x) => x.op !== 'drop').map((v) => [v, objectReferences(v.to!.body, names, local)]));
   for (const v of sortViews(reads)) {
     view(v, v.to!.parseError
       ? manualNote(`${v.name}: 파싱할 수 없는 뷰입니다. 원문을 확인하세요`)

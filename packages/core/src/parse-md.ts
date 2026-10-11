@@ -3,7 +3,9 @@ import { quoteString, tokenize } from './lexer';
 import type { Column, ForeignKey, Index, IndexField, IndexPart, Table, View } from './model';
 import { normalizeType } from './normalize';
 import type { ParsedDump, ParseWarning } from './parse-dump';
+import { REF_ACTIONS } from './parse-table';
 import { parseCreateView } from './parse-view';
+import { assertDataType, assertExpression, assertOnUpdate, assertWord } from './sql-safety';
 
 // 기본값이 없는 타입: nullable이어도 SHOW CREATE에 DEFAULT NULL이 붙지 않는다 (json은 붙는다)
 const NO_DEFAULT_TYPES = /^((tiny|medium|long)?(blob|text)|geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geomcollection|geometrycollection)\b/i;
@@ -202,8 +204,8 @@ function parseSection(name: string, body: string[], format: MdFormat): Table | V
     foreignKeys: mergeForeignKeys(listLines('**Constraint**').map(mdForeignKey)),
     checks: [],
     options: [
-      ...(engine ? [{ key: 'ENGINE', value: engine }] : []),
-      ...(collate ? [{ key: 'COLLATE', value: collate }] : []),
+      ...(engine ? [{ key: 'ENGINE', value: assertWord(engine, 'Engine') }] : []),
+      ...(collate ? [{ key: 'COLLATE', value: assertWord(collate, 'Collate') }] : []),
       ...(comment ? [{ key: 'COMMENT', value: quoteString(comment) }] : []),
     ],
     fidelity: 'partial',
@@ -274,10 +276,10 @@ function mdColumn(c: string[], format: MdFormat): { col: Column; isPk: boolean }
   const ex = extra.toLowerCase();
   const unknown: Column['unknown'] = ['charset', 'collation', 'srid'];
   const col: Column = {
-    name, type: normalizeType(type), nullable: nullable === 'YES', invisible: /\binvisible\b/.test(ex), autoIncrement: ex.includes('auto_increment'), unknown,
+    name, type: normalizeType(assertDataType(type)), nullable: nullable === 'YES', invisible: /\binvisible\b/.test(ex), autoIncrement: ex.includes('auto_increment'), unknown,
   };
   const onUpdate = /on update (\S+)/i.exec(extra);
-  if (onUpdate) col.onUpdate = onUpdate[1];
+  if (onUpdate) col.onUpdate = assertOnUpdate(onUpdate[1]);
   if (/(virtual|stored) generated/.test(ex)) {
     col.generated = { expr: '', stored: ex.includes('stored generated') };
     unknown.push('generated');
@@ -327,20 +329,23 @@ function quotedDefault(col: Column, value: string, isExpression: boolean): strin
   return v2Default(col, value, isExpression);
 }
 
+// 한 문자열 토큰이 아니면 원문 그대로 비교하되, 원문이 그대로 실행 DDL 에 들어가므로 식 규칙(;·주석·괄호·클라이언트 명령·닫히지
+// 않은 따옴표 거부)을 통과해야 한다 (주입 방지, 11회차)
 function requote(literal: string): string {
   try {
     const toks = tokenize(literal);
-    return toks.length === 1 && toks[0].t === 'string' && toks[0].e === literal.length ? quoteString(toks[0].v) : literal;
+    if (toks.length === 1 && toks[0].t === 'string' && toks[0].e === literal.length) return quoteString(toks[0].v);
   } catch {
-    return literal; // 닫히지 않은 따옴표 등: 원문 그대로 비교한다
+    // 닫히지 않은 따옴표: 아래 식 규칙이 거부한다
   }
+  return assertExpression(literal, 'Default');
 }
 
 function mdDefault(value: string, isExpression: boolean): string | undefined {
   if (value === '') return undefined; // 기본값 없음 (legacy는 hasNoDefault 컬럼만 여기로 온다)
   if (value === "''") return "''"; // 빈 문자열 기본값 (v2)
   if (/^current_timestamp(\(\d*\))?$/i.test(value)) return value;
-  if (isExpression) return `(${value})`;
+  if (isExpression) return `(${assertExpression(value, 'Default 식')})`;
   if (/^b'[01]*'$/.test(value)) return value;
   return quoteString(value);
 }
@@ -372,7 +377,7 @@ function indexPart(part: KeyPart, columnNames: Set<string>): IndexPart {
   if (columnNames.has(text)) return { column: text, desc };
   const prefix = PREFIX_PART.exec(text);
   if (prefix && columnNames.has(prefix[1])) return { column: prefix[1], length: Number(prefix[2]), desc };
-  return { expr: strip(part.decoded), desc };
+  return { expr: assertExpression(strip(part.decoded), '인덱스 식'), desc };
 }
 
 interface KeyPart {
@@ -424,8 +429,16 @@ function mdForeignKey(line: string): ForeignKey {
   if (!m) throw new Error(`FK 형식 오류: ${line}`);
   return {
     name: m[1], columns: splitNames(m[2]), ...mdReference(m[3]),
-    onDelete: m[4].trim(), onUpdate: m[5].trim(),
+    onDelete: refAction(m[4]), onUpdate: refAction(m[5]),
   };
+}
+
+// FK 참조 동작: SQL 파서와 같은 목록(RESTRICT, CASCADE, SET NULL, SET DEFAULT, NO ACTION)만 허용한다
+function refAction(text: string): string {
+  const words = text.trim().split(/\s+/).map((w) => w.toUpperCase());
+  const hit = REF_ACTIONS.find((a) => a.join(' ') === words.join(' '));
+  if (!hit) throw new Error(`FK 참조 동작이 허용 형식이 아닙니다: ${JSON.stringify(text.trim())}`);
+  return hit.join(' ');
 }
 
 // 참조 대상: 'table.col' 또는 (0.1.29+ 다중 컬럼) 'table(c1, c2)'. 다른 스키마면 앞에 'schema.'가 붙는다 (0.1.29+)
@@ -467,6 +480,6 @@ function parseViewSection(name: string, body: string[]): View {
   if (open < 0) throw new Error('View Create SQL 블록 없음');
   const fence = body[open].slice(0, -3);
   const close = body.indexOf(fence, open + 1);
-  const view = parseCreateView(body.slice(open + 1, close < 0 ? undefined : close).join('\n'));
+  const view = parseCreateView(body.slice(open + 1, close < 0 ? undefined : close).join('\n'), { strict: true });
   return { ...view, name };
 }

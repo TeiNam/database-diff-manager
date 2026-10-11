@@ -84,7 +84,13 @@ export interface SchemaDiff {
   routinesUnknown: boolean; // 한쪽이라도 MD 출처라 루틴을 비교하지 않음 (routines 는 빈 배열)
   objectNames: string[]; // BASE·TARGET 의 모든 테이블·뷰 이름 (맞바꾸기 임시 이름이 겹치지 않게 예약)
   manualTables: ManualTable[]; // 생성 DDL 을 그대로 실행할 수 없어 문장을 수동 확인으로 돌릴 테이블과 이유
+  // BASE·TARGET 스키마 이름 (빈 이름 제외). 뷰 본문의 `스키마`.`객체` 참조가 이 목록 밖이면 다른 스키마 객체라 로컬 의존이 아니다.
+  // 비었거나 없으면(옛 JSON) 한정자로 판정하지 않는다 (같은 이름이면 로컬로 보는 안전 쪽)
+  schemaNames?: string[];
 }
+
+// 뷰 본문의 한정자 중 로컬로 보는 스키마 이름 (schemaNames). 스키마 이름을 모르면 undefined — 한정자를 보지 않는다(로컬로 본다)
+export const localSchemas = (diff: Pick<SchemaDiff, 'schemaNames'>): ReadonlySet<string> | undefined => (diff.schemaNames?.length ? new Set(diff.schemaNames) : undefined);
 
 // 비교용 표식: 삭제되는 BASE 컬럼 이름 앞에 붙여 TARGET 의 같은 이름 컬럼과 다르게 만든다 (식별자에 나올 수 없는 문자)
 const DROPPED_MARK = '\u0000dropped:';
@@ -117,6 +123,7 @@ export function diffSchemas(base: SchemaModel, target: SchemaModel, renames: Ren
     routinesUnknown,
     objectNames: [...new Set(all.map((o) => o.name))],
     manualTables: findManualTables(base, target, tables),
+    schemaNames: [...new Set([base.name, target.name].filter((n) => n !== ''))],
   };
 }
 

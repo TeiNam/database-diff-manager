@@ -14,8 +14,10 @@ const blocksIncomingFks = (st: Statement) => st.kind === 'table' && st.op !== 'a
 export function objectStatements(stmts: Statement[], kind: Kind, name: string): { statements: Statement[]; dependencies: string[] } {
   const isOwn = (st: Statement) => st.kind === kind && (st.object === name || Boolean(st.related?.includes(name)));
   const ofTable = (t: string) => stmts.filter((st) => st.kind === 'table' && (st.object === t || Boolean(st.related?.includes(t))));
-  // FK 를 추가하기 전에 있어야 하는 테이블 상태: 생성·rename·변경 (FK 문장·DROP TABLE 제외)
-  const prepare = (t: string) => ofTable(t).filter((st) => st.op !== 'drop' && !st.fkDrops && !st.fkAdds);
+  // 포함 관계 닫힘: 카드에 테이블 문장이 하나라도 들어가면 그 테이블의 문장 전부(FK 해제·재추가 포함, DROP TABLE 제외)를 넣는다.
+  // FK 해제 없이 FK 컬럼을 바꾸는 ALTER 는 실패하고(error 1828·1553), 생성만 넣고 FK 추가를 빼면 TARGET 과 다른 테이블이 된다.
+  // 넣은 문장의 의존(FK 부모, fk-retype 묶음, 들어오는 FK 해제 …)은 아래 고정점 반복이 다시 넓힌다
+  const closure = (t: string) => ofTable(t).filter((st) => !(st.op === 'drop' && !st.fkDrops));
   // 이 테이블을 참조하는 다른 테이블의 FK 해제. 삭제되는 테이블은 해제 문장만, 남는 테이블은 재추가까지 그 테이블 문장 전부
   const incoming = (t: string) => stmts
     .filter((st) => st.kind === 'table' && st.object !== t && Boolean(st.fkDrops?.includes(t)))
@@ -28,7 +30,7 @@ export function objectStatements(stmts: Statement[], kind: Kind, name: string): 
     const calls = new Set((view.calls ?? []).map(routineNameKey));
     const isUsed = (st: Statement) => (isRelation(st.kind) ? reads.has(st.object) : st.kind === 'function' && calls.has(routineNameKey(st.object)));
     return stmts.filter((st) => !(st.kind === view.kind && st.object === view.object) && st.op !== 'drop' && isUsed(st))
-      .flatMap((st) => (st.kind === 'table' ? prepare(st.object) : [st]));
+      .flatMap((st) => (st.kind === 'table' ? closure(st.object) : [st]));
   };
   // 이름 N 을 차지하는(생성·rename into) 문장 앞에 N 을 비워야 하는 문장: 같은 이름 공간(테이블·뷰는 공유, 함수·프로시저는 별개)의
   // 다른 종류 객체 삭제(테이블↔뷰 교체)와 N 을 다른 이름으로 옮기는 테이블 rename. 빠지면 단독 실행 때 'already exists'·'is not VIEW'
@@ -45,7 +47,8 @@ export function objectStatements(stmts: Statement[], kind: Kind, name: string): 
   while (queue.length) {
     const st = queue.pop()!;
     if (st.depends) for (const t of st.depends) pick(ofTable(t));
-    if (st.fkAdds) pick([...prepare(st.object), ...st.fkAdds.flatMap(prepare)]);
+    if (st.kind === 'table' && !(st.op === 'drop' && !st.fkDrops)) pick((st.related ?? [st.object]).flatMap(closure));
+    if (st.fkAdds) pick(st.fkAdds.flatMap(closure));
     if (blocksIncomingFks(st)) pick(incoming(st.object));
     if (st.kind === 'view' && st.op !== 'drop' && !st.comment) pick(used(st));
     if (st.op !== 'drop') pick(freeing(st));
