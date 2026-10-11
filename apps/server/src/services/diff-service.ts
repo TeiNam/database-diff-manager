@@ -102,10 +102,17 @@ export function loadDiffInputs(db: Db, cache: AppCache, baseId: number, targetId
   return { ref, base, target, dms: dmsRenamesFor(db, cache, ref, base, target) };
 }
 
-// 역쌍 매핑 중 역쌍(정방향) diff 에서 실제로 적용된 것만 (같은 대상으로 가는 매핑·충돌로 빠진 매핑은 뒤집지 않는다)
-function appliedOnly(db: Db, cache: AppCache, baseId: number, targetId: number, renames: RenameMapping[]): RenameMapping[] {
-  const applied = appliedRenameKeys(computeDiff(db, cache, baseId, targetId).diff);
-  return renames.filter((r) => applied.has(renameFullKey(r)));
+// 역쌍(정방향) diff 에서 최종 적용된 rename (renameFullKey 형식)과 그 diff 의 테이블 대응
+function forwardApplied(db: Db, cache: AppCache, baseId: number, targetId: number): { keys: Set<string>; diff: SchemaDiff } {
+  const { diff } = computeDiff(db, cache, baseId, targetId);
+  return { keys: appliedRenameKeys(diff), diff };
+}
+
+// 이 방향 매핑을 뒤집은 정방향 매핑의 키. column/index 의 table(이 방향 TARGET = 정방향 BASE 이름)은 정방향 TARGET 이름으로 바꾼다
+function forwardKeyOf(r: RenameMapping, forward: SchemaDiff): string {
+  if (r.kind === 'table') return renameFullKey({ kind: 'table', from: r.to, to: r.from });
+  const table = forward.tables.find((t) => t.oldName === r.table)?.name ?? r.table;
+  return renameFullKey({ kind: r.kind, table, from: r.to, to: r.from });
 }
 
 // diff 결과의 rename op (renameFullKey 형식)
@@ -119,6 +126,13 @@ function appliedRenameKeys(diff: SchemaDiff): Set<string> {
   return out;
 }
 
+// 역쌍 수동 매핑을 뒤집어 쓰는 경우: 역쌍(정방향) diff 에서 최종 적용된(DMS·수동을 합친 결과의) rename 만 뒤집는다.
+// 같은 대상 매핑·충돌로 빠진 수동 매핑과, 수동 매핑에 덮여 정방향에서 쓰이지 않은 DMS 매핑은 이 방향에서도 쓰지 않는다
+function reversedRenames(dms: RenameMapping[], reverse: RenameMapping[], forward: { keys: Set<string>; diff: SchemaDiff }): SourcedRename[] {
+  const manual = invertRenames(reverse.filter((r) => forward.keys.has(renameFullKey(r))), dms);
+  return mergeRenames(dms, manual, true).filter((r) => r.source !== 'dms' || forward.keys.has(forwardKeyOf(r, forward.diff)));
+}
+
 // 버전 내용은 불변이라 캐시 키는 (base, target, 전환 매핑 방향·id, 수동 rename 매핑과 그 출처 방향)뿐이다
 export function computeDiff(db: Db, cache: AppCache, baseId: number, targetId: number, inputs?: DiffInputs): DiffResponse {
   const { manual: forward, reverse } = manualRenamesFor(db, baseId, targetId);
@@ -127,8 +141,7 @@ export function computeDiff(db: Db, cache: AppCache, baseId: number, targetId: n
   const cached = cache.diff.get(key);
   if (cached) return cached;
   const { base, target, dms } = inputs ?? loadDiffInputs(db, cache, baseId, targetId, ref);
-  const manual = reverse ? invertRenames(appliedOnly(db, cache, targetId, baseId, reverse), dms) : forward;
-  const renames = mergeRenames(dms, manual, reverse !== undefined);
+  const renames = reverse ? reversedRenames(dms, reverse, forwardApplied(db, cache, targetId, baseId)) : mergeRenames(dms, forward);
   const diff = diffSchemas(base.model, target.model, renames);
   const statements = generateDdl(diff);
   const result: DiffResponse = {
