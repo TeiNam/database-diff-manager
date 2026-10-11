@@ -87,7 +87,8 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
   for (const g of renameGroups(diff.tables, taken)) {
     const [first] = g.tables;
     const frees = g.tables.map((d) => d.oldName!).filter((n) => !g.tables.some((d) => d.name === n));
-    if (g.tables.length === 1) table(first, { ...sqlBody(renameTableSql(g.clauses)), frees });
+    // 순수 테이블 rename 은 MySQL 이 들어오는 FK 의 참조를 새 이름으로 옮긴다 — 카드에 자식 FK 해제가 필요 없다 (15회차 2, 8.4 실측)
+    if (g.tables.length === 1) out.push({ object: first.name, kind: 'table', op: first.op, ...sqlBody(renameTableSql(g.clauses)), frees, keepsIncomingFks: true });
     else {
       const note = `얽힌 테이블 rename 을 한 문장으로 함께 적용합니다: ${g.tables.map((d) => `${d.oldName}→${d.name}`).join(', ')}`;
       out.push({ object: first.name, kind: 'table', op: 'rename', ...sqlBody(renameTableSql(g.clauses), [note]), related: g.tables.map((d) => d.name), frees });

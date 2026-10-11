@@ -505,6 +505,12 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(sqls('r')).toEqual(['ALTER TABLE `e`   DROP FOREIGN KEY `fk_e_r`', 'ALTER TABLE `r`   MODIFY COLUMN `id` bigint NOT NULL']);
   });
 
+  it('순수 테이블 rename(RENAME TABLE)은 MySQL 이 자식 FK 참조를 따라 옮기므로 새 이름 카드에 삭제되는 자식의 FK 해제를 넣지 않는다 (15회차 2, 8.4 실측)', () => {
+    const { statements, dependencies } = cardOf('card-parent-rename-child-drop', 'table', 'p2');
+    expect(statements.map((s) => s.sql)).toEqual(['RENAME TABLE `p` TO `p2`']);
+    expect(dependencies).toEqual([]);
+  });
+
   it('의존 매칭은 문장의 object 와 related 이름 모두를 본다: 맞바꾸기 뒤 coupon 을 읽는 새 뷰 카드는 묶음 RENAME 을 넣는다 (13회차 3)', () => {
     const { statements, dependencies } = cardOf('card-view-swap-rename', 'view', 'v_coupon');
     expect(statements.map((s) => s.sql.split('\n')[0])).toEqual([expect.stringMatching(/^RENAME TABLE `coupon` TO `__tdm_tmp_1`/), expect.stringMatching(/VIEW `v_coupon`/)]);
