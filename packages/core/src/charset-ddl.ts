@@ -85,6 +85,16 @@ export function charsetPlan(d: TableDiff): CharsetPlan | undefined {
   return { columns: new Set(changed), notes: narrowed.length ? [...notes, narrowNote(narrowed, from, to)] : notes };
 }
 
+// 테이블 기본 문자셋·콜레이션 변경으로 실효 문자셋·콜레이션이 바뀌는 문자열 컬럼(TARGET 이름).
+// 컬럼 diff 에는 안 잡히는 상속 컬럼도 포함한다 (FK 다시 만들기 판정용)
+export function effectiveCharsetChanges(d: TableDiff): string[] {
+  if (d.unparsed || !d.from || !d.to || d.from.parseError || d.to.parseError) return [];
+  if (!d.options.some((o) => CHARSET_KEYS.includes(o.key))) return [];
+  const from = tableCharset(d.from);
+  const to = tableCharset(d.to);
+  return columnPairs(d).filter((p) => p.base && !sameEffective(p, from, to)).map((p) => p.col.name);
+}
+
 // 문자셋 변경 문장에 맞춘 옵션 변경 목록. CONVERT TO가 문자셋·콜레이션을 함께 바꾸고,
 // 옵션으로 바꿀 때는 DEFAULT CHARSET만으로 기본 콜레이션이 정해지므로 COLLATE 제거는 따로 처리하지 않는다
 export function charsetOptions(options: OptionChange[], plan?: CharsetPlan): OptionChange[] {

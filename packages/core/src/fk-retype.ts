@@ -1,6 +1,7 @@
 // FK 로 묶인 컬럼의 타입·문자셋·콜레이션이 바뀌면 FK 정의가 같아도 다시 만들어야 한다. MODIFY 만 하면
 // FOREIGN_KEY_CHECKS=0 이어도 error 3780 (MySQL 8.0/8.4 실측). 그런 FK 를 'modify' 로 표시해 1단계 DROP·8단계 ADD 로 보낸다
 import { renamedFkNames } from './auto-name';
+import { effectiveCharsetChanges } from './charset-ddl';
 import type { Change, TableDiff } from './diff';
 import type { ForeignKey } from './model';
 
@@ -8,12 +9,14 @@ import type { ForeignKey } from './model';
 export const RETYPED_FIELD = 'columnType';
 const RETYPE_FIELDS = new Set(['type', 'charset', 'collation']);
 
-// 테이블(TARGET 이름)별 타입·문자셋·콜레이션이 바뀌는 컬럼(TARGET 이름)
+// 테이블(TARGET 이름)별 타입·문자셋·콜레이션이 바뀌는 컬럼(TARGET 이름).
+// 테이블 기본 문자셋을 상속하는 컬럼은 컬럼 diff 가 없어도 실효 문자셋이 바뀌므로 함께 본다 (CONVERT TO 도 error 3780)
 function retypedColumns(diffs: Iterable<TableDiff>): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>();
   for (const d of diffs) {
     const cols = d.columns.filter((c) => (c.op === 'modify' || c.op === 'rename') && c.fields.some((f) => RETYPE_FIELDS.has(f)));
-    if (cols.length) out.set(d.name, new Set(cols.map((c) => c.name)));
+    const names = new Set([...cols.map((c) => c.name), ...effectiveCharsetChanges(d)]);
+    if (names.size) out.set(d.name, names);
   }
   return out;
 }
