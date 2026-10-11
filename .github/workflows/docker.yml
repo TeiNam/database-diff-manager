@@ -41,9 +41,49 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # 생성 DDL 실증 테스트 (test:mysql): MySQL 8.0·8.4 service 컨테이너에 BASE 적용 → DDL 실행 → SHOW CREATE 가 TARGET 과 같은지 확인.
+  # 이미지 태그는 packages/core/docker-compose.test.yml 과 같게 둔다. compose 대신 service 컨테이너를 쓰므로 vitest 를 직접 실행한다
+  test-mysql:
+    runs-on: ubuntu-latest
+    services:
+      mysql80:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: test
+        ports: ['33080:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -ptest"
+          --health-interval 2s
+          --health-retries 60
+      mysql84:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: test
+        ports: ['33084:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -ptest"
+          --health-interval 2s
+          --health-retries 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # 러너 이미지의 mysql 클라이언트가 있으면 DELIMITER·주석 경계 검사도 함께 돈다 (없으면 그 검사만 건너뛴다)
+      - run: mysql --version || echo 'mysql 클라이언트 없음 — 클라이언트 경계 검사는 건너뜀'
+      - name: test:mysql (MySQL 8.0 · 8.4)
+        working-directory: packages/core
+        env:
+          MYSQL_IT: '1'
+          MYSQL80_PORT: '33080'
+          MYSQL84_PORT: '33084'
+        run: npx vitest run test/mysql.int.test.ts
+
   # 계산만 한다 (태그는 이미지가 올라간 뒤 release 잡에서 만든다)
   version:
-    needs: test
+    needs: [test, test-mysql]
     if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
     outputs:
