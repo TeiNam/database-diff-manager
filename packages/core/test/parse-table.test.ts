@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { parseSqlDump } from '../src/parse-dump';
 import { parseCreateTable } from '../src/parse-table';
 import { fixture } from './helpers';
 
@@ -81,5 +82,37 @@ describe('parseCreateTable: 옵션·파티션', () => {
 describe('parseCreateTable: 오류', () => {
   it('알 수 없는 컬럼 속성은 줄 번호와 함께 실패한다', () => {
     expect(() => parseCreateTable('CREATE TABLE `x` (\n  `a` int NOT NULL FOO\n)')).toThrow("알 수 없는 컬럼 속성 'FOO' (줄 2)");
+  });
+});
+
+describe('MySQL 8.4 SHOW CREATE 속성 (9회차 6·7·8·9)', () => {
+  const dump = parseSqlDump(fixture('show-create-84.sql'));
+  const t = dump.model.tables[0];
+  const c = (name: string) => t.columns.find((x) => x.name === name)!;
+
+  it('파싱·왕복 경고 없이 읽는다', () => {
+    expect(dump.warnings).toEqual([]);
+  });
+
+  it('16진수·비트 기본값', () => {
+    expect([c('bin2').default, c('flags').default, c('mask').default]).toEqual(['0x00FF', "b'101'", "b'1010'"]);
+  });
+
+  it('COLUMN_FORMAT·STORAGE 컬럼 속성', () => {
+    expect(c('fixed_col')).toMatchObject({ storage: 'DISK', columnFormat: 'FIXED', default: "'1'" });
+    expect(c('mem_col')).toMatchObject({ storage: 'MEMORY' });
+    expect(c('dyn_col')).toMatchObject({ columnFormat: 'DYNAMIC' });
+  });
+
+  it('INVISIBLE 은 DEFAULT·ON UPDATE 뒤, COMMENT 앞', () => {
+    expect(c('touched')).toMatchObject({ invisible: true, onUpdate: 'CURRENT_TIMESTAMP', comment: 't' });
+  });
+
+  it('인덱스 KEY_BLOCK_SIZE', () => {
+    expect(t.indexes.find((i) => i.name === 'ix_vb')).toMatchObject({ keyBlockSize: 4, comment: 'k' });
+  });
+
+  it('td-export escapes.sql 의 INVISIBLE 컬럼도 왕복 경고가 없다', () => {
+    for (const v of ['0136', '0152']) expect(parseSqlDump(fixture(`td-export-${v}/escapes.sql`)).warnings).toEqual([]);
   });
 });

@@ -52,6 +52,12 @@ describe('printColumn', () => {
     expect(printColumn(col, false)).toBe('`a` int NOT NULL INVISIBLE');
   });
 
+  it('SHOW CREATE 순서: … SRID, STORAGE, COLUMN_FORMAT, DEFAULT, ON UPDATE, AUTO_INCREMENT, INVISIBLE, COMMENT (9회차 8·9)', () => {
+    const col = { name: 'a', type: 'int', nullable: true, invisible: true, autoIncrement: false, default: 'NULL', comment: 'c', storage: 'DISK', columnFormat: 'FIXED' } as const;
+    expect(printColumn(col)).toBe("`a` int /*!50606 STORAGE DISK */ /*!50606 COLUMN_FORMAT FIXED */ DEFAULT NULL /*!80023 INVISIBLE */ COMMENT 'c'");
+    expect(printColumn(col, false)).toBe("`a` int STORAGE DISK COLUMN_FORMAT FIXED DEFAULT NULL INVISIBLE COMMENT 'c'");
+  });
+
   it('nullable timestamp는 NULL을 명시한다', () => {
     expect(printColumn({ name: 't', type: 'timestamp', nullable: true, invisible: false, autoIncrement: false, default: 'NULL' })).toBe(
       '`t` timestamp NULL DEFAULT NULL',

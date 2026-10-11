@@ -1,7 +1,7 @@
 // SHOW CREATE TABLE 출력 → Table 모델
 import { Cursor, splitTopLevel } from './cursor';
 import { tokenize } from './lexer';
-import type { Check, Column, ForeignKey, Index, IndexKind, IndexPart, PartitionDef, Partitioning, Table } from './model';
+import type { Check, Column, ColumnFormat, ColumnStorage, ForeignKey, Index, IndexKind, IndexPart, PartitionDef, Partitioning, Table } from './model';
 import { normalizeType } from './normalize';
 
 // 컬럼 타입이 끝나고 속성이 시작됨을 알리는 단어
@@ -72,6 +72,8 @@ function parseColumnAttr(c: Cursor, col: Column): void {
   } else if (c.acceptWord('NOT', 'NULL')) col.nullable = false;
   else if (c.acceptWord('NULL')) col.nullable = true;
   else if (c.acceptWord('SRID')) col.srid = Number(c.next().v);
+  else if (c.acceptWord('STORAGE')) col.storage = oneOf(c, STORAGES);
+  else if (c.acceptWord('COLUMN_FORMAT')) col.columnFormat = oneOf(c, COLUMN_FORMATS);
   else if (c.acceptWord('INVISIBLE')) col.invisible = true;
   else if (c.acceptWord('VISIBLE')) col.invisible = false;
   else if (c.acceptWord('DEFAULT')) col.default = c.valueRaw();
@@ -79,6 +81,16 @@ function parseColumnAttr(c: Cursor, col: Column): void {
   else if (c.acceptWord('AUTO_INCREMENT')) col.autoIncrement = true;
   else if (c.acceptWord('COMMENT')) col.comment = c.string();
   else throw c.error(`알 수 없는 컬럼 속성 '${c.peek()!.v}'`);
+}
+
+const STORAGES: readonly ColumnStorage[] = ['DISK', 'MEMORY'];
+const COLUMN_FORMATS: readonly ColumnFormat[] = ['FIXED', 'DYNAMIC', 'DEFAULT'];
+
+function oneOf<T extends string>(c: Cursor, values: readonly T[]): T {
+  const t = c.next();
+  const v = t.v.toUpperCase() as T;
+  if (t.t !== 'word' || !values.includes(v)) throw c.error(`${values.join('|')} 필요`, t);
+  return v;
 }
 
 function indexKind(c: Cursor): IndexKind | undefined {
@@ -96,6 +108,10 @@ function parseIndex(c: Cursor, kind: IndexKind, name: string): Index {
   const index: Index = { name, kind, parts: parseIndexParts(c), invisible: false };
   while (!c.done) {
     if (c.acceptWord('USING')) index.using = c.next().v.toUpperCase();
+    else if (c.acceptWord('KEY_BLOCK_SIZE')) {
+      c.acceptOp('=');
+      index.keyBlockSize = Number(c.next().v);
+    }
     else if (c.acceptWord('WITH', 'PARSER')) index.parser = c.ident();
     else if (c.acceptWord('COMMENT')) index.comment = c.string();
     else if (c.acceptWord('INVISIBLE')) index.invisible = true;

@@ -64,3 +64,14 @@ describe('viewReferences (8회차 2)', () => {
     expect(viewReferences("from `a` where 'x")).toBeUndefined();
   });
 });
+
+describe('16진수·비트 리터럴 (9회차 7)', () => {
+  it('0x…, 0b…, x\'…\', b\'…\' 는 한 토큰이다', () => {
+    const toks = tokenize("DEFAULT 0x00FF DEFAULT 0b101 DEFAULT X'0A0B' DEFAULT b'101' 0xZZ");
+    expect(toks.map((t) => [t.t, t.v])).toEqual([
+      ['word', 'DEFAULT'], ['number', '0x00FF'], ['word', 'DEFAULT'], ['number', '0b101'],
+      ['word', 'DEFAULT'], ['number', "X'0A0B'"], ['word', 'DEFAULT'], ['number', "b'101'"],
+      ['number', '0'], ['word', 'xZZ'],
+    ]);
+  });
+});

@@ -227,6 +227,7 @@ function dropIndex(name: string, kind: IndexKind): string {
 function addIndex(i: Index): string {
   let s = `ADD ${ADD_KEYWORD[i.kind]}${i.kind === 'PRIMARY' ? '' : ` ${q(i.name)}`} ${printIndexParts(i.parts)}`;
   if (i.using) s += ` USING ${i.using}`;
+  if (i.keyBlockSize !== undefined) s += ` KEY_BLOCK_SIZE=${i.keyBlockSize}`;
   if (i.parser) s += ` WITH PARSER ${q(i.parser)}`;
   if (i.comment !== undefined) s += ` COMMENT ${quoteString(i.comment)}`;
   if (i.invisible) s += ' INVISIBLE';

@@ -106,8 +106,8 @@ interface SchemaModel { name: string; tables: Table[]; views: View[]; routines: 
   - td-export 0.1.30+는 맨 앞에 `SET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;`, 맨 끝에 `SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;`를 붙인다. `SET`으로 시작하는 문장은 경고 없이 건너뛴다. 단 `;`가 빠져 뒤의 `CREATE`가 같은 문장에 붙었으면(같은 줄이든 다음 줄이든, 문자열·주석 밖의 `CREATE` 토큰이면) 건너뛰지 않고 `parse-error`로 남긴다. 그 밖의 CREATE가 아닌 문장은 계속 `parse-error` 경고를 낸다.
 - **분할**: 따옴표·백틱·괄호 깊이를 인식하는 토크나이저로 문장(`;`)과 최상위 쉼표를 나눈다. 줄 단위로 나누지 않는다. COMMENT 문자열 안의 쉼표나 개행이 있어도 깨지지 않게 하기 위해서다.
 - **CREATE TABLE 해석 범위**
-  - 컬럼 속성 전체: CHARACTER SET, COLLATE, NULL/NOT NULL, DEFAULT(리터럴·`CURRENT_TIMESTAMP`·`(expr)`), AUTO_INCREMENT, ON UPDATE, GENERATED ALWAYS AS … VIRTUAL/STORED, INVISIBLE, SRID, COMMENT
-  - 키: PRIMARY/UNIQUE/KEY/FULLTEXT/SPATIAL. prefix 길이, DESC, 함수형 키 파트 `((expr))`, `USING`, `COMMENT`, `/*!80000 INVISIBLE */`, `WITH PARSER`
+  - 컬럼 속성 전체: CHARACTER SET, COLLATE, NULL/NOT NULL, DEFAULT(리터럴·`CURRENT_TIMESTAMP`·`(expr)`·16진수/비트 리터럴 `0x00FF`·`b'101'`·`0b101`·`x'0A'` — lexer 가 한 토큰으로 읽는다), AUTO_INCREMENT, ON UPDATE, GENERATED ALWAYS AS … VIRTUAL/STORED, INVISIBLE, SRID, `/*!50606 STORAGE DISK|MEMORY */`, `/*!50606 COLUMN_FORMAT FIXED|DYNAMIC|DEFAULT */`, COMMENT. 재출력 순서는 8.4 SHOW CREATE 와 같다: 타입, 문자셋, 콜레이션, GENERATED, NULL, SRID, STORAGE, COLUMN_FORMAT, DEFAULT, ON UPDATE, AUTO_INCREMENT, INVISIBLE, COMMENT (`DEFAULT NULL /*!80023 INVISIBLE */ COMMENT …`, 9회차 개정 — 픽스처 `show-create-84.sql`, 골든 `column-literal-attrs`). STORAGE·COLUMN_FORMAT·인덱스 KEY_BLOCK_SIZE 는 MD 가 모르는 속성이라 한쪽이 partial 이면 비교하지 않고 skipped 로 남긴다
+  - 키: PRIMARY/UNIQUE/KEY/FULLTEXT/SPATIAL. prefix 길이, DESC, 함수형 키 파트 `((expr))`, `USING`, `KEY_BLOCK_SIZE=n`(테이블 값과 다를 때만 나온다, 9회차 개정), `COMMENT`, `/*!80000 INVISIBLE */`, `WITH PARSER`
   - `CONSTRAINT … FOREIGN KEY … REFERENCES …`, `CONSTRAINT … CHECK (…) [/*!80016 NOT ENFORCED */]`
   - 테이블 옵션: 나머지 `KEY=VALUE`는 `other`에 보존
   - `/*!50100 PARTITION BY … */`: 타입·표현식·파티션 목록(이름, VALUES, COMMENT, ENGINE)을 구조화해 파싱. 서브파티션 절만 문자열 보존

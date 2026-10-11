@@ -13,6 +13,8 @@ export class LexError extends Error {}
 const WORD_START = /[A-Za-z_$\u0080-\uFFFF]/;
 const WORD_CHAR = /[A-Za-z0-9_$\u0080-\uFFFF]/;
 const DIGIT = /[0-9]/;
+// 16진수·비트 리터럴: 0x00FF, 0b101 (뒤에 단어 문자가 이어지면 리터럴이 아니다), x'0A', b'101' — 한 토큰(number)으로 원문 그대로 둔다
+const HEX_BIT = /0x[0-9A-Fa-f]+|0b[01]+|[xX]'[0-9A-Fa-f]*'|[bB]'[01]*'/y;
 const ESCAPES: Record<string, string> = { '0': '\0', n: '\n', r: '\r', t: '\t', Z: '\x1a', b: '\b' };
 
 // 문자열 규칙. noBackslashEscapes: SQL_MODE 의 NO_BACKSLASH_ESCAPES (백슬래시를 이스케이프로 보지 않음)
@@ -55,6 +57,12 @@ export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
       i = e;
       continue;
     }
+    const literal = hexBitLiteral(src, i);
+    if (literal) {
+      yield { t: 'number', v: literal, s: i, e: i + literal.length };
+      i += literal.length;
+      continue;
+    }
     if (DIGIT.test(c)) {
       let j = i;
       while (j < src.length && /[0-9.]/.test(src[j])) j++;
@@ -72,6 +80,14 @@ export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
     yield { t: 'op', v: c, s: i, e: i + 1 };
     i++;
   }
+}
+
+function hexBitLiteral(src: string, at: number): string | undefined {
+  HEX_BIT.lastIndex = at;
+  const m = HEX_BIT.exec(src);
+  if (!m) return undefined;
+  const end = at + m[0].length;
+  return m[0].startsWith('0') && end < src.length && WORD_CHAR.test(src[end]) ? undefined : m[0];
 }
 
 function readQuoted(src: string, start: number, quote: string, noBackslashEscapes = false): [string, number] {
