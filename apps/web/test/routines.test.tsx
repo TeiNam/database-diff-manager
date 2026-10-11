@@ -125,3 +125,13 @@ describe('DdlTab: 루틴', () => {
     expect(text).not.toContain(';;;');
   });
 });
+
+describe('SchemaPage: 요약 배지', () => {
+  it('요약 탭 배지와 사이드바 [변경] 수가 루틴 변경을 함께 센다', async () => {
+    const { SchemaPage } = await import('../src/pages/SchemaPage');
+    const V = (id: number, versionNo: number) => ({ id, versionNo, uploadedAt: '', uploadedBy: 'admin', note: null, sourceFormat: 'sql', changedObjects: 3 });
+    mockApi({ '/api/schemas/7/versions': [V(12, 2), V(11, 1)], '/api/diff?base=11&target=12': { ...DATA, base: V(11, 1), target: V(12, 2) } });
+    renderWithProviders(<SchemaPage />, { route: `${ROUTE}&tab=summary`, path: PATH });
+    expect(await screen.findByRole('tab', { name: /요약/ })).toHaveTextContent('요약3');
+  });
+});

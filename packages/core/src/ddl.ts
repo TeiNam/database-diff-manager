@@ -39,7 +39,10 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
   for (const v of diff.views) if (v.op === 'drop') view(v, sqlBody(`DROP VIEW ${q(v.name)}`));
   for (const r of diff.routines) {
     const name = r.op === 'drop' ? r.from!.name : r.name;
-    if (r.op !== 'add') routine(r, sqlBody(`DROP ${r.kind.toUpperCase()} IF EXISTS ${q(name)}`));
+    if (r.op === 'add') continue;
+    const drop = `DROP ${r.kind.toUpperCase()} IF EXISTS ${q(name)}`;
+    // TARGET 을 파싱하지 못하면 다시 만들 수 없으므로 삭제도 실행하지 않는다
+    routine(r, r.op === 'modify' && r.to!.parseError ? manualBody(`${name}: 바뀐 루틴을 파싱할 수 없어 삭제·재생성하지 않습니다. 원문을 확인하세요`, drop) : sqlBody(drop));
   }
   // 3. 테이블 rename
   for (const d of altered) if (d.op === 'rename') table(d, sqlBody(`RENAME TABLE ${q(d.oldName!)} TO ${q(d.name)}`));

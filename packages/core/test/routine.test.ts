@@ -207,3 +207,39 @@ describe('generateDdl: 루틴', () => {
     expect(s).toMatchObject({ kind: 'function', comment: true, sql: '-- [수동 확인 필요] bad: 파싱할 수 없는 루틴입니다. 원문을 확인하세요' });
   });
 });
+
+describe('리뷰 반영', () => {
+  it('본문 문자열 안의 공백은 보존한다 (값 변경을 잃지 않는다), 문자열 밖 줄 끝 공백만 없앤다', () => {
+    const a = dump(routineBlock("CREATE FUNCTION `f`() RETURNS varchar(9)\n    NO SQL\nBEGIN   \n  RETURN 'a \nb';\nEND"));
+    const b = dump(routineBlock("CREATE FUNCTION `f`() RETURNS varchar(9)\n    NO SQL\nBEGIN\n  RETURN 'a\nb';\nEND"));
+    expect([a.warnings, b.warnings]).toEqual([[], []]);
+    expect(a.model.routines[0].body).toBe("BEGIN\n  RETURN 'a \nb';\nEND");
+    expect(diffSchemas(a.model, b.model).routines.map((r) => r.fields)).toEqual([['body']]);
+  });
+
+  it('TARGET 루틴을 파싱할 수 없으면 DROP 도 실행하지 않는다 (수동 확인)', () => {
+    const bad = parseSqlDump(routineBlock('CREATE FUNCTION `tax`(x int) RETURNS')).model;
+    const stmts = generateDdl(diffSchemas(model(fn()), bad));
+    expect(stmts.length).toBeGreaterThan(0);
+    expect(stmts.every((s) => s.comment)).toBe(true);
+    expect(stmts[0].sql).toContain('-- DROP FUNCTION IF EXISTS `tax`');
+  });
+
+  it('단어에 붙은 구분자(END$$)도 문장 끝으로 본다', () => {
+    const text = 'DELIMITER $$\nCREATE PROCEDURE `p`()\nBEGIN SELECT 1; END$$\nDELIMITER ;\nCREATE TABLE `t` (\n  `a` int\n);\n';
+    expect(splitStatements(text).map((s) => s.ddl)).toEqual(['CREATE PROCEDURE `p`()\nBEGIN SELECT 1; END', 'CREATE TABLE `t` (\n  `a` int\n)']);
+    const { model: m, warnings } = parseSqlDump(text);
+    expect([m.routines.length, m.tables.length, warnings]).toEqual([1, 1, []]);
+  });
+
+  it('NO_BACKSLASH_ESCAPES 루틴은 그 SQL_MODE 로 읽고, 복원 뒤에는 기본 규칙으로 읽는다', () => {
+    const text = routineBlock("CREATE FUNCTION `f`() RETURNS varchar(5)\n    NO SQL\nRETURN 'a\\'", 'STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES')
+      + "CREATE TABLE `t` (\n  `a` int COMMENT 'x\\\\y'\n);\n";
+    const { model: m, warnings } = parseSqlDump(text);
+    expect(warnings).toEqual([]);
+    expect(m.routines[0].body).toBe("RETURN 'a\\'");
+    expect(m.tables[0].columns[0].comment).toBe('x\\y');
+    // 같은 본문끼리는 차이가 없다 (diff 도 그 SQL_MODE 로 본문을 읽는다)
+    expect(diffSchemas(m, m).routines).toEqual([]);
+  });
+});

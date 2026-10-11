@@ -1,14 +1,14 @@
 // SHOW CREATE FUNCTION / PROCEDURE 출력 → Routine 모델 (DEFINER는 비교 대상이 아니므로 버린다)
 import { Cursor } from './cursor';
-import { tokenize } from './lexer';
+import { tokenize, type LexMode } from './lexer';
 import type { Routine, RoutineCharacteristics, RoutineKind } from './model';
 import { normalizeBody } from './normalize';
 
 // RETURNS 타입 뒤에 올 수 있는 수식어
 const TYPE_MODIFIERS = new Set(['UNSIGNED', 'SIGNED', 'ZEROFILL', 'BINARY', 'ASCII', 'UNICODE', 'PRECISION', 'VARYING']);
 
-export function parseRoutine(ddl: string): Routine {
-  const c = new Cursor(tokenize(ddl), ddl);
+export function parseRoutine(ddl: string, mode: LexMode = {}): Routine {
+  const c = new Cursor(tokenize(ddl, mode), ddl);
   c.expectWord('CREATE');
   if (c.acceptWord('DEFINER')) skipDefiner(c);
   const kind: RoutineKind = c.acceptWord('FUNCTION') ? 'function' : c.acceptWord('PROCEDURE') ? 'procedure' : fail(c, 'FUNCTION 또는 PROCEDURE 필요');
@@ -18,7 +18,7 @@ export function parseRoutine(ddl: string): Routine {
   const characteristics = readCharacteristics(c);
   const start = c.peek();
   if (!start) throw c.error('루틴 본문 없음');
-  const body = normalizeBody(ddl.slice(start.s));
+  const body = normalizeBody(ddl.slice(start.s), mode);
   return { kind, name, params, ...(returns !== undefined ? { returns } : {}), characteristics, body };
 }
 

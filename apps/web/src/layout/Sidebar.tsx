@@ -1,4 +1,4 @@
-import type { Op, SchemaModel } from '@tdm/core';
+import { routineNameKey, type Op, type SchemaModel } from '@tdm/core';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { useDiff, useTree } from '../api/hooks';
@@ -6,7 +6,7 @@ import type { DiffResponse, TreeDatabase } from '../api/types';
 import { Icon, type IconName } from '../components/Icon';
 import { Mark } from '../components/Mark';
 import { useSchemaContext, type ObjectKind } from '../hooks/useSchemaContext';
-import { objectsOf, opOf } from '../lib/object-diff';
+import { changeCount, objectsOf, opOf } from '../lib/object-diff';
 import s from './Sidebar.module.css';
 
 interface Node {
@@ -39,7 +39,7 @@ function objectNames(data: DiffResponse, kind: ObjectKind): string[] {
   const all = [...objectsOf(data.targetModel, kind), ...objectsOf(data.baseModel, kind)].map((o) => o.name);
   if (kind === 'table' || kind === 'view') return [...new Set(all)];
   const byKey = new Map<string, string>();
-  for (const name of all) if (!byKey.has(name.toLowerCase())) byKey.set(name.toLowerCase(), name);
+  for (const name of all) if (!byKey.has(routineNameKey(name))) byKey.set(routineNameKey(name), name);
   return [...byKey.values()];
 }
 
@@ -163,7 +163,7 @@ export function Sidebar() {
         <div className={s.seg} role="radiogroup" aria-label="표시 범위">
           {(['all', 'changed'] as const).map((f) => (
             <button key={f} type="button" role="radio" aria-checked={filter === f} className={filter === f ? s.on : undefined} onClick={() => setFilter(f)}>
-              {f === 'all' ? '전체' : `변경 ${diff.data ? diff.data.diff.tables.length + diff.data.diff.views.length + (diff.data.diff.routines ?? []).length : ''}`}
+              {f === 'all' ? '전체' : `변경 ${diff.data ? changeCount(diff.data.diff) : ''}`}
             </button>
           ))}
         </div>

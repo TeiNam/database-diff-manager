@@ -1,4 +1,4 @@
-import { printRoutine, printTable, printView, type Op, type Routine, type RoutineDiff, type SchemaDiff, type SchemaModel, type Table, type TableDiff, type View, type ViewDiff } from '@tdm/core';
+import { printRoutine, printTable, routineNameKey, printView, type Op, type Routine, type RoutineDiff, type SchemaDiff, type SchemaModel, type Table, type TableDiff, type View, type ViewDiff } from '@tdm/core';
 import type { ObjectKind } from '../hooks/useSchemaContext';
 
 export type DiffObject = Table | View | Routine;
@@ -44,12 +44,15 @@ const fromRoutine = (d: RoutineDiff): ObjectEntry => ({
 });
 
 // MySQL 루틴 이름은 대소문자를 구분하지 않는다
-const sameRoutineName = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+const sameRoutineName = (a: string, b: string) => routineNameKey(a) === routineNameKey(b);
 
 // 변경 객체 목록 (core diff 순서: 테이블 → 뷰 → 루틴). 옛 응답에 routines 가 없으면 빈 목록
 export function changedObjects(diff: SchemaDiff): ObjectEntry[] {
   return [...diff.tables.map(fromTable), ...diff.views.map(fromView), ...(diff.routines ?? []).map(fromRoutine)];
 }
+
+// 변경 객체 수 (테이블·뷰·루틴). 요약 탭 배지와 사이드바 [변경] 이 같은 값을 쓴다
+export const changeCount = (diff: SchemaDiff): number => diff.tables.length + diff.views.length + (diff.routines ?? []).length;
 
 export function opOf(diff: SchemaDiff, kind: ObjectKind, name: string): Op | undefined {
   if (isRoutineKind(kind)) return (diff.routines ?? []).find((d) => d.kind === kind && sameRoutineName(d.name, name))?.op;

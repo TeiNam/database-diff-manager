@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { canonicalJson, parseSqlDump } from '@tdm/core';
+import { canonicalJson, diffSchemas, parseSqlDump } from '@tdm/core';
 import { describe, expect, it } from 'vitest';
 import { all, migrate, one, openDb, run, type Db } from '../src/db/connection';
 import { objectHistory } from '../src/repos/objects';
@@ -92,6 +92,31 @@ describe('ingest: 루틴', () => {
     up(SHOP);
     // SQL→MD: 테이블 2개가 partial 로 바뀜(뷰는 원문이 같고, 루틴 2개는 세지 않음), MD→SQL: 다시 2개
     expect(listVersions(db, 1).map((v) => v.changedObjects)).toEqual([2, 2, 6]);
+  });
+
+  it('비ASCII 이름도 core 와 같은 규칙(대소문자 무시)으로 같은 객체로 본다', () => {
+    const { db, up } = freshDb();
+    up(SHOP.replace('FUNCTION `tax`', 'FUNCTION `Ä`'));
+    up(SHOP_V2.replace('FUNCTION `tax`', 'FUNCTION `ä`'));
+    expect(one<{ n: number }>(db, "SELECT COUNT(*) AS n FROM objects WHERE kind = 'function'")!.n).toBe(1);
+    expect(listVersions(db, 1)[0].changedObjects).toBe(1);
+  });
+
+  it('같은 내용이라도 루틴을 아는 SQL 버전과 모르는 MD 버전은 duplicate 로 합치지 않는다', () => {
+    const { db, up } = freshDb();
+    // 뷰만 있는 정의: MD 와 SQL 의 모델 해시가 같다
+    const viewSql = '/* Database : shop */\n' + SHOP.slice(SHOP.indexOf('/* Table : big_paid */'), SHOP.indexOf('SET FOREIGN_KEY_CHECKS = @OLD'));
+    const viewMd = SHOP_MD.slice(0, SHOP_MD.indexOf('## order_audit'));
+    const sqlFirst = up(viewSql);
+    const md = up(viewMd, 'shop.md');
+    expect(md.status).toBe('ok');
+    expect(loadVersion(db, md.versionId).model.routinesUnknown).toBe(true);
+    const withFn = up(SHOP);
+    expect(diffSchemas(loadVersion(db, withFn.versionId).model, loadVersion(db, md.versionId).model)).toMatchObject({ routines: [], routinesUnknown: true });
+    // MD 를 같은 MD 로 다시 올리면 duplicate 그대로
+    expect(up(viewMd, 'shop.md').status).toBe('ok');
+    expect(up(viewMd, 'shop.md').status).toBe('duplicate');
+    expect(sqlFirst.status).toBe('ok');
   });
 
   it('루틴이 없는 모델의 해시는 루틴 지원 전과 같다 (기존 버전과 duplicate 판정 유지)', () => {

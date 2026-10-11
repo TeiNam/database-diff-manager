@@ -1,7 +1,7 @@
 // 두 스키마 모델의 차이 계산. unknown 목록의 속성은 비교하지 않고 skipped에 기록한다
 import { canonicalJson } from './canonical';
 import type { Check, Column, ForeignKey, Index, IndexField, Partitioning, Routine, RoutineKind, SchemaModel, Table, View } from './model';
-import { normalizeBody } from './normalize';
+import { normalizeBody, routineLexMode } from './normalize';
 import { isOtherKindFamily } from './partial-fill';
 import { subpartitionKey } from './partition-ddl';
 import { printColumn, printRoutine, printTable, printView } from './print';
@@ -289,7 +289,9 @@ function diffViews(base: View[], target: View[]): ViewDiff[] {
 // 기본값과 같은 명시 특성은 생략한 것과 같다
 const ROUTINE_DEFAULTS: Record<string, unknown> = { deterministic: false, dataAccess: 'CONTAINS SQL', security: 'DEFINER', language: 'SQL' };
 const CHARACTERISTICS = ['deterministic', 'dataAccess', 'security', 'comment', 'language'] as const;
-const routineKey = (r: Routine) => `${r.kind}:${r.name.toLowerCase()}`;
+// MySQL 루틴 이름은 대소문자를 구분하지 않는다. 저장소·화면도 이 키로 같은 루틴을 찾는다
+export const routineNameKey = (name: string): string => name.toLowerCase();
+const routineKey = (r: Routine) => `${r.kind}:${routineNameKey(r.name)}`;
 
 // (종류, 이름) 으로 짝짓는다. MySQL 루틴 이름은 대소문자를 구분하지 않는다. rename 후보는 만들지 않는다
 function diffRoutines(base: Routine[], target: Routine[]): RoutineDiff[] {
@@ -316,7 +318,7 @@ function routineFields(a: Routine, b: Routine): string[] {
     ...(a.params === b.params ? [] : ['params']),
     ...(a.returns === b.returns ? [] : ['returns']),
     ...CHARACTERISTICS.filter((k) => ch(a, k) !== ch(b, k)).map((k) => `characteristics.${k}`),
-    ...(normalizeBody(a.body) === normalizeBody(b.body) ? [] : ['body']),
+    ...(normalizeBody(a.body, routineLexMode(a.sqlMode)) === normalizeBody(b.body, routineLexMode(b.sqlMode)) ? [] : ['body']),
     // 한쪽만 SQL_MODE 를 알면(직접 쓴 덤프 등) 비교하지 않는다
     ...(a.sqlMode !== undefined && b.sqlMode !== undefined && a.sqlMode !== b.sqlMode ? ['sqlMode'] : []),
   ];
