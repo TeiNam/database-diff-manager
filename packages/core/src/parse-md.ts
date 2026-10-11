@@ -1,7 +1,7 @@
 // td-export Markdown 정의서 → SchemaModel (partial: 일부 속성은 알 수 없음)
-import { hasMdStructure, isClosedSection, mdIncomplete, TABLE_LIST_HEADING } from './completeness';
+import { hasMdStructure, hasTable, isClosedSection, mdEvidence, TABLE_LIST_HEADING } from './completeness';
 import { quoteString, tokenize } from './lexer';
-import type { Column, ForeignKey, Index, IndexField, IndexPart, SchemaIncomplete, Table, View } from './model';
+import type { Column, ForeignKey, Index, IndexField, IndexPart, SchemaEvidence, Table, View } from './model';
 import { normalizeType } from './normalize';
 import type { ParsedDump, ParseWarning } from './parse-dump';
 import { REF_ACTIONS } from './parse-table';
@@ -88,22 +88,32 @@ export function parseMdDump(text: string): ParsedDump {
     }
   }
   const model = { name: (lines[0] ?? '').trim(), tables, views, routines: [], routinesUnknown: true };
-  const incomplete = mdCompleteness(lines, secs, anchors, realNames);
-  if (!incomplete) return { model, warnings };
-  const code = incomplete.structured ? 'incomplete' : 'non-schema';
-  const { structured: _, ...flag } = incomplete;
-  return { model: { ...model, incomplete: flag }, warnings: [...warnings, { code, kind: 'schema', object: model.name, line: lines.length, message: flag.reason }] };
+  const { evidence, nonSchema } = mdCompleteness(lines, secs, anchors, realNames);
+  if (evidence.level === 'complete') return { model: { ...model, evidence }, warnings };
+  const code = nonSchema ? 'non-schema' : 'incomplete';
+  return { model: { ...model, evidence }, warnings: [...warnings, { code, kind: 'schema', object: model.name, line: lines.length, message: evidence.reason! }] };
 }
 
-// 구조(제목·Table List)가 없으면 비스키마, Table List 의 섹션 누락·마지막 섹션 미종료는 불완전 (14회차 1)
-function mdCompleteness(lines: string[], secs: Section[], anchors: string[], realNames: Map<string, string>): (SchemaIncomplete & { structured: boolean }) | undefined {
-  const structured = hasMdStructure(lines, secs.map((sec) => sec.heading));
+// 스키마 표: 테이블은 Columns 표, 뷰는 Information 표 (머리글 + 구분 줄 + 1행 이상)
+const hasSchemaTable = (body: string[]): boolean => hasTable(body, COLUMN_HEADER) || hasTable(body, VIEW_HEADER);
+// 완결된 목록 항목: Index·FK 줄 전체가 형식에 맞는다 (편집기가 끝 줄 ' ' 을 지운 파일의 마지막 섹션 판정)
+const isCompleteItem = (line: string): boolean => INDEX_RE.test(line) || FK_RE.test(line);
+
+// 구조 사실을 모아 completeness 가 증거 수준을 정한다 (15회차): 구조·Table List·스키마 표가 없으면 비스키마,
+// 섹션 누락·스키마 표 없는 섹션·마지막 섹션 미종료는 불완전, 그 밖은 완전
+function mdCompleteness(lines: string[], secs: Section[], anchors: string[], realNames: Map<string, string>): { evidence: SchemaEvidence; nonSchema: boolean } {
+  const objects = secs.filter((sec) => sec.heading !== TABLE_LIST_HEADING);
   const headings = new Set(secs.map((sec) => sec.heading));
-  const missing = anchors.filter((a) => !headings.has(a)).map((a) => realNames.get(a) ?? a);
+  const nameOf = (heading: string) => realNames.get(heading) ?? heading;
   const last = secs.at(-1);
-  const openLast = last && last.heading !== TABLE_LIST_HEADING && !isClosedSection(last.body) ? realNames.get(last.heading) ?? last.heading : undefined;
-  const flag = mdIncomplete({ structured, missing, openLast });
-  return flag && { ...flag, structured };
+  return mdEvidence({
+    structured: hasMdStructure(lines, secs.map((sec) => sec.heading)),
+    listed: anchors.length,
+    schemaSections: objects.filter((sec) => hasSchemaTable(sec.body)).length,
+    missing: anchors.filter((a) => !headings.has(a)).map(nameOf),
+    tableless: objects.filter((sec) => !hasSchemaTable(sec.body)).map((sec) => nameOf(sec.heading)),
+    openLast: last && last.heading !== TABLE_LIST_HEADING && !isClosedSection(last.body, isCompleteItem) ? nameOf(last.heading) : undefined,
+  });
 }
 
 // '이름 (코멘트)' 에서 이름: 소문자로 바꾸면 앵커와 같아지는 ' (' 앞부분. 맞는 곳이 없으면 첫 ' (' 앞

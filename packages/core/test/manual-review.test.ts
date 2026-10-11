@@ -3,7 +3,7 @@ import { generateDdl, renderDdl, type Statement } from '../src/ddl';
 import { diffSchemas, type RenameMapping } from '../src/diff';
 import { parseSqlDump } from '../src/parse-dump';
 import { parseMdDump } from '../src/parse-md';
-import { scenario } from './helpers';
+import { scenario, tdExport } from './helpers';
 
 const dump = (...sqls: string[]) => parseSqlDump(sqls.join('\n')).model;
 const tbl = (name: string, body: string) => `CREATE TABLE \`${name}\` (\n${body}\n) ENGINE=InnoDB;`;
@@ -242,7 +242,7 @@ describe('FK 표준 키 검사 일반화 (9회차 5)', () => {
   });
 });
 
-describe('불완전한 TARGET 의 객체 삭제 차단 (13회차 1)', () => {
+describe('불완전한 TARGET 의 객체 삭제 차단 (13회차 1 → 15회차: 양성 증거가 있을 때만 실행)', () => {
   const customers = tbl('customers', '  `id` int NOT NULL,\n  PRIMARY KEY (`id`)');
   const orders = tbl('orders', '  `id` int NOT NULL,\n  `cid` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `fk_o_c` (`cid`),\n  CONSTRAINT `fk_o_c` FOREIGN KEY (`cid`) REFERENCES `customers` (`id`)');
   const view = 'CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `v` AS select `customers`.`id` AS `id` from `customers`;';
@@ -251,24 +251,26 @@ describe('불완전한 TARGET 의 객체 삭제 차단 (13회차 1)', () => {
   const drops = (stmts: Statement[]) => stmts.filter((s) => s.op === 'drop');
 
   it('식별 불가 parse-error 문장이 있는 TARGET: 테이블·뷰·루틴 DROP 은 수동 확인, 사유 표시', () => {
-    const target = dump('This is not a schema dump;');
+    // 비스키마 문장은 첫 단어로 걸러지므로(15회차), 이름을 읽을 수 없는 CREATE TABLE 로 식별 불가 파싱 실패를 만든다
+    const target = dump(tdExport('CREATE TABLE oops (;'));
     const d = diffSchemas(base, target);
-    expect(d.targetIncomplete).toContain('식별할 수 없는');
+    expect(d.targetEvidence).toMatchObject({ level: 'incomplete', reason: expect.stringContaining('식별할 수 없는') });
     const stmts = generateDdl(d);
     expect(drops(stmts).length).toBeGreaterThan(0);
     expect(drops(stmts).filter((s) => !s.comment).map((s) => s.sql)).toEqual([]);
-    expect(stmts.find((s) => s.op === 'drop' && s.object === 'orders' && s.sql.includes('DROP TABLE'))!.sql).toContain('TARGET 이 불완전');
+    expect(stmts.find((s) => s.op === 'drop' && s.object === 'orders' && s.sql.includes('DROP TABLE'))!.sql).toContain('TARGET 이 완전한 덤프인지 확인할 수 없음');
   });
 
   it('객체가 0개인 TARGET: DROP 을 모두 수동 확인으로 막는다', () => {
     const d = diffSchemas(base, dump('/* Database : x */\nSET NAMES utf8mb4;'));
-    expect(d.targetIncomplete).toContain('객체가 없');
+    expect(d.targetEvidence).toMatchObject({ level: 'incomplete', reason: expect.stringContaining('객체가 없') });
     expect(drops(generateDdl(d)).filter((s) => !s.comment)).toEqual([]);
   });
 
-  it('정상 TARGET 의 DROP 은 그대로 실행한다', () => {
-    const d = diffSchemas(base, dump(customers));
-    expect(d.targetIncomplete).toBeUndefined();
+  it('완전한 td-export TARGET 의 DROP 은 그대로 실행하고, 헤더 없는 TARGET 의 DROP 은 수동 확인이다', () => {
+    expect(drops(generateDdl(diffSchemas(base, dump(customers)))).filter((s) => !s.comment)).toEqual([]);
+    const d = diffSchemas(base, dump(tdExport(customers)));
+    expect(d.targetEvidence?.level).toBe('complete');
     expect(drops(generateDdl(d)).filter((s) => !s.comment).map((s) => s.object).sort()).toEqual(['f', 'orders', 'orders', 'v']);
   });
 });

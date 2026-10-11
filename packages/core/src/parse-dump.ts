@@ -1,5 +1,5 @@
 // td-export SQL 파일 → SchemaModel
-import { isCreateTable, SessionSaves, sqlIncomplete } from './completeness';
+import { isCreateTable, SqlTrail, sqlEvidence } from './completeness';
 import { lineOf } from './cursor';
 import { LexError, lexTokens, tokenize, type LexMode, type Token } from './lexer';
 import { UNIDENTIFIED_NAME, type Routine, type RoutineKind, type SchemaModel, type Table, type View } from './model';
@@ -11,8 +11,9 @@ import { printRoutine, printTable, printView } from './print';
 
 export interface ParseWarning {
   // parse-error: 파싱 실패(rawDdl만 보존), round-trip: 재출력이 원문과 다름, empty-schema: 객체가 0개인 빈 스키마 (업로드 시 서버가 붙인다)
-  // non-schema: 스키마 정의가 아닌 문장·구조 (업로드 거부), incomplete: 완전한 td-export 출력임을 확인하지 못함 (끊긴 파일 등, 저장하되 경고)
-  code: 'parse-error' | 'round-trip' | 'empty-schema' | 'non-schema' | 'incomplete';
+  // non-schema: 스키마 정의가 아닌 문장·구조 (업로드 거부), incomplete: 끊긴 파일 등 불완전하다는 증거 (저장하되 경고),
+  // unverified: 완전한 덤프라는 증거도 불완전하다는 증거도 없음 (td-export 0.1.15 SQL 등 — 업로드 시 서버가 붙인다. 삭제 문장은 수동 확인)
+  code: 'parse-error' | 'round-trip' | 'empty-schema' | 'non-schema' | 'incomplete' | 'unverified';
   kind: 'table' | 'view' | 'routine' | 'schema';
   object: string;
   line: number;
@@ -33,6 +34,8 @@ const DATABASE_RE = /\/\*\s*Database\s*:\s*(.+?)\s*\*\//;
 // 세션 변수 설정 (td-export 0.1.30+는 FOREIGN_KEY_CHECKS를 끄고 켠다). 스키마 정의가 아니므로 건너뛴다
 // ';'가 빠져 뒤 CREATE가 같은 문장에 붙은 경우(줄 위치 무관)는 건너뛰지 않는다 (parse-error로 남긴다)
 const SET_RE = /^SET\s/i;
+// td-export 가 내는 스키마 문장의 첫 단어 (SET·CREATE). DELIMITER 는 splitDump 가, 주석은 토큰화가 이미 뺀다
+const FIRST_WORD_RE = /^(\w+)/;
 
 export interface DumpStatement {
   ddl: string;
@@ -149,7 +152,7 @@ export function parseSqlDump(text: string): ParsedDump {
   const clean = text.replace(/^\uFEFF/, '');
   const model: SchemaModel = { name: DATABASE_RE.exec(clean)?.[1] ?? '', tables: [], views: [], routines: [] };
   const warnings: ParseWarning[] = [];
-  const saves = new SessionSaves();
+  const trail = new SqlTrail();
   const nonSchemaLines: number[] = [];
   let cut: { line: number; object?: string } | undefined;
   let sqlMode: string | undefined; // 다음 루틴에 붙일 SQL_MODE
@@ -157,11 +160,19 @@ export function parseSqlDump(text: string): ParsedDump {
   for (const { ddl, line, noBackslashEscapes, terminated } of statements) {
     if (!terminated) cut = { line, object: objectNameOf(ddl) };
     if (SET_RE.test(ddl) && !hasCreateToken(ddl)) {
-      saves.apply(ddl, line);
+      trail.set(ddl, line);
       const mode = ROUTINE_SQL_MODE_RE.exec(ddl);
       if (mode) sqlMode = mode[1];
       continue;
     }
+    // 허용 목록 밖 문장(ALTER·INSERT·SHOW·SELECT·DROP·CREATE INDEX 등)은 스키마 정의가 아니다. 'SHOW CREATE TABLE a' 처럼
+    // CREATE 토큰이 있어도 첫 단어로 판정한다. ';' 가 빠져 SET 뒤에 붙은 CREATE 는 parse-error 로만 남긴다 (아래 파싱)
+    if (!isSchemaStatement(ddl)) {
+      nonSchemaLines.push(line);
+      warnings.push({ code: 'non-schema', kind: 'schema', object: model.name, line, message: '스키마 정의가 아닌 문장입니다 (CREATE TABLE·VIEW·FUNCTION·PROCEDURE 만 받습니다)' });
+      continue;
+    }
+    trail.schema();
     const routine = ROUTINE_RE.exec(ddl);
     if (routine) {
       model.routines.push(parseRoutineStatement(ddl, line, routine, sqlMode, noBackslashEscapes, warnings));
@@ -169,11 +180,6 @@ export function parseSqlDump(text: string): ParsedDump {
       continue;
     }
     const isView = VIEW_RE.test(ddl);
-    // CREATE 가 아닌 문장(ALTER·INSERT·DROP 등). ';' 가 빠져 앞 문장에 붙은 CREATE 는 parse-error 로만 남긴다
-    if (!isView && !isCreateTable(ddl) && !hasCreateToken(ddl)) {
-      nonSchemaLines.push(line);
-      warnings.push({ code: 'non-schema', kind: 'schema', object: model.name, line, message: '스키마 정의가 아닌 문장입니다 (CREATE TABLE·VIEW·FUNCTION·PROCEDURE 만 받습니다)' });
-    }
     const object = NAME_RE.exec(ddl)?.[1].replace(/``/g, '`') ?? UNIDENTIFIED_NAME;
     try {
       if (isView) {
@@ -191,10 +197,18 @@ export function parseSqlDump(text: string): ParsedDump {
       else model.tables.push({ kind: 'table', columns: [], indexes: [], foreignKeys: [], checks: [], options: [], ...failed });
     }
   }
-  const incomplete = sqlIncomplete({ nonSchemaLines, cut, truncated, pendingSaves: saves.pending });
-  if (!incomplete) return { model, warnings };
-  warnings.push({ code: 'incomplete', kind: 'schema', object: model.name, line: cut?.line ?? 1, message: incomplete.reason });
-  return { model: { ...model, incomplete }, warnings };
+  const evidence = sqlEvidence({ named: DATABASE_RE.test(clean), nonSchemaLines, cut, truncated, trail });
+  // unknown(증거 없음)의 unverified 경고는 업로드 때 서버가 붙인다 (empty-schema 처럼)
+  if (evidence.level === 'incomplete' && !nonSchemaLines.length) warnings.push({ code: 'incomplete', kind: 'schema', object: model.name, line: cut?.line ?? 1, message: evidence.reason! });
+  return { model: { ...model, evidence }, warnings };
+}
+
+// td-export 가 내는 스키마 문장: CREATE TABLE·VIEW·FUNCTION·PROCEDURE 와, ';' 가 빠져 SET·CREATE 뒤에 다른 CREATE 가 붙은 문장
+// (그 문장은 파싱 실패로 남는다). 첫 단어가 SET 인 문장은 CREATE 토큰이 있을 때만 여기 온다
+function isSchemaStatement(ddl: string): boolean {
+  const first = FIRST_WORD_RE.exec(ddl)?.[1].toUpperCase();
+  if (first === 'SET') return true;
+  return first === 'CREATE' && (isCreateTable(ddl) || VIEW_RE.test(ddl) || ROUTINE_RE.test(ddl));
 }
 
 // 끊긴 문장의 객체 이름 (테이블·뷰·루틴). 알 수 없으면 undefined

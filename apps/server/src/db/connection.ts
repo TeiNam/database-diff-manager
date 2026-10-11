@@ -2,6 +2,7 @@ import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { backfillEvidence } from '../services/evidence-backfill';
 
 export type Db = DatabaseSync;
 
@@ -25,6 +26,8 @@ export function openDb(path: string): Db {
   try {
     db.exec(`${PRAGMAS};`);
     migrate(db);
+    // 마이그레이션 직후 JS 단계: 판정 전에 올린 버전의 완전성 증거를 원문으로 채운다 (15회차 1, 멱등)
+    backfillEvidence(db);
     // 오래 떠 있는 서버도 쿼리 통계를 갖도록 기동 시 한 번 (종료 시에도 실행)
     db.exec('PRAGMA optimize=0x10002');
   } catch (e) {

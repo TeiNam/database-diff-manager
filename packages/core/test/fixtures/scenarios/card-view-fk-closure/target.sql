@@ -1,4 +1,8 @@
 /* Database : shop */
+SET NAMES utf8mb4;
+SET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;
+SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';
+
 CREATE TABLE `p` (
   `id` int NOT NULL,
   PRIMARY KEY (`id`)
@@ -21,3 +25,6 @@ CREATE TABLE `c2` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `v` AS select `c`.`id` AS `cid`,`c2`.`new_pid` AS `pid` from (`c` join `c2` on((`c2`.`id` = `c`.`id`)));
+
+SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;
+SET SQL_MODE = @OLD_SQL_MODE;

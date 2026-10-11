@@ -21,6 +21,7 @@ export function subpartitionKey(p: Partitioning): string | undefined {
 export interface PartitionStatement {
   sql: string;
   notes?: string[];
+  rowLoss?: true; // 행이 지워지는 변경 (DROP PARTITION, LIST 값이 사라지는 REORGANIZE) — TARGET 에 없다는 이유로 나오는 파괴 문장
 }
 
 const lossNote = (ps: PartitionDef[]) => `[데이터 확인] ${ps.map((p) => p.name).join(', ')}: 파티션을 삭제하면 그 안의 행도 함께 삭제됩니다`;
@@ -33,6 +34,7 @@ const HASH_METHOD_RE = /^(LINEAR\s+)?(HASH|KEY)\b/;
 export const listValues = (def: string): string[] | undefined => parenValues(def, /^\s*VALUES\s+IN\s*\(/i);
 
 export const partitionStatements = (d: TableDiff): string[] => partitionBodies(d).map((s) => s.sql);
+export const partitionDropsRows = (d: TableDiff): boolean => partitionBodies(d).some((s) => s.rowLoss);
 export const listPartitionStatements = (table: string, a: PartitionDef[], b: PartitionDef[], range = true): string[] =>
   listPartitionBodies(table, a, b, range).map((s) => s.sql);
 
@@ -86,7 +88,7 @@ function commentNote(a: PartitionDef[], b: PartitionDef[]): string | undefined {
 
 export function listPartitionBodies(table: string, a: PartitionDef[], b: PartitionDef[], range = true): PartitionStatement[] {
   const out: PartitionStatement[] = [];
-  const push = (sql: string, notes?: string[]) => out.push(notes ? { sql, notes } : { sql });
+  const push = (sql: string, notes?: string[], rowLoss = false) => out.push({ sql, ...(notes ? { notes } : {}), ...(rowLoss ? { rowLoss: true as const } : {}) });
   const bNames = new Set(b.map((p) => p.name));
   const targetValues = range ? undefined : allValues(b);
   // LIST 는 값이 TARGET 어딘가에 남는 파티션을 DROP 하면 그 행이 사라지므로 REORGANIZE 로 넘긴다
@@ -97,7 +99,7 @@ export function listPartitionBodies(table: string, a: PartitionDef[], b: Partiti
   // 1) RANGE 보관 기간 정리: TARGET이 기존 파티션으로 시작할 때만 앞쪽의 사라진 파티션을 DROP.
   //    LIST 는 위치와 상관없이 값이 TARGET 어디에도 없는 사라진 파티션만 DROP 한다
   const gone = range ? leadingGone(a, b, bNames) : a.filter((p) => !bNames.has(p.name) && isGone(p));
-  if (gone.length) push(`ALTER TABLE ${table} DROP PARTITION ${names(gone)}`, [range ? retentionNote(gone) : lossNote(gone)]);
+  if (gone.length) push(`ALTER TABLE ${table} DROP PARTITION ${names(gone)}`, [range ? retentionNote(gone) : lossNote(gone)], true);
   // 2) 공통 앞·뒤를 제외한 가운데 구간만 재구성
   const rest = a.filter((p) => !gone.includes(p));
   let pre = 0;
@@ -120,7 +122,7 @@ export function listPartitionBodies(table: string, a: PartitionDef[], b: Partiti
     // RANGE 중간 삭제: 다음 파티션과 합쳐 다음 파티션 정의로 재구성하면 지운 구간의 행이 다음 파티션으로 옮겨진다
     const next = b[b.length - suf];
     push(`ALTER TABLE ${table} REORGANIZE PARTITION ${names([...from, rest[rest.length - suf]])} INTO (\n${printPart(next)})`);
-  } else if (from.length && !to.length) push(`ALTER TABLE ${table} DROP PARTITION ${names(from)}`, [lossNote(from)]);
+  } else if (from.length && !to.length) push(`ALTER TABLE ${table} DROP PARTITION ${names(from)}`, [lossNote(from)], true);
   else if (to.length) {
     if (!from.length) {
       // MAXVALUE 같은 뒤쪽 파티션 앞에 끼워 넣기: 뒤쪽 첫 파티션을 쪼갠다
@@ -131,7 +133,7 @@ export function listPartitionBodies(table: string, a: PartitionDef[], b: Partiti
     const sql = `ALTER TABLE ${table} REORGANIZE PARTITION ${names(from)} INTO (\n${to.map(printPart).join(',\n')})`;
     // 마지막 파티션 재구성은 범위를 늘릴 수만 있다 (줄이면 error 1520 ER_REORG_OUTSIDE_RANGE)
     if (range && suf === 0 && shrinksUpperBound(from[from.length - 1], to[to.length - 1])) push(shrinkManual(table, sql));
-    else push(sql, vanished.length ? [vanishNote(vanished)] : undefined);
+    else push(sql, vanished.length ? [vanishNote(vanished)] : undefined, vanished.length > 0);
   }
   // 3) COMMENT만 바뀐 파티션
   const note = commentNote(a, b);

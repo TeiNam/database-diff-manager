@@ -95,7 +95,8 @@ describe('SummaryTab: 루틴', () => {
 
   it('MD 가 끼면 루틴을 비교하지 않는다고 안내한다', () => {
     renderWithProviders(<SummaryTab data={MD_DATA as never} onOpen={() => undefined} />);
-    expect(screen.getByRole('note')).toHaveTextContent('MD 출처라 루틴은 비교하지 않음');
+    // TARGET 완전성 안내(15회차)도 함께 뜰 수 있어 note 중에서 찾는다
+    expect(screen.getAllByRole('note').some((n) => n.textContent?.includes('MD 출처라 루틴은 비교하지 않음'))).toBe(true);
   });
 });
 

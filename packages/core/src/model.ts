@@ -147,11 +147,17 @@ export interface SchemaModel {
   views: View[];
   routines: Routine[];
   routinesUnknown?: boolean; // 출처(MD)에 루틴 정보가 없어 루틴을 알 수 없음
-  // 원문이 완전한 td-export 스키마 출력임을 확인하지 못함 (파일 끊김·트레일러 없음·비스키마 문장 등). TARGET 이면 파괴적 문장을 막는다
-  incomplete?: SchemaIncomplete;
+  // 원문이 완전한 td-export 스키마 출력이라는 증거 (completeness — 15회차). 없으면(직접 만든 모델·옛 JSON) unknown 으로 본다.
+  // TARGET 의 증거가 complete 가 아니면 부재 기반 파괴 문장(객체·컬럼·파티션 삭제)을 수동 확인으로 돌린다
+  evidence?: SchemaEvidence;
 }
 
-export interface SchemaIncomplete {
-  reason: string;
+// complete: 양성 증거(td-export SQL 헤더·트레일러, MD 구조·모든 섹션·마지막 섹션 완결)가 있음. incomplete: 끊김·누락 등 음성 증거.
+// unknown: 어느 쪽 증거도 없음 (td-export 0.1.15 SQL 등)
+export type EvidenceLevel = 'complete' | 'incomplete' | 'unknown';
+
+export interface SchemaEvidence {
+  level: EvidenceLevel;
+  reason?: string; // complete 가 아닌 이유
   objects: string[]; // 정의가 끊겼을 수 있는 객체 (이 객체의 문장은 모두 수동 확인)
 }
