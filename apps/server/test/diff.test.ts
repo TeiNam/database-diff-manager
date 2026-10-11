@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { replaceRenames } from '../src/repos/renames';
 import { LruCache } from '../src/services/cache';
 import { loggedInApp, multipart, SAMPLE_SQL, sampleText } from './helpers';
 
@@ -161,6 +162,53 @@ describe('수동 rename 역방향 적용 — DMS 테이블 rename·중복 대상
     const rev = await get(ctx, v2, v1);
     expect(rev.renames).toEqual([]);
     expect(rev.diff.tables.map((t: { op: string }) => t.op)).toEqual(['drop', 'add']);
+  });
+});
+
+describe('rename 3회차 — 역방향은 적용된 매핑만, 수동 테이블 rename 과 DMS 컬럼 대응', () => {
+  const put = (ctx: App, base: number, target: number, renames: unknown[]) =>
+    ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.dba, payload: { base, target, renames } });
+  const get = async (ctx: App, base: number, target: number) =>
+    (await ctx.app.inject({ method: 'GET', url: `/api/diff?base=${base}&target=${target}`, headers: ctx.viewer })).json();
+
+  it('이미 저장된 c→b, a→b 의 역방향은 정방향에서 실제로 적용된 a→b 만 뒤집는다', async () => {
+    const ctx = await loggedInApp();
+    const v1 = await upload(ctx, 's.sql', 'CREATE TABLE `a` (\n  `id` int NOT NULL\n);\nCREATE TABLE `c` (\n  `id` int NOT NULL\n);');
+    const v2 = await upload(ctx, 's.sql', 'CREATE TABLE `b` (\n  `id` int NOT NULL\n);');
+    // 2회차 저장 검증 이전에 남은 데이터 (라우트를 거치지 않고 저장)
+    replaceRenames(ctx.db, v1, v2, [{ kind: 'table', from: 'c', to: 'b' }, { kind: 'table', from: 'a', to: 'b' }], 1);
+    const fwd = await get(ctx, v1, v2);
+    const applied = fwd.diff.tables.filter((t: { op: string }) => t.op === 'rename').map((t: { oldName: string; name: string }) => `${t.oldName}→${t.name}`);
+    expect(applied).toEqual(['a→b']);
+    const rev = await get(ctx, v2, v1);
+    expect(rev.renames).toEqual([{ kind: 'table', from: 'b', to: 'a', source: 'manual', reversed: true }]);
+    expect(rev.ddl).toContain('RENAME TABLE `b` TO `a`');
+  });
+
+  it('DMS members→member·nick→nickname 의 테이블만 수동 members→customer 로 덮으면 DMS 컬럼 rename 은 customer 에 붙는다', async () => {
+    const ctx = await loggedInApp();
+    const v1 = await upload(ctx, 'a.sql', 'CREATE TABLE `members` (\n  `id` int NOT NULL,\n  `nick` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n);', 'legacy');
+    const v2 = await upload(ctx, 'b.sql', [
+      'CREATE TABLE `member` (\n  `id` int NOT NULL,\n  `nickname` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n);',
+      'CREATE TABLE `customer` (\n  `id` int NOT NULL,\n  `nickname` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n);',
+    ].join('\n'), 'newapp');
+    const d0 = await get(ctx, v1, v2);
+    const locator = { 'schema-name': 'legacy', 'table-name': 'members' };
+    const rules = [
+      { 'rule-type': 'selection', 'rule-id': '1', 'rule-name': '1', 'object-locator': locator, 'rule-action': 'include' },
+      { 'rule-type': 'transformation', 'rule-id': '2', 'rule-name': '2', 'rule-target': 'table', 'object-locator': locator, 'rule-action': 'rename', value: 'member' },
+      { 'rule-type': 'transformation', 'rule-id': '3', 'rule-name': '3', 'rule-target': 'column', 'object-locator': { ...locator, 'column-name': 'nick' }, 'rule-action': 'rename', value: 'nickname' },
+    ];
+    const uploaded = await ctx.app.inject({ method: 'POST', url: '/api/migrations', headers: ctx.admin, payload: { fromSchemaId: d0.base.schemaId, toSchemaId: d0.target.schemaId, filename: 'm.json', source: JSON.stringify({ rules }) } });
+    expect(uploaded.statusCode).toBe(201);
+    expect((await put(ctx, v1, v2, [{ kind: 'table', from: 'members', to: 'customer' }])).statusCode).toBe(200);
+
+    const fwd = await get(ctx, v1, v2);
+    expect(fwd.renames).toContainEqual({ kind: 'column', table: 'customer', from: 'nick', to: 'nickname', source: 'dms' });
+    expect(fwd.diff.ignoredRenames).toEqual([]);
+    expect(fwd.ddl).toContain('RENAME TABLE `members` TO `customer`');
+    expect(fwd.ddl).toContain('RENAME COLUMN `nick` TO `nickname`');
+    expect(fwd.ddl).not.toContain('DROP COLUMN');
   });
 });
 

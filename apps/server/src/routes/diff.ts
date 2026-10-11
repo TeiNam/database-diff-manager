@@ -6,7 +6,7 @@ import { requireEditor, requireLogin } from '../auth/plugin';
 import { AppError } from '../errors';
 import { replaceRenames } from '../repos/renames';
 import { RenameMappingSchema } from '../schemas';
-import { computeDiff, loadDiffInputs, renameKey } from '../services/diff-service';
+import { computeDiff, loadDiffInputs, renameFullKey, renameKey, retargetDms } from '../services/diff-service';
 
 const VersionId = z.coerce.number().int().positive();
 const DiffQuery = z.object({ base: VersionId, target: VersionId });
@@ -15,12 +15,13 @@ const MAX_RENAMES = 500;
 const RenamesBody = DiffQuery.extend({ renames: z.array(RenameMappingSchema).max(MAX_RENAMES + MAX_DMS_RULES) });
 
 // DMS 에서 온 rename(kind, table, from, to 가 모두 같은 것)은 수동 매핑으로 저장하지 않는다
+// 수동 테이블 rename 으로 table 이 옮겨진 DMS 컬럼·인덱스 매핑(retargetDms)도 DMS 에서 온 것으로 본다
 function toManualRenames(submitted: RenameMapping[], dms: RenameMapping[]): RenameMapping[] {
-  const dmsFull = new Set(dms.map((r) => `${renameKey(r)}>${r.to}`));
-  const manual = submitted.filter((r) => !dmsFull.has(`${renameKey(r)}>${r.to}`));
+  const dmsFull = new Set([...dms, ...retargetDms(dms, submitted)].map(renameFullKey));
+  const manual = submitted.filter((r) => !dmsFull.has(renameFullKey(r)));
   if (manual.length > MAX_RENAMES) throw new AppError(400, `rename 매핑은 최대 ${MAX_RENAMES}개까지 저장할 수 있습니다`);
   if (new Set(manual.map(renameKey)).size !== manual.length) throw new AppError(400, '같은 대상에 대한 매핑이 중복되었습니다');
-  rejectSharedTargets(manual, dms);
+  rejectSharedTargets(manual, retargetDms(dms, manual));
   return manual;
 }
 

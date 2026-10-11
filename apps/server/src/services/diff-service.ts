@@ -23,11 +23,37 @@ export interface DiffResponse {
 // rename 대상 식별 키 (kind, table, from). 라우트와 공유한다
 export const renameKey = (r: RenameMapping) => `${r.kind}:${r.table ?? ''}:${r.from}`;
 
-// 같은 대상(kind, table, from)이면 수동 매핑이 DMS 매핑을 이긴다
+// 매핑 전체 식별 키 (kind, table, from, to)
+export const renameFullKey = (r: RenameMapping) => `${renameKey(r)}>${r.to}`;
+
+// DMS 컬럼·인덱스 매핑의 table 은 DMS 테이블 대응의 TARGET 이름이다. 수동 테이블 rename 이 같은 원본 테이블을 다른 이름으로
+// 덮으면(members→member 를 members→customer 로) 최종 테이블 대응으로 table 을 다시 정한다. 최종 대응에서 원본 테이블이
+// 갈 곳이 없으면(다른 테이블이 그 이름을 차지) 그 매핑은 뺀다
+export function retargetDms(dms: RenameMapping[], manual: RenameMapping[]): RenameMapping[] {
+  const manualTables = manual.filter((r) => r.kind === 'table');
+  if (!manualTables.length) return dms;
+  const dmsTables = dms.filter((r) => r.kind === 'table');
+  const dmsBaseOf = new Map(dmsTables.map((r): [string, string] => [r.to, r.from]));
+  const manualFrom = new Set(manualTables.map((r) => r.from));
+  const finalMap = new Map([
+    ...dmsTables.filter((r) => !manualFrom.has(r.from)).map((r): [string, string] => [r.from, r.to]),
+    ...manualTables.map((r): [string, string] => [r.from, r.to]),
+  ]);
+  const finalTargets = new Set(finalMap.values());
+  const finalOf = (base: string) => finalMap.get(base) ?? (finalTargets.has(base) ? undefined : base);
+  return dms.flatMap((r) => {
+    if (r.kind === 'table' || r.table === undefined) return [r];
+    const table = finalOf(dmsBaseOf.get(r.table) ?? r.table);
+    if (table === undefined) return [];
+    return table === r.table ? [r] : [{ ...r, table }];
+  });
+}
+
+// 같은 대상(kind, table, from)이면 수동 매핑이 DMS 매핑을 이긴다. DMS 컬럼·인덱스 매핑은 최종 테이블 대응으로 옮긴 뒤 비교한다
 export function mergeRenames(dms: RenameMapping[], manual: RenameMapping[], isReversed = false): SourcedRename[] {
   const manualKeys = new Set(manual.map(renameKey));
   return [
-    ...dms.filter((r) => !manualKeys.has(renameKey(r))).map((r) => ({ ...r, source: 'dms' as const })),
+    ...retargetDms(dms, manual).filter((r) => !manualKeys.has(renameKey(r))).map((r) => ({ ...r, source: 'dms' as const })),
     ...manual.map((r) => ({ ...r, source: 'manual' as const, ...(isReversed ? { reversed: true as const } : {}) })),
   ];
 }
@@ -76,6 +102,23 @@ export function loadDiffInputs(db: Db, cache: AppCache, baseId: number, targetId
   return { ref, base, target, dms: dmsRenamesFor(db, cache, ref, base, target) };
 }
 
+// 역쌍 매핑 중 역쌍(정방향) diff 에서 실제로 적용된 것만 (같은 대상으로 가는 매핑·충돌로 빠진 매핑은 뒤집지 않는다)
+function appliedOnly(db: Db, cache: AppCache, baseId: number, targetId: number, renames: RenameMapping[]): RenameMapping[] {
+  const applied = appliedRenameKeys(computeDiff(db, cache, baseId, targetId).diff);
+  return renames.filter((r) => applied.has(renameFullKey(r)));
+}
+
+// diff 결과의 rename op (renameFullKey 형식)
+function appliedRenameKeys(diff: SchemaDiff): Set<string> {
+  const out = new Set<string>();
+  for (const t of diff.tables) {
+    if (t.op === 'rename') out.add(renameFullKey({ kind: 'table', from: t.oldName!, to: t.name }));
+    for (const c of t.columns) if (c.op === 'rename') out.add(renameFullKey({ kind: 'column', table: t.name, from: c.oldName!, to: c.name }));
+    for (const i of t.indexes) if (i.op === 'rename') out.add(renameFullKey({ kind: 'index', table: t.name, from: i.oldName!, to: i.name }));
+  }
+  return out;
+}
+
 // 버전 내용은 불변이라 캐시 키는 (base, target, 전환 매핑 방향·id, 수동 rename 매핑과 그 출처 방향)뿐이다
 export function computeDiff(db: Db, cache: AppCache, baseId: number, targetId: number, inputs?: DiffInputs): DiffResponse {
   const { manual: forward, reverse } = manualRenamesFor(db, baseId, targetId);
@@ -84,7 +127,7 @@ export function computeDiff(db: Db, cache: AppCache, baseId: number, targetId: n
   const cached = cache.diff.get(key);
   if (cached) return cached;
   const { base, target, dms } = inputs ?? loadDiffInputs(db, cache, baseId, targetId, ref);
-  const manual = reverse ? invertRenames(reverse, dms) : forward;
+  const manual = reverse ? invertRenames(appliedOnly(db, cache, targetId, baseId, reverse), dms) : forward;
   const renames = mergeRenames(dms, manual, reverse !== undefined);
   const diff = diffSchemas(base.model, target.model, renames);
   const statements = generateDdl(diff);
