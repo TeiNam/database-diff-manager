@@ -1,5 +1,5 @@
 // SchemaDiff → BASE를 TARGET으로 바꾸는 DDL. 순서는 FK·뷰 의존성 때문에 고정 (스펙 4.6)
-import type { Op, RoutineDiff, SchemaDiff, TableDiff, ViewDiff } from './diff';
+import { renamedAutoName, type Op, type RoutineDiff, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
 import { alter, alterStatements, commentBody, inheritCollation, manualBody, sqlBody, type StatementBody } from './ddl-alter';
 import { quoteIdent as q, quoteString } from './lexer';
 import type { Routine, RoutineKind, Table } from './model';
@@ -19,6 +19,7 @@ export interface Statement extends StatementBody {
 
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };
 const DEFINER_NOTE = 'DEFINER 없이 생성합니다 — 실행한 사용자가 DEFINER 가 됩니다';
+const PIN_NOTE = 'RENAME INDEX x TO x: FK 를 다시 추가할 때 FK 가 만든 인덱스 이름이 FK 이름으로 바뀌지 않도록 고정합니다';
 const PARTIAL_NOTE = '-- [MD 기반] 일부 속성(Normal 인덱스 종류, 기본값, 생성 컬럼, 문자셋·콜레이션, CHECK, 파티션)은 비교하지 않았습니다';
 
 export function generateDdl(diff: SchemaDiff): Statement[] {
@@ -28,10 +29,13 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
   const routine = (r: RoutineDiff, body: StatementBody) => out.push({ object: r.name, kind: r.kind, op: r.op, ...body });
   const altered = diff.tables.filter((d) => d.op === 'modify' || d.op === 'rename');
 
-  // 1. FK 삭제 (rename 전 이름 사용)
+  // 1. FK 삭제 (rename 전 테이블·FK 이름 사용)
   for (const d of altered) {
     const drops = d.foreignKeys.filter((f) => f.op === 'drop' || f.op === 'modify');
-    if (drops.length) table(d, sqlBody(alter(d.oldName ?? d.name, drops.map((f) => `DROP FOREIGN KEY ${q(f.name)}`))));
+    if (!drops.length) continue;
+    const pinned = pinnedIndexes(d, drops);
+    const clauses = [...drops.map((f) => `DROP FOREIGN KEY ${q(baseFkName(d, f.name))}`), ...pinned.map((n) => `RENAME INDEX ${q(n)} TO ${q(n)}`)];
+    table(d, sqlBody(alter(d.oldName ?? d.name, clauses), pinned.length ? [PIN_NOTE] : []));
   }
   // 1-b. 삭제될 테이블의 FK도 먼저 제거 (부모/자식 DROP 순서 무관하게, error 3730 방지)
   for (const d of diff.tables) {
@@ -80,6 +84,25 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
       : sqlBody(printView(v.to!, { orReplace: true }), [DEFINER_NOTE]));
   }
   return guardConflicts(out, renameConflicts(diff));
+}
+
+// diff 의 FK 이름(rename 된 테이블의 자동 이름은 새 테이블 이름으로 바꾼 것)에 해당하는 BASE FK 이름
+function baseFkName(d: TableDiff, name: string): string {
+  if (!d.oldName) return name;
+  return d.from?.foreignKeys.find((f) => renamedAutoName(f.name, d.oldName!, d.name, 'ibfk') === name)?.name ?? name;
+}
+
+// FK 가 자동으로 만든 인덱스는 같은 컬럼에 이름 있는 FK 를 다시 추가하면 그 FK 이름으로 바뀐다 (SHOW CREATE 로는 직접 만든
+// 인덱스와 구별할 수 없다). 삭제하는 FK 의 컬럼으로 시작하는 BASE 인덱스를 같은 이름으로 RENAME 해 두면 이름이 고정된다
+function pinnedIndexes(d: TableDiff, drops: TableDiff['foreignKeys']): string[] {
+  const added = d.foreignKeys.filter((f) => f.op === 'add' || f.op === 'modify').map((f) => f.name);
+  const startsWith = (cols: string[], prefix: string[]) => prefix.length > 0 && prefix.every((c, i) => cols[i] === c);
+  // 5단계에서 삭제·재생성·rename 하는 인덱스는 그 문장이 이름을 정한다
+  const changed = new Set(d.indexes.map((i) => i.oldName ?? i.name));
+  return (d.from?.indexes ?? [])
+    .filter((i) => (i.kind === 'INDEX' || i.kind === 'UNIQUE') && !changed.has(i.name) && added.some((n) => n !== i.name))
+    .filter((i) => drops.some((f) => startsWith(i.parts.map((p) => p.column ?? ''), f.from!.columns)))
+    .map((i) => i.name);
 }
 
 export function renderDdl(stmts: Statement[], partial = false): string {
@@ -135,6 +158,30 @@ function renameConflicts(diff: SchemaDiff): Map<string, Conflict> {
     } else if (m.kind === 'column' && m.table !== undefined) {
       add(m.table, '컬럼', `컬럼 rename ${m.from}→${m.to} 이 다른 컬럼 이름과 겹쳐 적용하지 못했습니다`);
     }
+  }
+  return spreadConflicts(diff, out);
+}
+
+// 충돌 테이블이 얽힌 rename 묶음에 들면 묶음의 모든 테이블로 넓힌다 (묶음 RENAME 이 실행되지 않으면 다른 테이블의 ALTER 가
+// 엉뚱한 테이블의 데이터를 바꾼다). 그 테이블들을 참조하는 FK 를 바꾸는 테이블도 함께 막는다
+function spreadConflicts(diff: SchemaDiff, conflicts: Map<string, Conflict>): Map<string, Conflict> {
+  if (!conflicts.size) return conflicts;
+  const out = new Map(conflicts);
+  const blocked = new Set(conflicts.keys());
+  for (const g of renameGroups(diff.tables, new Set())) {
+    if (!g.tables.some((d) => conflicts.has(d.name) || conflicts.has(d.oldName!))) continue;
+    const pairs = g.tables.map((d) => `${d.oldName}→${d.name}`).join(', ');
+    for (const d of g.tables) {
+      blocked.add(d.name).add(d.oldName!);
+      if (out.has(d.name)) continue;
+      out.set(d.name, { reason: `${d.name}: 함께 묶인 테이블 rename 이 수동 확인이라 실행하지 않습니다 — 값 대응을 확인해 직접 작성하세요`, notes: [`테이블 rename 묶음(${pairs})의 다른 테이블에 이름 충돌이 있습니다`] });
+    }
+  }
+  for (const d of diff.tables) {
+    if (out.has(d.name) || (d.op !== 'modify' && d.op !== 'rename')) continue;
+    const refs = d.foreignKeys.filter((f) => [f.from?.refTable, f.to?.refTable].some((n) => n !== undefined && blocked.has(n)));
+    if (!refs.length) continue;
+    out.set(d.name, { reason: `${d.name}: 참조하는 테이블의 rename 이 수동 확인이라 FK 변경을 실행하지 않습니다 — 직접 작성하세요`, notes: [`FK ${refs.map((f) => f.name).join(', ')} 가 수동 확인 테이블을 참조합니다`] });
   }
   return out;
 }

@@ -1,0 +1,5 @@
+[
+  { "kind": "table", "from": "child", "to": "kid" },
+  { "kind": "table", "from": "a", "to": "b" },
+  { "kind": "table", "from": "b", "to": "a" }
+]

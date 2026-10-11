@@ -20,6 +20,22 @@ describe('listPartitionStatements', () => {
     ]);
   });
 
+  it('RANGE 마지막 상한이 줄면(MAXVALUE → 유한, 30 → 15) REORGANIZE 대신 수동 확인 문장 (error 1520)', () => {
+    for (const [a, b] of [[[P('p1'), P('p2'), MAX], [P('p1'), P('p2'), P('p3', '30')]], [[P('p1'), P('p3', '30')], [P('p1'), P('p4', '15')]]]) {
+      const bodies = listPartitionBodies('`t`', a, b);
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0].sql.split('\n').every((l) => l.startsWith('--'))).toBe(true);
+      expect(bodies[0].sql).toMatch(/^-- \[수동 확인 필요\] `t`: RANGE 마지막 파티션 상한이 줄어/);
+      expect(bodies[0].sql).toContain('-- ALTER TABLE `t` REORGANIZE PARTITION');
+    }
+  });
+
+  it('RANGE 마지막 상한이 늘면 그대로 REORGANIZE', () => {
+    expect(listPartitionStatements('`t`', [P('p1'), P('p2', '20')], [P('p1'), P('p3', '30')])).toEqual([
+      'ALTER TABLE `t` REORGANIZE PARTITION `p2` INTO (\n PARTITION `p3` VALUES LESS THAN (30))',
+    ]);
+  });
+
   it('앞쪽 병합은 DROP이 아니라 REORGANIZE', () => {
     expect(listPartitionStatements('`t`', [P('p1'), P('p2'), P('p3')], [P('p12', '2'), P('p3')])).toEqual([
       'ALTER TABLE `t` REORGANIZE PARTITION `p1`, `p2` INTO (\n PARTITION `p12` VALUES LESS THAN (2))',

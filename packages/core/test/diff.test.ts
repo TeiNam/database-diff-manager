@@ -236,3 +236,23 @@ describe('컬럼 문자셋 표기 차이', () => {
     expect(diffSchemas(a, b).tables.map((t) => t.columns.map((c) => c.name))).toEqual([['c']]);
   });
 });
+
+describe('rename 된 테이블의 자동 FK 이름', () => {
+  const child = (name: string, fk: string) => `CREATE TABLE \`${name}\` (\n  \`id\` int NOT NULL,\n  \`pid\` int NOT NULL,\n  PRIMARY KEY (\`id\`),\n  KEY \`pid\` (\`pid\`),\n  CONSTRAINT \`${fk}\` FOREIGN KEY (\`pid\`) REFERENCES \`p\` (\`id\`)\n) ENGINE=InnoDB;`;
+  const P = 'CREATE TABLE `p` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;';
+
+  it('연쇄 rename(log→log_old, log_new→log)도 <옛>_ibfk_N 을 <새>_ibfk_N 으로 보고 FK 변경이 없다', () => {
+    const base = parseSqlDump([P, child('log', 'log_ibfk_1'), child('log_new', 'log_new_ibfk_1')].join('\n')).model;
+    const target = parseSqlDump([P, child('log_old', 'log_old_ibfk_1'), child('log', 'log_ibfk_1')].join('\n')).model;
+    const renames: RenameMapping[] = [{ kind: 'table', from: 'log', to: 'log_old' }, { kind: 'table', from: 'log_new', to: 'log' }];
+    const d = diffSchemas(base, target, renames);
+    expect(d.tables.map((t) => [t.op, t.oldName, t.name, t.foreignKeys.length])).toEqual([['rename', 'log', 'log_old', 0], ['rename', 'log_new', 'log', 0]]);
+  });
+
+  it('자동 이름 형태가 아닌 FK 이름은 그대로 비교한다', () => {
+    const base = parseSqlDump([P, child('c', 'c_ibfk_x')].join('\n')).model;
+    const target = parseSqlDump([P, child('c2', 'c2_ibfk_x')].join('\n')).model;
+    const [t] = diffSchemas(base, target, [{ kind: 'table', from: 'c', to: 'c2' }]).tables;
+    expect(t.foreignKeys.map((f) => [f.op, f.name])).toEqual([['drop', 'c_ibfk_x'], ['add', 'c2_ibfk_x']]);
+  });
+});

@@ -145,13 +145,35 @@ export function listPartitionBodies(table: string, a: PartitionDef[], b: Partiti
       to = [...to, b[b.length - suf]];
     }
     const vanished = range ? [] : vanishedValues(from, to);
-    push(`ALTER TABLE ${table} REORGANIZE PARTITION ${names(from)} INTO (\n${to.map(printPart).join(',\n')})`, vanished.length ? [vanishNote(vanished)] : undefined);
+    const sql = `ALTER TABLE ${table} REORGANIZE PARTITION ${names(from)} INTO (\n${to.map(printPart).join(',\n')})`;
+    // 마지막 파티션 재구성은 범위를 늘릴 수만 있다 (줄이면 error 1520 ER_REORG_OUTSIDE_RANGE)
+    if (range && suf === 0 && shrinksUpperBound(from[from.length - 1], to[to.length - 1])) push(shrinkManual(table, sql));
+    else push(sql, vanished.length ? [vanishNote(vanished)] : undefined);
   }
   // 3) COMMENT만 바뀐 파티션
   const note = commentNote(a, b);
   if (note) push(note);
   return out;
 }
+
+// RANGE 상한 (MAXVALUE 는 Infinity). 정수 하나가 아니면(RANGE COLUMNS·식) undefined
+function upperBound(p: PartitionDef): number | undefined {
+  const def = stripComment(p.def);
+  if (/^\s*VALUES\s+LESS\s+THAN\s+(?:\(\s*MAXVALUE\s*\)|MAXVALUE)\b/i.test(def)) return Infinity;
+  const m = /^\s*VALUES\s+LESS\s+THAN\s*\(\s*(-?\d+)\s*\)/i.exec(def);
+  return m ? Number(m[1]) : undefined;
+}
+
+function shrinksUpperBound(from: PartitionDef, to: PartitionDef): boolean {
+  const a = upperBound(from);
+  const b = upperBound(to);
+  return a !== undefined && b !== undefined && b < a;
+}
+
+const shrinkManual = (table: string, sql: string): string => [
+  `-- [수동 확인 필요] ${table}: RANGE 마지막 파티션 상한이 줄어 REORGANIZE 할 수 없습니다 (error 1520). 새 상한을 넘는 행을 옮기거나 지운 뒤 직접 작성하세요`,
+  ...sql.split('\n').map((l) => `-- ${l}`),
+].join('\n');
 
 function leadingGone(a: PartitionDef[], b: PartitionDef[], bNames: ReadonlySet<string>): PartitionDef[] {
   if (!b.length || !a.some((p) => p.name === b[0].name)) return [];

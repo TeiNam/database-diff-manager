@@ -1,0 +1,3 @@
+[
+  { "kind": "column", "table": "member", "from": "full_name", "to": "name", "allowOverlap": true }
+]

@@ -193,3 +193,50 @@ describe('생성 컬럼 저장 방식 변경', () => {
     expect(st.sql).toContain('-- [수동 확인 필요] t: 생성 컬럼(`g`)의 VIRTUAL↔STORED 변경은 MODIFY 로 할 수 없습니다');
   });
 });
+
+describe('맞바꾸기 묶음의 이름 충돌 전파', () => {
+  const t = (name: string, cols: string) => `CREATE TABLE \`${name}\` (\n  \`id\` int NOT NULL,\n${cols},\n  PRIMARY KEY (\`id\`)\n) ENGINE=InnoDB;`;
+  const base = parseSqlDump([t('a', '  `x` int NOT NULL,\n  `payload` varchar(10) NOT NULL'), t('b', '  `x` int NOT NULL,\n  `y` int NOT NULL'),
+    'CREATE TABLE `ref` (\n  `id` int NOT NULL,\n  `a_id` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `fk_ref_a` (`a_id`),\n  CONSTRAINT `fk_ref_a` FOREIGN KEY (`a_id`) REFERENCES `a` (`id`)\n) ENGINE=InnoDB;'].join('\n')).model;
+  const target = parseSqlDump([t('a', '  `y` int NOT NULL'), t('b', '  `x` int NOT NULL'),
+    'CREATE TABLE `ref` (\n  `id` int NOT NULL,\n  `a_id` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `fk_ref_a` (`a_id`),\n  CONSTRAINT `fk_ref_a` FOREIGN KEY (`a_id`) REFERENCES `b` (`id`) ON DELETE CASCADE\n) ENGINE=InnoDB;'].join('\n')).model;
+  const renames = [
+    { kind: 'table' as const, from: 'a', to: 'b' },
+    { kind: 'table' as const, from: 'b', to: 'a' },
+    { kind: 'column' as const, table: 'a', from: 'x', to: 'y' },
+  ];
+
+  it('a↔b 와 a 의 컬럼 rename 충돌이 함께 있으면 묶음의 모든 테이블 문장을 실행하지 않는다', () => {
+    const d = diffSchemas(base, target, renames);
+    expect(d.ignoredRenames.map((r) => [r.mapping.kind, r.reason])).toEqual([['column', '이름 충돌']]);
+    const stmts = generateDdl(d);
+    const ofGroup = stmts.filter((s) => s.kind === 'table' && (s.related ?? [s.object]).some((n) => n === 'a' || n === 'b'));
+    expect(ofGroup.length).toBeGreaterThan(0);
+    expect(ofGroup.filter((s) => !s.comment).map((s) => s.sql)).toEqual([]);
+    // 기존 b(새 a 가 될 테이블)의 컬럼 삭제도 주석이다
+    expect(stmts.some((s) => s.comment && s.sql.includes('-- ALTER TABLE `b`'))).toBe(true);
+  });
+
+  it('묶음 테이블을 참조하는 다른 테이블의 FK 문장도 실행하지 않는다', () => {
+    const stmts = generateDdl(diffSchemas(base, target, renames));
+    expect(stmts.filter((s) => s.object === 'ref').map((s) => s.comment)).toEqual([true, true]);
+  });
+});
+
+describe('FK 재생성 시 FK 가 만든 인덱스 이름 고정', () => {
+  const c = (act: string, extra = '') => parseSqlDump(`CREATE TABLE \`c\` (\n  \`id\` int NOT NULL,\n  \`pid\` int NOT NULL,\n  PRIMARY KEY (\`id\`),\n  KEY \`pid\` (\`pid\`),${extra}\n  CONSTRAINT \`c_ibfk_1\` FOREIGN KEY (\`pid\`) REFERENCES \`p\` (\`id\`)${act}\n) ENGINE=InnoDB;`).model;
+
+  it('이름 없는 FK 를 바꾸면 1단계에서 RENAME INDEX pid TO pid 로 인덱스 이름을 고정한다', () => {
+    const [drop, add] = generateDdl(diffSchemas(c(''), c(' ON DELETE CASCADE')));
+    expect(drop.sql).toBe('ALTER TABLE `c`\n  DROP FOREIGN KEY `c_ibfk_1`,\n  RENAME INDEX `pid` TO `pid`');
+    expect(drop.notes?.[0]).toMatch(/^RENAME INDEX x TO x:/);
+    expect(add.sql).toBe('ALTER TABLE `c`\n  ADD CONSTRAINT `c_ibfk_1` FOREIGN KEY (`pid`) REFERENCES `p` (`id`) ON DELETE CASCADE');
+  });
+
+  it('FK 삭제만 하거나 인덱스 이름이 FK 이름과 같으면 고정하지 않는다', () => {
+    const named = (act: string) => parseSqlDump(`CREATE TABLE \`c\` (\n  \`id\` int NOT NULL,\n  \`pid\` int NOT NULL,\n  KEY \`fk_c\` (\`pid\`),\n  CONSTRAINT \`fk_c\` FOREIGN KEY (\`pid\`) REFERENCES \`p\` (\`id\`)${act}\n) ENGINE=InnoDB;`).model;
+    expect(generateDdl(diffSchemas(named(''), named(' ON DELETE CASCADE')))[0].sql).toBe('ALTER TABLE `c`\n  DROP FOREIGN KEY `fk_c`');
+    const noFk = parseSqlDump('CREATE TABLE `c` (\n  `id` int NOT NULL,\n  `pid` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `pid` (`pid`)\n) ENGINE=InnoDB;').model;
+    expect(generateDdl(diffSchemas(c(''), noFk))[0].sql).toBe('ALTER TABLE `c`\n  DROP FOREIGN KEY `c_ibfk_1`');
+  });
+});
