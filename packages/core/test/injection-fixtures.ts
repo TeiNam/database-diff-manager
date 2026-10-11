@@ -46,3 +46,22 @@ export const SQL_INJECTION = {
   base: `${PRECIOUS}\n${changed('c1', '`a` varchar(10) CHARACTER SET latin1 DEFAULT NULL', 'ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci')}${changed('c2', '`a` varchar(10) DEFAULT NULL', 'ENGINE=InnoDB DEFAULT CHARSET=latin1')}`,
   target: `${PRECIOUS}\n${changed('c1', `\`a\` varchar(20) CHARACTER SET 'latin1; ${INJ}' DEFAULT NULL`, 'ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci')}${changed('c2', '`a` varchar(10) DEFAULT NULL', `ENGINE=InnoDB COLLATE='utf8mb4_bin; ${INJ}'`)}`,
 };
+
+// 실행 문장 경계 고정 사례 (12회차): mysql.int.test 가 생성 DDL 을 mysql 클라이언트(기본·NO_BACKSLASH_ESCAPES 세션, --force 유무)로
+// 적용해 precious 가 남고, 클라이언트가 보낸 실행 문장 수가 우리 판정 수와 같은지 본다. 루틴은 DELIMITER ;; 래핑으로 둔다
+const bView = (name: string, body: string) => `CREATE ALGORITHM=UNDEFINED DEFINER=\`root\`@\`localhost\` SQL SECURITY DEFINER VIEW \`${name}\` AS ${body};`;
+const bProc = (name: string, body: string) => ["SET @OLD_ROUTINE_SQL_MODE = @@SQL_MODE, SQL_MODE = 'STRICT_TRANS_TABLES';", 'DELIMITER ;;',
+  `CREATE DEFINER=\`root\`@\`localhost\` PROCEDURE \`${name}\`()\n${body};;`, 'DELIMITER ;', 'SET SQL_MODE = @OLD_ROUTINE_SQL_MODE;'].join('\n');
+const bTable = (name: string, cols = '`id` int NOT NULL') => `CREATE TABLE \`${name}\` (\n  ${cols}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`;
+export const BOUNDARY_CASES: { name: string; base: string; target: string }[] = [
+  { name: "루틴 이름 ';;\\G'", base: '', target: bProc('x;;\\G', 'BEGIN\n  SELECT 1;\nEND') },
+  { name: '블록 주석 안 /*! + 이름의 */', base: '', target: [bView('v_a', 'select 1 /* /*! */ AS `a`'), bView('v_b*/;DROP TABLE precious;-- ', 'select 1 AS `b`')].join('\n') },
+  { name: 'NBE 세션의 \\\'', base: '', target: bView('v_s', "select 'x\\';DROP TABLE precious;#' AS `a`") },
+  { name: '높은 버전 주석 안 따옴표', base: '', target: bView('v_q', "select 1 /*!99999 ' */ AS `a`, 2 AS `b` -- ' */") },
+  { name: 'hint 안 백슬래시 명령', base: '', target: bView('v_h', 'select /*+ \\g DROP TABLE precious; */ 1 AS `a`') },
+  { name: '루틴 본문 뒤 바깥 문장', base: '', target: bProc('p_o', 'BEGIN\n  SELECT 1;\nEND; DROP TABLE precious') },
+  { name: '재생성 루틴의 막힌 CREATE', base: bProc('p_m', 'BEGIN\n  SELECT 1;\nEND'), target: bProc('p_m', 'BEGIN\n  SELECT 1 AS `a;;\\G`;\nEND') },
+  { name: '이름 속 줄바꿈·DELIMITER', base: '', target: bTable('f\nDELIMITER ;;\nDROP TABLE precious;;\nDELIMITER ;') },
+  { name: '컬럼 COMMENT 의 \\\'', base: '', target: bTable('t_c', "`id` int NOT NULL COMMENT 'a\\';DROP TABLE precious;#'") },
+  { name: '실행 문장 대조군', base: bTable('t_ok'), target: [bTable('t_ok', '`id` int NOT NULL,\n  `b` int DEFAULT NULL'), bProc('p_ok', "BEGIN\n  SELECT ';;';\nEND"), bView('v_ok', 'select /*+ MAX_EXECUTION_TIME(1) */ 1 AS `a`')].join('\n') },
+];

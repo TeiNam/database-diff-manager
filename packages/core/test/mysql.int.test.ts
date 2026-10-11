@@ -11,8 +11,9 @@ import { parseCreateTable } from '../src/parse-table';
 import { parseCreateView } from '../src/parse-view';
 import { parseRoutine } from '../src/parse-routine';
 import { routineLexMode } from '../src/normalize';
-import { commentPart, fixture, scenario, scenarioManual, SCENARIOS, scenarioValues } from './helpers';
-import { MD_INJECTIONS, MD_OK, MD_VIEW_INJECTIONS, mdDump, PRECIOUS, SQL_INJECTION } from './injection-fixtures';
+import { commentPart, fixture, scenario, scenarioManual, scenarioManualObjects, SCENARIOS, scenarioValues } from './helpers';
+import { BOUNDARY_CASES, MD_INJECTIONS, MD_OK, MD_VIEW_INJECTIONS, mdDump, PRECIOUS, SQL_INJECTION } from './injection-fixtures';
+import { tokenize } from '../src/lexer';
 
 const TARGETS = [
   { name: 'MySQL 8.0', port: 33080 },
@@ -91,10 +92,11 @@ suite.each(TARGETS)('$name', ({ port }) => {
 
     const dumped = await dumpSchema(conn, db);
     const after = diffSchemas(dumped, target);
-    const changed = { tables: after.tables.map((t) => t.name), views: after.views.map((v) => v.name), routines: after.routines.map((r) => `${r.kind} ${r.name} ${r.fields.join(',')}`) };
-    // 수동 확인 테이블만 TARGET 과 다르고, 그 테이블은 반쯤 적용되지 않고 BASE 그대로여야 한다
-    const manual = scenarioManual(name);
-    expect(changed).toEqual({ tables: manual, views: [], routines: [] });
+    // 수동 확인 객체만 TARGET 과 다르고, 수동 확인 테이블은 반쯤 적용되지 않고 BASE 그대로여야 한다
+    const { tables: manual, views: manualViews, routines: manualRoutines } = scenarioManualObjects(name);
+    const changed = { tables: after.tables.map((t) => t.name), views: after.views.map((v) => v.name),
+      routines: after.routines.filter((r) => !manualRoutines.includes(`${r.kind} ${r.name}`)).map((r) => `${r.kind} ${r.name} ${r.fields.join(',')}`) };
+    expect(changed).toEqual({ tables: manual, views: manualViews, routines: [] });
     const touched = diffSchemas(base, dumped).tables.map((t) => t.name).filter((n) => manual.includes(n));
     expect(touched).toEqual([]);
     if (values) {
@@ -153,7 +155,57 @@ suite.each(TARGETS)('$name', ({ port }) => {
     }
     await conn.query(`DROP DATABASE \`${db}\``);
   });
+
+  // 실행 문장 경계 고정 사례: 기본·NO_BACKSLASH_ESCAPES 세션 × --force 유무로 mysql 클라이언트에 흘려 넣어 precious 가 남고,
+  // --force 로 끝까지 보낸 실행 문장 수(--verbose 가 찍는 문장 중 주석뿐이 아닌 것)가 우리 판정 수와 같아야 한다
+  it.skipIf(!hasMysqlClient)('실행 문장 경계: 클라이언트가 보낸 문장 수가 우리 판정과 같고 precious 가 남는다', async () => {
+    const db = 'it_boundary';
+    const failed: string[] = [];
+    for (const c of BOUNDARY_CASES) {
+      const base = [PRECIOUS, c.base].filter((x) => x).join('\n');
+      const diff = diffSchemas(parseSqlDump(base).model, parseSqlDump(`${PRECIOUS}\n${c.target}`).model);
+      const stmts = generateDdl(diff);
+      const ours = stmts.filter((s) => !s.comment).reduce((n, s) => n + (s.delimited ? splitStatements(s.sql).length : 1), 0);
+      const script = renderDdl(stmts, diff.partial);
+      for (const nbe of [false, true]) for (const force of [false, true]) {
+        await conn.query(`DROP DATABASE IF EXISTS \`${db}\`; CREATE DATABASE \`${db}\`; USE \`${db}\``);
+        execFileSync('mysql', [...CLIENT(port), db], { input: base, stdio: ['pipe', 'ignore', 'ignore'] });
+        const out = runClient([...CLIENT(port), '--verbose', ...(force ? ['--force'] : []), db], (nbe ? NBE_SESSION : '') + script);
+        const [rows] = await conn.query<RowDataPacket[]>('SHOW TABLES LIKE ?', ['precious']);
+        const label = `${c.name} nbe=${nbe} force=${force}`;
+        if (rows.length !== 1) failed.push(`${label}: precious 소실`);
+        const sent = sentStatements(out) - (nbe ? 1 : 0);
+        if (force && sent !== ours) failed.push(`${label}: 클라이언트 ${sent} 문장, 우리 판정 ${ours} 문장`);
+      }
+    }
+    await conn.query(`DROP DATABASE IF EXISTS \`${db}\``);
+    expect(failed).toEqual([]);
+  });
 });
+
+const CLIENT = (port: number) => ['-h127.0.0.1', `-P${port}`, '-uroot', '-ptest', '-N'];
+const NBE_SESSION = "SET SESSION sql_mode = CONCAT(@@sql_mode, ',NO_BACKSLASH_ESCAPES');\n";
+const VERBOSE_SEP = '--------------\n';
+
+// 오류로 끝나도(--force 없이 멈추거나 --force 의 종료 코드) 표준 출력은 쓴다
+function runClient(args: string[], input: string): string {
+  try {
+    return execFileSync('mysql', args, { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+  } catch (e) {
+    return String((e as { stdout?: unknown }).stdout ?? '');
+  }
+}
+
+// --verbose 출력: 보낸 문장마다 구분선 사이에 찍힌다 (홀수 번째 조각). 주석뿐인 문장(클라이언트가 주석 줄도 보낸다)은 세지 않는다
+function sentStatements(out: string): number {
+  return out.split(VERBOSE_SEP).filter((_, i) => i % 2 === 1).filter((text) => {
+    try {
+      return tokenize(text).length > 0;
+    } catch {
+      return true;
+    }
+  }).length;
+}
 
 async function dumpSchema(conn: Connection, db: string): Promise<SchemaModel> {
   const [rows] = await conn.query<RowDataPacket[]>('SHOW FULL TABLES');

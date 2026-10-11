@@ -2,11 +2,12 @@
 // 원칙: MySQL 로 검증한 패턴만 실행 SQL 로 내고, 얽힌 조합은 관련 객체 전체를 막는다
 import type { Statement } from './ddl';
 import { isAlterBlocked, manualBody, manualNote } from './ddl-alter';
-import { isSingleStatement, UNSAFE_STATEMENT_REASON } from './statement-check';
+import { hasSafeIdentifiers, isSingleStatement, UNSAFE_IDENTIFIER_REASON, UNSAFE_STATEMENT_REASON } from './statement-check';
 import { retypeGroups } from './fk-retype';
 import { localSchemas, routineNameKey, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
 import { objectReferences } from './lexer';
 import { renameGroups } from './table-rename';
+import { halfBlockedPairs, isRoutineStatement, PAIR_NOTE, pairReason, routinePairKey, type PairKeys } from './replace-pairs';
 
 interface Conflict {
   reason: string;
@@ -19,19 +20,40 @@ export function guardStatements(stmts: Statement[], diff: SchemaDiff): Statement
   // 실행 문장이 한 문장이 아니면(입력 값 주입) 그 문장을 수동 확인으로 돌리고, 생성이 막힌 객체처럼 의존 문장도 함께 막는다
   const checked = stmts.map(singleOrManual);
   const unsafe = checked.filter((st, i) => st !== stmts[i]);
-  const tables = spreadConflicts(diff, seedConflicts(diff, checked, unsafe), alterBlockedTables(diff));
+  // 삭제·재생성 쌍의 한쪽만 막히면 그 객체도 막힌 것으로 보고 다시 넓힌다 (고정점, replace-pairs)
+  let pairs: PairKeys = { relations: new Set(), routines: new Set() };
+  for (;;) {
+    const out = guardWith(checked, unsafe, diff, pairs);
+    const half = halfBlockedPairs(out);
+    const next: PairKeys = { relations: new Set([...pairs.relations, ...half.relations]), routines: new Set([...pairs.routines, ...half.routines]) };
+    if (next.relations.size === pairs.relations.size && next.routines.size === pairs.routines.size) return out;
+    pairs = next;
+  }
+}
+
+function guardWith(checked: Statement[], unsafe: Statement[], diff: SchemaDiff, pairs: PairKeys): Statement[] {
+  const seeds = seedConflicts(diff, checked, unsafe);
+  for (const n of pairs.relations) addConflict(seeds, n, pairReason(n), PAIR_NOTE);
+  const tables = spreadConflicts(diff, seeds, alterBlockedTables(diff));
   const unparsed = unparsedObjects(diff);
   const unsafeOf = (kind: Statement['kind']) => unsafe.filter((st) => st.kind === kind).map((st) => st.object);
   const views = viewConflicts(diff.views, localSchemas(diff), new Set([...blockedNames(diff, tables), ...unparsed.views, ...unsafeOf('view')]), [...unparsed.functions, ...unsafeOf('function')]);
+  for (const n of pairs.relations) if (!views.has(n)) views.set(n, { reason: pairReason(n), notes: [PAIR_NOTE] });
   const out = tables.size || views.size ? guard(checked, tables, views) : checked;
   // 마지막 방어선: 막은 뒤의 문장도 다시 확인한다
-  return out.map(singleOrManual);
+  return out.map((st) => (isRoutineStatement(st) && pairs.routines.has(routinePairKey(st)) ? toManual(st, pairReason(st.object), [PAIR_NOTE]) : st)).map(singleOrManual);
 }
 
-function singleOrManual(st: Statement): Statement {
-  if (isSingleStatement(st)) return st;
+function toManual(st: Statement, reason: string, notes: string[] = []): Statement {
+  if (st.comment) return st;
   const { delimited: _, ...rest } = st;
-  return { ...rest, ...manualBody(`${st.object}: ${UNSAFE_STATEMENT_REASON}`, st.sql, st.notes ?? []) };
+  return { ...rest, ...manualBody(reason, st.sql, [...(st.notes ?? []), ...notes]) };
+}
+
+// 한 문장이 아니면 그 사유를, 한 문장이어도 이름이 보수적 이름 규칙을 어기면 그 사유를 단다 (statement-check)
+function singleOrManual(st: Statement): Statement {
+  if (!isSingleStatement(st)) return toManual(st, `${st.object}: ${UNSAFE_STATEMENT_REASON}`);
+  return hasSafeIdentifiers(st) ? st : toManual(st, `${st.object}: ${UNSAFE_IDENTIFIER_REASON}`);
 }
 
 // 본 ALTER 가 수동 확인인 테이블은 그 테이블의 모든 문장(FK 해제·재추가, rename, 파티션 등)을 막는다 (본 ALTER 없이 FK 해제·재추가만

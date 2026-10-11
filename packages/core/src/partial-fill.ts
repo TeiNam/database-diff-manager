@@ -101,5 +101,6 @@ export function tableNote(t: Table): string | undefined {
   return fields.length ? `${NOTE_PREFIX} 테이블 ${q(t.name)}: ${fields.join(', ')} (DDL에 포함하지 않음)` : undefined;
 }
 
+// 사유는 주석 줄(commentLine)에 들어가 블록 주석 표식이 무력화되므로 자리표시 주석을 그대로 쓰지 않고 이름으로 가리킨다 (12회차)
 export const generatedReason = (table: string, columns: string[]): string =>
-  `${table}: 생성 컬럼(${columns.map(q).join(', ')})의 표현식을 알 수 없습니다. ${GENERATED_PLACEHOLDER}를 채운 뒤 실행하세요`;
+  `${table}: 생성 컬럼(${columns.map(q).join(', ')})의 표현식을 알 수 없습니다. 아래 SQL 의 '표현식 미상' 주석 자리를 채운 뒤 실행하세요`;

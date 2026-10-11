@@ -9,41 +9,45 @@
 -- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 
 -- [~] TABLE ev\nDROP TABLE precious;
-ALTER TABLE `ev
-DROP TABLE precious;`
-  MODIFY COLUMN `c
-DROP TABLE precious;*/x` bigint DEFAULT NULL,
-  ADD COLUMN `n
-DELIMITER ;;
-DROP TABLE precious;;` int DEFAULT NULL,
-  ADD INDEX `ix
-# DROP TABLE precious;` (`n
-DELIMITER ;;
-DROP TABLE precious;;`);
+-- [수동 확인 필요] ev\nDROP TABLE precious;: 이름에 실행 문장으로 내보내지 않는 글자(제어 문자·세미콜론·백슬래시·주석 표식)가 있음 — 이름을 확인한 뒤 직접 실행하세요
+-- ALTER TABLE `ev
+-- DROP TABLE precious;`
+--   MODIFY COLUMN `c
+-- DROP TABLE precious;*/x` bigint DEFAULT NULL,
+--   ADD COLUMN `n
+-- DELIMITER ;;
+-- DROP TABLE precious;;` int DEFAULT NULL,
+--   ADD INDEX `ix
+-- # DROP TABLE precious;` (`n
+-- DELIMITER ;;
+-- DROP TABLE precious;;`)
 
 -- [-] TABLE old\n-- x\nDROP TABLE precious
-DROP TABLE `old
--- x
-DROP TABLE precious`;
+-- [수동 확인 필요] old\n-- x\nDROP TABLE precious: 이름에 실행 문장으로 내보내지 않는 글자(제어 문자·세미콜론·백슬래시·주석 표식)가 있음 — 이름을 확인한 뒤 직접 실행하세요
+-- DROP TABLE `old
+-- -- x
+-- DROP TABLE precious`
 
 -- [+] FUNCTION fn\nDELIMITER ;\nDROP TABLE precious;
 -- DEFINER 없이 생성합니다 — 실행한 사용자가 DEFINER 가 됩니다
-SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
-DELIMITER ;;
-CREATE FUNCTION `fn
-DELIMITER ;
-DROP TABLE precious;`() RETURNS int
-    NO SQL
-    DETERMINISTIC
-RETURN 1;;
-DELIMITER ;
-SET SQL_MODE = @OLD_SQL_MODE;
+-- [수동 확인 필요] fn\nDELIMITER ;\nDROP TABLE precious;: 이름에 실행 문장으로 내보내지 않는 글자(제어 문자·세미콜론·백슬래시·주석 표식)가 있음 — 이름을 확인한 뒤 직접 실행하세요
+-- SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+-- DELIMITER ;;
+-- CREATE FUNCTION `fn
+-- DELIMITER ;
+-- DROP TABLE precious;`() RETURNS int
+--     NO SQL
+--     DETERMINISTIC
+-- RETURN 1;;
+-- DELIMITER ;
+-- SET SQL_MODE = @OLD_SQL_MODE;
 
 -- [+] VIEW v\nDROP TABLE precious;
 -- DEFINER 없이 생성합니다 — 실행한 사용자가 DEFINER 가 됩니다
-CREATE OR REPLACE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `v
-DROP TABLE precious;` AS select `ev
-DROP TABLE precious;`.`c
-DROP TABLE precious;*/x` AS `c
-DROP TABLE precious;*/x` from `ev
-DROP TABLE precious;`;
+-- [수동 확인 필요] v\nDROP TABLE precious;: 이름에 실행 문장으로 내보내지 않는 글자(제어 문자·세미콜론·백슬래시·주석 표식)가 있음 — 이름을 확인한 뒤 직접 실행하세요
+-- CREATE OR REPLACE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `v
+-- DROP TABLE precious;` AS select `ev
+-- DROP TABLE precious;`.`c
+-- DROP TABLE precious;*/x` AS `c
+-- DROP TABLE precious;*/x` from `ev
+-- DROP TABLE precious;`

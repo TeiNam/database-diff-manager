@@ -8,6 +8,17 @@ import { normalizeBody } from './normalize';
 const TYPE_MODIFIERS = new Set(['UNSIGNED', 'SIGNED', 'ZEROFILL', 'BINARY', 'ASCII', 'UNICODE', 'PRECISION', 'VARYING']);
 
 export function parseRoutine(ddl: string, mode: LexMode = {}): Routine {
+  const { kind, name, params, returns, characteristics, bodyStart } = routineHeader(ddl, mode);
+  const body = normalizeBody(ddl.slice(bodyStart), mode);
+  return { kind, name, params, ...(returns !== undefined ? { returns } : {}), characteristics, body };
+}
+
+interface RoutineHeader extends Pick<Routine, 'kind' | 'name' | 'params' | 'returns' | 'characteristics'> {
+  bodyStart: number; // 본문 첫 토큰의 원문 오프셋
+}
+
+// CREATE … FUNCTION|PROCEDURE 이름(인자) [RETURNS 타입] [특성…] 까지 읽는다. 본문은 그다음 토큰부터다 (서버 문법과 같다)
+export function routineHeader(ddl: string, mode: LexMode = {}): RoutineHeader {
   const c = new Cursor(tokenize(ddl, mode), ddl);
   c.expectWord('CREATE');
   if (c.acceptWord('DEFINER')) skipDefiner(c);
@@ -18,8 +29,7 @@ export function parseRoutine(ddl: string, mode: LexMode = {}): Routine {
   const characteristics = readCharacteristics(c);
   const start = c.peek();
   if (!start) throw c.error('루틴 본문 없음');
-  const body = normalizeBody(ddl.slice(start.s), mode);
-  return { kind, name, params, ...(returns !== undefined ? { returns } : {}), characteristics, body };
+  return { kind, name, params, returns, characteristics, bodyStart: start.s };
 }
 
 const fail = (c: Cursor, message: string): never => {

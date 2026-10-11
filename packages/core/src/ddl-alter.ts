@@ -34,11 +34,14 @@ const OPTION_RESET: Record<string, string> = {
 export const sqlBody = (sql: string, notes: string[] = []): StatementBody => (notes.length ? { sql, comment: false, notes } : { sql, comment: false });
 // 실행할 SQL 없는 안내 문장 한 줄. message 는 '-- ' 없이 넘기고, 이름 같은 사용자 유래 문자열의 줄바꿈은 이스케이프된다 (comment-text)
 const commentBody = (message: string): StatementBody => ({ sql: commentLine(message), comment: true });
-export const manualNote = (reason: string): StatementBody => commentBody(`[수동 확인 필요] ${reason}`);
+const MANUAL_MARK = '[수동 확인 필요]';
+export const manualNote = (reason: string): StatementBody => commentBody(`${MANUAL_MARK} ${reason}`);
+// 수동 확인 문장(manualNote·manualBody)인가 (안내만 하는 주석 문장과 구분한다)
+export const isManual = (st: StatementBody): boolean => st.comment && st.sql.startsWith(commentLine(MANUAL_MARK));
 
 // 실행하면 안 되는 문장: 사유와 함께 SQL을 주석 처리해 보여 준다
 export function manualBody(reason: string, sql: string, notes: string[] = []): StatementBody {
-  const text = `${commentLine(`[수동 확인 필요] ${reason}`)}\n${commentLines(sql)}`;
+  const text = `${commentLine(`${MANUAL_MARK} ${reason}`)}\n${commentLines(sql)}`;
   return notes.length ? { sql: text, comment: true, notes } : { sql: text, comment: true };
 }
 
