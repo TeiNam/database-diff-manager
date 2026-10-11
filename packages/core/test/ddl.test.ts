@@ -214,6 +214,26 @@ describe('생성 컬럼 저장 방식 변경', () => {
   });
 });
 
+describe('FK 로 묶인 컬럼 타입·문자셋 변경 (5회차 1)', () => {
+  const dump = (coll: string, childColl: string) => parseSqlDump([
+    `CREATE TABLE \`p\` (\n  \`code\` varchar(10) COLLATE ${coll} NOT NULL,\n  PRIMARY KEY (\`code\`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`,
+    `CREATE TABLE \`c\` (\n  \`id\` int NOT NULL,\n  \`code\` varchar(10) COLLATE ${childColl} NOT NULL,\n  PRIMARY KEY (\`id\`),\n  KEY \`fk_c\` (\`code\`),\n  CONSTRAINT \`fk_c\` FOREIGN KEY (\`code\`) REFERENCES \`p\` (\`code\`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`,
+  ].join('\n')).model;
+
+  it('참조 컬럼의 콜레이션만 바뀌어도 자식 FK 를 1단계 DROP, 마지막 ADD', () => {
+    const d = diffSchemas(dump('utf8mb4_0900_ai_ci', 'utf8mb4_bin'), dump('utf8mb4_bin', 'utf8mb4_bin'));
+    expect(d.tables.find((t) => t.name === 'c')?.foreignKeys.map((f) => [f.op, f.name, f.fields])).toEqual([['modify', 'fk_c', ['columnType']]]);
+    const sql = generateDdl(d).map((s) => s.sql);
+    expect(sql[0]).toBe('ALTER TABLE `c`\n  DROP FOREIGN KEY `fk_c`');
+    expect(sql[sql.length - 1]).toBe('ALTER TABLE `c`\n  ADD CONSTRAINT `fk_c` FOREIGN KEY (`code`) REFERENCES `p` (`code`)');
+  });
+
+  it('묶인 컬럼의 타입이 그대로면 FK 를 건드리지 않는다', () => {
+    const d = diffSchemas(dump('utf8mb4_bin', 'utf8mb4_bin'), dump('utf8mb4_bin', 'utf8mb4_bin'));
+    expect(d.tables).toEqual([]);
+  });
+});
+
 describe('파티션 키 컬럼 rename·삭제 (5회차 2)', () => {
   const t = (cols: string, key: string, part: string) => parseSqlDump(`CREATE TABLE \`t\` (\n  \`id\` int NOT NULL,\n${cols},\n  PRIMARY KEY (\`id\`,${key})\n) ENGINE=InnoDB\n/*!50100 ${part} */;`).model;
 

@@ -1,6 +1,7 @@
 // SchemaDiff → BASE를 TARGET으로 바꾸는 DDL. 순서는 FK·뷰 의존성 때문에 고정 (스펙 4.6)
 import { renamedFkNames } from './auto-name';
 import { guardStatements } from './ddl-guard';
+import { RETYPED_FIELD } from './fk-retype';
 import { type Op, type RoutineDiff, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
 import { alter, alterStatements, commentBody, inheritCollation, manualBody, sqlBody, type StatementBody } from './ddl-alter';
 import { quoteIdent as q, quoteString } from './lexer';
@@ -22,6 +23,7 @@ export interface Statement extends StatementBody {
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };
 const DEFINER_NOTE = 'DEFINER 없이 생성합니다 — 실행한 사용자가 DEFINER 가 됩니다';
 const PIN_NOTE = 'RENAME INDEX x TO x: FK 를 다시 추가할 때 FK 가 만든 인덱스 이름이 FK 이름으로 바뀌지 않도록 고정합니다';
+const RETYPE_NOTE = 'FK 컬럼(또는 참조 컬럼)의 타입·문자셋·콜레이션이 바뀌어 FK 를 먼저 삭제하고 마지막에 다시 추가합니다 (error 3780)';
 const PARTIAL_NOTE = '-- [MD 기반] 일부 속성(Normal 인덱스 종류, 기본값, 생성 컬럼, 문자셋·콜레이션, CHECK, 파티션)은 비교하지 않았습니다';
 const PARTIAL_CHECK_NOTE = '-- [MD 기반] MD 출처는 CHECK 를 알 수 없어, 실제 DB 에 CHECK 가 있으면 그 컬럼의 RENAME·CHANGE COLUMN 이 오류 3959 로 실패할 수 있습니다';
 
@@ -38,7 +40,8 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
     if (!drops.length) continue;
     const pinned = pinnedIndexes(d, drops);
     const clauses = [...drops.map((f) => `DROP FOREIGN KEY ${q(baseFkName(d, f.name))}`), ...pinned.map((n) => `RENAME INDEX ${q(n)} TO ${q(n)}`)];
-    table(d, sqlBody(alter(d.oldName ?? d.name, clauses), pinned.length ? [PIN_NOTE] : []));
+    const notes = [...(pinned.length ? [PIN_NOTE] : []), ...(drops.some((f) => f.fields.includes(RETYPED_FIELD)) ? [RETYPE_NOTE] : [])];
+    table(d, sqlBody(alter(d.oldName ?? d.name, clauses), notes));
   }
   // 1-b. 삭제될 테이블의 FK도 먼저 제거 (부모/자식 DROP 순서 무관하게, error 3730 방지)
   for (const d of diff.tables) {

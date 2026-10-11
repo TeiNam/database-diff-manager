@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `member` (`id`, `name`) VALUES (1, 'kim'), (2, 'lee'); INSERT INTO `post` (`id`, `member_id`) VALUES (10, 1), (11, NULL); INSERT INTO `comment` (`id`, `member_id`, `body`) VALUES (20, 2, 'hi')",
+  "query": "SELECT `m`.`id`, `m`.`name`, (SELECT COUNT(*) FROM `post` `p` WHERE `p`.`member_id` = `m`.`id`) AS `posts`, (SELECT COUNT(*) FROM `comment` `c` WHERE `c`.`member_id` = `m`.`id`) AS `comments` FROM `member` `m` ORDER BY `m`.`id`",
+  "rows": [{ "id": 1, "name": "kim", "posts": 1, "comments": 0 }, { "id": 2, "name": "lee", "posts": 0, "comments": 1 }]
+}
