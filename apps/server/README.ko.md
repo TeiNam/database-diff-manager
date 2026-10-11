@@ -61,7 +61,7 @@ nginx·ALB 같은 리버스 프록시 뒤에 두면 모든 요청의 소켓 주�
 
 역할: `admin`(계정 관리 포함 전부), `dba`(데이터 변경 전부), `viewer`(읽기 전용). `PUT /diff/renames`(rename 매핑 저장)는 admin·dba 만 할 수 있습니다. 모든 라우트는 로그인·권한을 본문을 파싱하기 전(`onRequest`)에 확인하므로, 익명 요청은 401, viewer 는 403 을 본문(JSON·업로드 multipart)을 읽기 전에 받습니다. BASE 와 TARGET 이 같은 버전이면 400 입니다.
 
-전환 매핑은 Schema 쌍(As-Is → To-Be)에 붙습니다. 같은 쌍에 다시 올리면 리비전이 늘고, BASE 버전이 From Schema, TARGET 버전이 To Schema 에 속하면 최신 리비전이 자동 적용됩니다. BASE·TARGET 이 반대이면 역쌍의 DMS 매핑과 수동 rename 을 뒤집어 rename 으로 반영해 되돌리기 DDL 에도 RENAME 이 나옵니다(그 쌍에 저장된 수동 매핑이 있으면 그것을 쓰고, 그 쌍에 저장한 적이 없을 때만 — 빈 목록 저장도 저장입니다 — 역쌍에 저장된 수동 매핑을 뒤집어 `reversed: true` 로 돌려줌. 컬럼·인덱스 rename 의 테이블은 뒤집은 수동 테이블 rename, 없으면 DMS 테이블 rename 으로 대응시킴). 전환 표는 정방향 쌍에서만 만듭니다. `GET /diff` 의 `renames` 항목에는 `source: 'dms' | 'manual'` 이 붙습니다. `PUT /diff/renames` 는 수동 rename 만 저장하며, DMS 에서 온 rename 과 같은 항목은 500개 한도를 적용하기 전에 서버가 거릅니다. 같은 이름으로 가는 매핑이 둘 이상(그중 수동 매핑 포함)이면 400 으로 거부합니다.
+전환 매핑은 Schema 쌍(As-Is → To-Be)에 붙습니다. 같은 쌍에 다시 올리면 리비전이 늘고, BASE 버전이 From Schema, TARGET 버전이 To Schema 에 속하면 최신 리비전이 자동 적용됩니다. BASE·TARGET 이 반대이면 역쌍의 DMS 매핑과 수동 rename 을 뒤집어 rename 으로 반영해 되돌리기 DDL 에도 RENAME 이 나옵니다(그 쌍에 저장된 수동 매핑이 있으면 그것을 쓰고, 그 쌍에 저장한 적이 없을 때만 — 빈 목록 저장도 저장입니다 — 역쌍에 저장된 수동 매핑을 뒤집어 `reversed: true` 로 돌려줌. 컬럼·인덱스 rename 의 테이블은 뒤집은 수동 테이블 rename, 없으면 DMS 테이블 rename 으로 대응시킴. 역쌍 diff 에서 실제로 적용된 rename 만 뒤집음). 수동 테이블 rename 이 DMS 테이블 rename 을 덮으면 DMS 컬럼·인덱스 rename 의 테이블도 최종 테이블 대응으로 옮깁니다. 전환 표는 정방향 쌍에서만 만듭니다. `GET /diff` 의 `renames` 항목에는 `source: 'dms' | 'manual'` 이 붙습니다. `PUT /diff/renames` 는 수동 rename 만 저장하며, DMS 에서 온 rename 과 같은 항목은 500개 한도를 적용하기 전에 서버가 거릅니다. 같은 이름으로 가는 매핑이 둘 이상(그중 수동 매핑 포함)이면 400 으로 거부합니다.
 
 ## 테스트
 
