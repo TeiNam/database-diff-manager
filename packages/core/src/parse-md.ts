@@ -1,5 +1,5 @@
 // td-export Markdown 정의서 → SchemaModel (partial: 일부 속성은 알 수 없음)
-import { hasMdStructure, hasTable, isClosedSection, mdEvidence, TABLE_LIST_HEADING } from './completeness';
+import { hasMdStructure, hasTable, mdEvidence, sectionEnd, TABLE_LIST_HEADING } from './completeness';
 import { quoteString, tokenize } from './lexer';
 import type { Column, ForeignKey, Index, IndexField, IndexPart, SchemaEvidence, Table, View } from './model';
 import { normalizeType } from './normalize';
@@ -96,23 +96,25 @@ export function parseMdDump(text: string): ParsedDump {
 
 // 스키마 표: 테이블은 Columns 표, 뷰는 Information 표 (머리글 + 구분 줄 + 1행 이상)
 const hasSchemaTable = (body: string[]): boolean => hasTable(body, COLUMN_HEADER) || hasTable(body, VIEW_HEADER);
-// 완결된 목록 항목: Index·FK 줄 전체가 형식에 맞는다 (편집기가 끝 줄 ' ' 을 지운 파일의 마지막 섹션 판정)
+// 완결된 목록 항목: Index·FK 줄 전체가 형식에 맞는다 (끝 줄 ' ' 이 없는 마지막 섹션을 open·unmarked 로 가른다)
 const isCompleteItem = (line: string): boolean => INDEX_RE.test(line) || FK_RE.test(line);
 
 // 구조 사실을 모아 completeness 가 증거 수준을 정한다 (15회차): 구조·Table List·스키마 표가 없으면 비스키마,
-// 섹션 누락·스키마 표 없는 섹션·마지막 섹션 미종료는 불완전, 그 밖은 완전
+// 섹션 누락·스키마 표 없는 섹션·마지막 섹션 미종료는 불완전, 끝 표식(' ' 줄) 없는 마지막 섹션은 판정 미상(16회차 1), 그 밖은 완전
 function mdCompleteness(lines: string[], secs: Section[], anchors: string[], realNames: Map<string, string>): { evidence: SchemaEvidence; nonSchema: boolean } {
   const objects = secs.filter((sec) => sec.heading !== TABLE_LIST_HEADING);
   const headings = new Set(secs.map((sec) => sec.heading));
   const nameOf = (heading: string) => realNames.get(heading) ?? heading;
   const last = secs.at(-1);
+  const end = last && last.heading !== TABLE_LIST_HEADING ? sectionEnd(last.body, isCompleteItem) : 'closed';
   return mdEvidence({
     structured: hasMdStructure(lines, secs.map((sec) => sec.heading)),
     listed: anchors.length,
     schemaSections: objects.filter((sec) => hasSchemaTable(sec.body)).length,
     missing: anchors.filter((a) => !headings.has(a)).map(nameOf),
     tableless: objects.filter((sec) => !hasSchemaTable(sec.body)).map((sec) => nameOf(sec.heading)),
-    openLast: last && last.heading !== TABLE_LIST_HEADING && !isClosedSection(last.body, isCompleteItem) ? nameOf(last.heading) : undefined,
+    openLast: end === 'open' ? nameOf(last!.heading) : undefined,
+    unmarkedLast: end === 'unmarked' ? nameOf(last!.heading) : undefined,
   });
 }
 

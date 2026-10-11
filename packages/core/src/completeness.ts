@@ -115,22 +115,28 @@ export function hasTable(body: string[], header: string): boolean {
   return at >= 0 && (body[at + 1] ?? '').startsWith('|---') && isTableRow(body[at + 2] ?? '');
 }
 
-// 섹션이 끝났는지: td-export 는 섹션마다 공백 한 칸짜리 줄(' ')로 끝낸다. 편집기가 줄 끝 공백을 지운 파일은 마지막 내용 줄이
-// 완결된 줄 — 머리글만큼 칸이 있는 표 행, 완결된 목록 항목(isCompleteItem: Index·FK 줄), 코드 블록 닫기(```) — 이면 끝난 것으로 본다
-export function isClosedSection(body: string[], isCompleteItem: (line: string) => boolean): boolean {
+// 섹션 끝 상태 (16회차 1): td-export(0.1.15~0.1.52)는 섹션마다 공백 한 칸짜리 줄(' ')로 끝낸다 — 그 줄로 끝나야만 closed.
+// 끝 줄 ' ' 은 없지만 마지막 내용 줄이 완결된 줄 — 머리글만큼 칸이 있는 표 행, 완결된 목록 항목(isCompleteItem: Index·FK 줄),
+// 코드 블록 닫기(```) — 이면 unmarked: 편집기가 줄 끝 공백을 지운 파일인지 줄 경계에서 잘린 파일인지 구별할 수 없다. 그 밖은 open
+export type SectionEnd = 'closed' | 'unmarked' | 'open';
+
+export function sectionEnd(body: string[], isCompleteItem: (line: string) => boolean): SectionEnd {
   const lines = [...body];
   while (lines.length && lines.at(-1)!.trim() === '') {
-    if (lines.at(-1) === ' ') return true;
+    if (lines.at(-1) === ' ') return 'closed';
     lines.pop();
   }
   const last = lines.at(-1);
-  if (last === undefined) return false;
-  if (last === '```' || isCompleteItem(last)) return true;
-  if (!isTableRow(last)) return false;
+  if (last === undefined) return 'open';
+  if (last === '```' || isCompleteItem(last)) return 'unmarked';
+  if (!isTableRow(last)) return 'open';
   let head = lines.length - 1;
   while (head > 0 && lines[head - 1].startsWith('|')) head--;
-  return lines.length - 1 >= head + 2 && pipes(last) >= pipes(lines[head]);
+  return lines.length - 1 >= head + 2 && pipes(last) >= pipes(lines[head]) ? 'unmarked' : 'open';
 }
+
+// 끝 표식 없는 마지막 섹션의 판정 미상 사유 (화면·문서에서 같은 문구로 찾는다)
+export const MD_UNMARKED_REASON = 'MD 끝 표식이 없음 — 편집기가 줄 끝 공백을 지웠다면 원본을 올려 주세요';
 
 export interface MdFacts {
   structured: boolean; // 제목·## Table List
@@ -139,6 +145,7 @@ export interface MdFacts {
   missing: string[]; // Table List 에 있는데 섹션이 없는 객체
   tableless: string[]; // 스키마 표가 없는 섹션
   openLast?: string; // 끝나지 않은 마지막 섹션의 객체
+  unmarkedLast?: string; // 끝 표식(' ' 줄) 없이 완결된 줄로 끝난 마지막 섹션의 객체
 }
 
 // MD 증거와 비스키마 여부 (구조가 없거나, Table List 가 비었거나, 스키마 표가 하나도 없으면 스키마 정의서가 아니다 — 업로드 거부)
@@ -151,5 +158,6 @@ export function mdEvidence(f: MdFacts): { evidence: SchemaEvidence; nonSchema: b
     return { evidence: incomplete(`스키마 표(Columns 표 머리글 + 1행 이상)가 없는 섹션이 있습니다 (${f.tableless.join(', ')})`, [...new Set([...f.tableless, ...last])]), nonSchema: false };
   }
   if (f.openLast !== undefined) return { evidence: incomplete(`마지막 섹션(${f.openLast})이 끝나지 않았습니다 — 파일이 잘렸을 수 있습니다`, last), nonSchema: false };
+  if (f.unmarkedLast !== undefined) return { evidence: unknown(`${MD_UNMARKED_REASON} (마지막 섹션 ${f.unmarkedLast})`), nonSchema: false };
   return { evidence: COMPLETE, nonSchema: false };
 }

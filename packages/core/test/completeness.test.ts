@@ -1,5 +1,8 @@
 // TARGET 완전성 판정: 부재 기반 파괴 문장(객체·컬럼·파티션 삭제)은 TARGET 이 완전한 덤프라는 양성 증거가 있을 때만 실행한다
 // (14회차 1 → 15회차 원칙 전환: 증거 없음·불완전·판정 미상은 모두 수동 확인)
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { targetEvidence } from '../src/completeness';
 import { generateDdl, type Statement } from '../src/ddl';
@@ -147,12 +150,35 @@ describe('MD 증거', () => {
     expect(destructive(base, target)).toEqual([]);
   });
 
-  it('편집기가 줄 끝 공백을 지워 끝 줄 \' \' 이 빈 줄이 돼도, 완결된 표 행·목록 항목으로 끝나면 완전 (Claude Minor)', () => {
-    const trimmed = md.split('\n').map((l) => l.trimEnd()).join('\n');
-    expect(parseMdDump(trimmed).model.evidence?.level).toBe('complete');
-    const lastTable = fixture('td-export-0130/sample-app.md').split('\n').map((l) => l.trimEnd()).join('\n');
-    expect(parseMdDump(lastTable).model.evidence?.level).toBe('complete');
+  it('편집기가 줄 끝 공백을 지워 끝 줄 \' \' 이 없어지면 판정 미상 (unknown) — 줄 경계 잘림과 구별할 수 없다 (16회차 1)', () => {
+    for (const text of [md, fixture('td-export-0130/sample-app.md')]) {
+      const trimmed = text.split('\n').map((l) => l.trimEnd()).join('\n');
+      expect(parseMdDump(trimmed).model.evidence).toMatchObject({ level: 'unknown', reason: expect.stringContaining('MD 끝 표식이 없음') });
+      expect(destructive(base, parseMdDump(trimmed).model)).toEqual([]);
+    }
   });
+});
+
+// 줄 경계 잘림 fuzz (16회차 1, 결정적): 실제 td-export MD 를 모든 줄 경계에서 자르면(줄바꿈 포함·제외 둘 다) 어느 것도 complete 가 아니다
+const MD_FIXTURES = ['td-export-0115/sample-app.md', 'td-export-0130/sample-app.md', 'td-export-0136/escapes.md', 'td-export-0152/escapes.md', 'td-export-0152/shop.md'];
+const SAMPLE_MD_DIR = fileURLToPath(new URL('../../../samples/', import.meta.url));
+const sampleMds = existsSync(SAMPLE_MD_DIR)
+  ? readdirSync(SAMPLE_MD_DIR, { recursive: true, encoding: 'utf8' }).filter((f) => f.endsWith('.md')).map((f) => join(SAMPLE_MD_DIR, f))
+  : [];
+const linePrefixes = (text: string): string[] => {
+  const cuts: string[] = [];
+  for (let i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) cuts.push(text.slice(0, i), text.slice(0, i + 1));
+  return cuts.filter((c) => c !== text && c !== text.replace(/\n$/, ''));
+};
+
+describe('MD 줄 경계 잘림은 complete 가 아니다', () => {
+  const check = (text: string) => {
+    expect(parseMdDump(text).model.evidence?.level).toBe('complete');
+    const leaked = linePrefixes(text).filter((cut) => parseMdDump(cut).model.evidence?.level === 'complete');
+    expect(leaked.map((c) => c.length)).toEqual([]);
+  };
+  it.each(MD_FIXTURES)('%s', (name) => check(fixture(name)));
+  it.skipIf(!sampleMds.length).each(sampleMds)('로컬 샘플 %s', (file) => check(readFileSync(file, 'utf8')));
 });
 
 describe('파티션 삭제도 부재 기반 파괴 문장이다', () => {
