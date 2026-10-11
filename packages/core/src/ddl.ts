@@ -39,6 +39,8 @@ export interface Statement extends StatementBody {
   keepsIncomingFks?: boolean;
   // evidenceHold: TARGET 이 완전한 덤프라는 증거가 없어 수동 확인으로 돌린 부재 기반 파괴 문장 (요약 탭이 수를 센다, 15회차)
   evidenceHold?: boolean;
+  // staleHold: 예전 파서로 저장된 모델(stale-model)이 낀 diff 라 수동 확인으로 돌린 실행 문장 (holdAllStatements, 16회차 2)
+  staleHold?: boolean;
 }
 
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };

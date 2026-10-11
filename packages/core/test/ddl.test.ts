@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { isLosslessConversion } from '../src/charset-ddl';
 import { keyLimit, oversizedIndexes } from '../src/convert-keys';
 import { generateDdl, objectStatements, renderDdl } from '../src/ddl';
+import { holdAllStatements } from '../src/ddl-guard';
 import { diffSchemas } from '../src/diff';
 import { parseSqlDump } from '../src/parse-dump';
 import { parseMdDump } from '../src/parse-md';
@@ -509,6 +510,14 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     const { statements, dependencies } = cardOf('card-parent-rename-child-drop', 'table', 'p2');
     expect(statements.map((s) => s.sql)).toEqual(['RENAME TABLE `p` TO `p2`']);
     expect(dependencies).toEqual([]);
+  });
+
+  it('holdAllStatements: 실행 문장을 모두 수동 확인으로 돌리고 staleHold 를 단다 — 이미 수동 확인인 문장은 그대로 (16회차 2)', () => {
+    const stmts = generateDdl(diffSchemas(scenario('columns').base, scenario('columns').target));
+    const held = holdAllStatements(stmts, '예전 파서로 저장된 모델', '안내');
+    expect(held.every((s) => s.comment)).toBe(true);
+    expect(held.filter((s) => s.staleHold)).toHaveLength(stmts.filter((s) => !s.comment).length);
+    expect(held.find((s) => s.staleHold)!.sql).toContain('예전 파서로 저장된 모델');
   });
 
   it('맞바꾸기 묶음의 순수 RENAME TABLE 도 자식 FK 참조를 MySQL 이 옮기므로 두 이름 카드 모두 삭제되는 자식의 FK 해제를 넣지 않는다 (16회차 3, 8.4 실측)', () => {

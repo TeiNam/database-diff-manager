@@ -72,10 +72,10 @@ export function dmsFixture(name: 'mapping.json' | 'as-is.sql' | 'to-be.sql'): st
   return readFileSync(fileURLToPath(new URL(`../../../packages/core/test/fixtures/dms/${name}`, import.meta.url)), 'utf8');
 }
 
-// 옛 스키마(user_version < 7)에서 업로드한 것처럼 저장한다: 지금의 ingest 는 완전성 증거(007)를 함께 쓰므로, 그 표를 잠시 만들었다가
+// 옛 스키마(user_version < 7)에서 업로드한 것처럼 저장한다: 지금의 ingest 는 완전성 증거(007·008)를 함께 쓰므로, 그 표를 잠시 만들었다가
 // 지워 옛 앱이 남긴 상태(증거 행 없음)로 되돌린다
 export function ingestLegacy(db: Db, input: Parameters<typeof ingest>[1]): ReturnType<typeof ingest> {
-  db.exec(`CREATE TABLE schema_version_evidence (version_id INTEGER PRIMARY KEY, level TEXT NOT NULL, evidence_json TEXT NOT NULL, judged_by TEXT NOT NULL) STRICT`);
+  db.exec(`CREATE TABLE schema_version_evidence (version_id INTEGER PRIMARY KEY, level TEXT NOT NULL, evidence_json TEXT NOT NULL, judged_by TEXT NOT NULL, judge_rev INTEGER NOT NULL DEFAULT 0, stale_reason TEXT) STRICT`);
   try {
     return ingest(db, input);
   } finally {

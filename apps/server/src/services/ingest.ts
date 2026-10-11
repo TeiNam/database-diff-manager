@@ -3,7 +3,7 @@ import { canonicalJson, parseMdDump, routineNameKey, parseSqlDump, UNIDENTIFIED_
 import { all, one, run, tx, type Db } from '../db/connection';
 import { AppError } from '../errors';
 import { ensureDatabase, ensureSchema } from '../repos/catalog';
-import { evidenceJson, saveEvidence, storedEvidenceJson } from '../repos/evidence';
+import { evidenceJson, loadStaleReason, saveEvidence, storedEvidenceJson } from '../repos/evidence';
 
 export interface IngestInput {
   databaseName: string;
@@ -102,8 +102,10 @@ export function ingest(db: Db, input: IngestInput): IngestResult {
     const schemaId = ensureSchema(db, ensureDatabase(db, input.databaseName), input.schemaName);
     const latest = one<{ id: number; version_no: number; model_hash: string; source_format: SourceFormat }>(db,
       'SELECT id, version_no, model_hash, source_format FROM schema_versions WHERE schema_id = ? ORDER BY version_no DESC LIMIT 1', schemaId);
-    // 모델이 같아도 완전성 증거가 다르면(끊긴 파일·0.1.15 형식 → 완전한 파일) 새 버전이다
-    if (latest && latest.model_hash === hash && knowsRoutines(latest.source_format) === knowsRoutines(format) && storedEvidenceJson(db, latest.id) === evidenceJson(evidence)) return { status: 'duplicate', versionId: Number(latest.id), versionNo: Number(latest.version_no), warnings };
+    // 모델이 같아도 완전성 증거가 다르면(끊긴 파일·0.1.15 형식 → 완전한 파일) 새 버전이다. 예전 파서로 저장된 모델(stale)인
+    // 버전과는 합치지 않는다 — 같은 원문을 다시 올려 지금 파서 모델로 새 버전을 만드는 것이 stale 버전을 벗어나는 길이다 (16회차 2)
+    if (latest && latest.model_hash === hash && knowsRoutines(latest.source_format) === knowsRoutines(format) && storedEvidenceJson(db, latest.id) === evidenceJson(evidence)
+      && loadStaleReason(db, latest.id) === undefined) return { status: 'duplicate', versionId: Number(latest.id), versionNo: Number(latest.version_no), warnings };
     const versionNo = takeNumber(db, 'UPDATE schemas SET next_version_no = next_version_no + 1 WHERE id = ? RETURNING next_version_no - 1 AS n', schemaId);
     const versionId = run(db, `
       INSERT INTO schema_versions (schema_id, version_no, source_format, source_filename, source_sha256, model_hash, note, uploaded_by, uploaded_at)
