@@ -120,4 +120,17 @@ describe('Sidebar', () => {
     await userEvent.setup().keyboard('{ArrowRight}');
     expect(screen.getByTestId('location')).toHaveTextContent('/db/1/schema/7');
   });
+
+  it('맞바꾸기(a↔b)는 두 테이블이 모두 TARGET 에 있어 둘 다 보이고, 단순 rename 의 옛 이름만 숨긴다', async () => {
+    const b1 = parseSqlDump('CREATE TABLE `a` (\n  `x` int\n);\nCREATE TABLE `b` (\n  `y` int\n);\nCREATE TABLE `members` (\n  `id` int\n);').model;
+    const t1 = parseSqlDump('CREATE TABLE `a` (\n  `y` int\n);\nCREATE TABLE `b` (\n  `x` int\n);\nCREATE TABLE `member` (\n  `id` int\n);').model;
+    const renames = [{ kind: 'table' as const, from: 'a', to: 'b' }, { kind: 'table' as const, from: 'b', to: 'a' }, { kind: 'table' as const, from: 'members', to: 'member' }];
+    mockApi({ '/api/tree': TREE, '/api/diff?base=11&target=12': { ...DIFF, baseModel: b1, targetModel: t1, diff: diffSchemas(b1, t1, renames) } });
+    renderWithProviders(<Sidebar />, { route: '/db/1/schema/7?base=11&target=12' });
+    const tree = await screen.findByRole('tree');
+    expect(await within(tree).findByText('a')).toBeInTheDocument();
+    expect(within(tree).getByText('b')).toBeInTheDocument();
+    expect(within(tree).getByText('member')).toBeInTheDocument();
+    expect(within(tree).queryByText('members')).not.toBeInTheDocument();
+  });
 });
