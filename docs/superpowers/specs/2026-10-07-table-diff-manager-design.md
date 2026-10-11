@@ -228,7 +228,7 @@ interface Statement {
 
 **문장 순서** (FK·뷰 의존성 때문에 이 순서를 고정한다)
 
-1. 삭제·변경되는 FK를 `ALTER TABLE … DROP FOREIGN KEY`. FK 가 자동으로 만든 인덱스는 같은 컬럼에 이름 있는 FK 를 다시 추가하면 그 FK 이름으로 바뀌므로(SHOW CREATE 로는 직접 만든 인덱스와 구별할 수 없다), FK 를 다시 추가하는 테이블은 삭제하는 FK 의 컬럼으로 시작하는 BASE 인덱스(5단계에서 바꾸지 않는 INDEX/UNIQUE)를 같은 문장에서 `RENAME INDEX x TO x` 로 고정하고 notes 로 알린다(2026-10-11 3회차 개정)
+1. 삭제·변경되는 FK를 `ALTER TABLE … DROP FOREIGN KEY`. FK 가 자동으로 만든 인덱스는 같은 컬럼에 이름 있는 FK 를 다시 추가하면 그 FK 이름으로 바뀌므로(SHOW CREATE 로는 직접 만든 인덱스와 구별할 수 없다), FK 를 다시 추가하는 테이블은 삭제하는 FK 의 컬럼으로 시작하는 BASE 인덱스(5단계에서 바꾸지 않는 INDEX/UNIQUE)를 같은 문장에서 `RENAME INDEX x TO x` 로 고정하고 notes 로 알린다(2026-10-11 3회차 개정). FK 정의가 같아도 FK 의 로컬 컬럼이나 참조 컬럼의 타입·문자셋·콜레이션이 바뀌면(`int→bigint` 를 부모·자식 함께) 그 FK 를 `modify`(fields `columnType`)로 보고 여기서 삭제, 8단계에서 다시 추가한다 — `MODIFY` 만 하면 `FOREIGN_KEY_CHECKS=0` 이어도 error 3780 이다(notes 로 사유 안내, 골든 `fk-type-widen`, 5회차 개정)
 2. 삭제되는 뷰를 `DROP VIEW`, 삭제·변경되는 루틴을 `DROP FUNCTION|PROCEDURE IF EXISTS`
 3. `RENAME TABLE a TO b` (매핑된 것만). 이름이 얽힌 rename(한 rename 의 새 이름이 다른 rename 의 옛 이름)은 한 문장으로 묶는다. MySQL 은 절을 앞에서부터 원자적으로 적용하므로 비는 이름부터 옮기고(`RENAME TABLE log TO log_2025, log_new TO log`), 순환(맞바꾸기)은 겹치지 않는 임시 이름 `__tdm_tmp_n` 을 거친다(`RENAME TABLE a TO __tdm_tmp_1, b TO a, __tdm_tmp_1 TO b`). 임시 이름은 BASE·TARGET 의 모든 테이블·뷰 이름(`SchemaDiff.objectNames`)과 겹치지 않게 고른다(2026-10-11 2회차 개정).
 4. 새 테이블을 `CREATE TABLE`. **FK를 뺀 정의**로 만들고 FK는 8단계에서 추가한다(테이블 간 생성 순서 문제 회피).
@@ -246,11 +246,11 @@ interface Statement {
    - 테이블 기본 문자셋·콜레이션이 바뀌면 손실 없는 변환일 때만 이 ALTER **앞에** `ALTER TABLE … CONVERT TO CHARACTER SET cs COLLATE coll` 문장을 따로 둔다(같은 ALTER 안에서는 CONVERT가 컬럼별 문자셋 지정을 덮어쓴다). 손실 없는 변환은 모든 문자열 컬럼이 TARGET에서 테이블 기본값을 상속하고, 테이블과 각 컬럼의 문자셋 변화가 같은 문자셋(콜레이션만 변경)·ascii에서·latin1/ascii/utf8mb3에서 utf8mb4로 중 하나인 경우다. 이때 BASE에서 명시했던 컬럼과 CONVERT가 넓힌 TEXT 계열 컬럼을 이 ALTER에서 `MODIFY`로 다시 정의하고, DEFAULT CHARSET/COLLATE 옵션 절은 생략한다. 본 ALTER가 수동 확인 문장이면 CONVERT도 수동 확인 문장이 된다.
    - 그 밖에는 CONVERT를 쓰지 않는다. 이 ALTER에 `DEFAULT CHARSET=…`(·`COLLATE=…`) 옵션 절과, 실제 문자셋·콜레이션이 바뀌는 문자열 컬럼의 `MODIFY`를 넣는다(같은 ALTER의 MODIFY는 새 테이블 기본값을 상속한다). 문자셋이 좁아지는 컬럼이 있으면 문장 notes에 `[데이터 확인]` 안내를 단다.
    - 테이블 콜레이션과 같은 `COLLATE`만 붙은 컬럼은 상속한 값이므로 `COLLATE`를 빼고 출력한다(명시하면 `SHOW CREATE` 출력이 달라진다).
-6. 파티션 변경은 테이블별로 별도 `ALTER TABLE` 하나로 처리한다(다른 변경과 섞지 않는다).
+6. 파티션 변경은 테이블별로 별도 `ALTER TABLE` 하나로 처리한다(다른 변경과 섞지 않는다). 예외: 5단계 ALTER 가 BASE 파티션 식이 쓰는 컬럼을 rename·삭제하면(`chat_history.create_at → created_at`) 따로 실행할 때 error 3855 이므로, 전체 재정의(`PARTITION BY …`)·`REMOVE PARTITIONING` 을 그 ALTER 끝에 쉼표 없이 붙여 한 문장으로 낸다(MySQL 8.0/8.4 실측, notes 로 안내, 골든 `partition-key-rename`, 5회차 개정). `RANGE COLUMNS(d)` 처럼 따옴표 없는 이름도 lexer 토큰으로 찾는다.
    - 타입·표현식이 같고 **RANGE/LIST 파티션이 끝에 추가만 됨**: `ADD PARTITION (…)`. 월별 파티션 운영에서 가장 흔한 경우다.
    - 같은 조건에서 파티션이 **삭제됨**: RANGE 맨 앞(보관 기간 정리)이면 `DROP PARTITION p1, p2` 에 `[데이터 확인]` notes. RANGE 중간 삭제는 다음 파티션과 합쳐 `REORGANIZE PARTITION p2, p3 INTO (p3 …)` 로 지운 구간의 행을 보존한다. 뒤쪽(다음 파티션 없음) 삭제는 `DROP PARTITION` 에 `[데이터 확인]` notes 를 단다(2026-10-11 개정)
    - LIST: 사라진 파티션의 값이 TARGET 어디에도 없을 때만 `DROP PARTITION` + `[데이터 확인]`(위치 무관, 첫 파티션 포함). 값이 TARGET 의 다른 파티션에 남으면(병합 `p1 IN(1), p2 IN(2)` → `p2 IN(1,2)`) 연속 구간을 `REORGANIZE PARTITION p1, p2 INTO (…)` 로 묶는다. MySQL 은 LIST REORGANIZE 에서 새 파티션에 없는 값의 행을 오류 없이 지우므로, 그런 값이 있으면 `[데이터 확인] 값 …` notes 를 단다(2026-10-11 2회차 개정)
-   - 같은 조건에서 중간 파티션의 경계·구성이 바뀜: `REORGANIZE PARTITION … INTO (…)`. 마지막 파티션 재구성은 범위를 늘릴 수만 있으므로(error 1520 ER_REORG_OUTSIDE_RANGE), 마지막 상한이 줄면(`MAXVALUE` → 유한, 30 → 15) SQL 을 주석 처리한 수동 확인 문장으로 낸다(2026-10-11 3회차 개정). 상한은 정수 하나와 `MAXVALUE`·`(MAXVALUE)`·`(MAXVALUE, MAXVALUE…)` 만 비교하고, 그 밖의 상한(날짜·문자열·다중 컬럼·식)이 마지막 파티션에서 바뀌면 새 상한이 MAXVALUE 가 아닌 한 수동 확인으로 낸다(4회차 개정)
+   - 같은 조건에서 중간 파티션의 경계·구성이 바뀜: `REORGANIZE PARTITION … INTO (…)`. 마지막 파티션 재구성은 범위를 늘릴 수만 있으므로(error 1520 ER_REORG_OUTSIDE_RANGE), 마지막 상한이 줄면(`MAXVALUE` → 유한, 30 → 15) SQL 을 주석 처리한 수동 확인 문장으로 낸다(2026-10-11 3회차 개정). 상한은 같은 종류끼리 튜플 사전식으로 비교한다: 정수, `MAXVALUE`(가장 큼), 따옴표 문자열(같은 꼴의 날짜·시각 또는 소문자+숫자·대문자+숫자 — 바이트 순서와 콜레이션 순서가 같다고 볼 수 있는 것만), 단조 함수 `TO_DAYS`·`TO_SECONDS`·`UNIX_TIMESTAMP('…')`(같은 함수끼리 인자 비교). 확대(`'2026-12-01' → '2027-01-01'`, 월별 정수 `202612 → 202702`)는 그대로 `REORGANIZE`, 축소와 비교할 수 없는 상한(종류·튜플 길이 차이, 대소문자 섞인 문자열, 그 밖의 식)은 새 상한이 MAXVALUE 가 아닌 한 수동 확인으로 낸다(4회차 개정, 5회차 보강 — 골든 `partition-date-bound`)
    - 파티션 COMMENT/ENGINE만 바뀜: DDL 없이 `-- 파티션 메타 변경` 주석
    - HASH/KEY 개수만 바뀜: `ADD PARTITION PARTITIONS n` / `COALESCE PARTITION n`. 이름 있는 HASH/KEY 파티션은 `DROP PARTITION` 이 없으므로 뒤쪽 감소는 `COALESCE PARTITION n`, 뒤쪽 증가는 `ADD PARTITION (PARTITION …)`, 그 밖(이름·정의 변경)은 `PARTITION BY …` 전체 재정의(2026-10-11 2회차 개정)
    - 타입·표현식이 바뀌거나 새로 파티셔닝: `PARTITION BY …` 전체 재정의
@@ -262,9 +262,9 @@ interface Statement {
 
 **특수 처리**
 
-- 순서로 풀 수 없는 rename(`이름 충돌` 로 적용되지 않은 매핑: 컬럼은 그 TARGET 테이블, 테이블은 옛·새 이름 두 테이블)이 있으면 관련 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제, ALTER, 파티션)을 수동 확인 문장으로 바꾼다. 관련 테이블이 얽힌 rename 묶음(맞바꾸기·연쇄)에 들면 묶음의 모든 테이블로, 그 테이블들을 참조하는 FK 를 바꾸는 테이블로도 넓힌다(묶음 RENAME 이 실행되지 않으면 다른 문장이 엉뚱한 테이블의 데이터를 바꾼다, 2026-10-11 3회차 개정). 넓히기는 더 이상 늘지 않을 때까지(고정점) 반복하고(FK 로 번진 테이블이 다시 다른 묶음에 들 수 있다), 막힌 테이블·뷰를 본문에서 읽는 뷰의 삭제·생성도 수동 확인으로 바꾼다. 출발점에는 `manualTables`(FK 보정명 충돌, 아래 재사용 컬럼명 의존성)도 들어간다(4회차 개정).
-- 삭제되는 컬럼 이름을 겹침 허용 rename 이 다시 쓸 때(`DROP COLUMN y, RENAME COLUMN x TO y`), BASE 에서 그 컬럼을 식 인덱스(`((abs(y)))`)·생성 컬럼 식이 쓰거나 다른(자기 포함) 테이블 FK 가 참조하면 그 테이블과, 바뀌는 자식 테이블의 문장을 수동 확인으로 돌린다(생성 DDL 이 실패하거나 새 컬럼을 가리키게 된다). 일반 인덱스·FK 컬럼·CHECK 는 다시 만들어 골든 `remove-rename-column-index` 로 검증되었으므로 막지 않는다(4회차 개정).
-- 생성 컬럼의 VIRTUAL↔STORED 변경은 `MODIFY` 로 할 수 없어(MySQL error 3106) 그 ALTER 를 수동 확인 문장으로 낸다.
+- 순서로 풀 수 없는 rename(`이름 충돌` 로 적용되지 않은 매핑: 컬럼은 그 TARGET 테이블, 테이블은 옛·새 이름 두 테이블)이 있으면 관련 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제, ALTER, 파티션)을 수동 확인 문장으로 바꾼다. 관련 테이블이 얽힌 rename 묶음(맞바꾸기·연쇄)에 들면 묶음의 모든 테이블로, 그 테이블들을 참조하는 FK 를 바꾸는 테이블로도 넓힌다(묶음 RENAME 이 실행되지 않으면 다른 문장이 엉뚱한 테이블의 데이터를 바꾼다, 2026-10-11 3회차 개정). 넓히기는 더 이상 늘지 않을 때까지(고정점) 반복하고(FK 로 번진 테이블이 다시 다른 묶음에 들 수 있다), 막힌 테이블·뷰를 본문에서 읽는 뷰의 삭제·생성도 수동 확인으로 바꾼다. 출발점에는 `manualTables`(FK 보정명 충돌, 아래 재사용 컬럼명 의존성)도 들어간다(4회차 개정). 새로 만드는(add) 테이블도 8단계에서 FK 를 추가하므로, 그 FK 가 막힌 테이블을 참조하면 그 새 테이블의 문장도 막는다. 뷰가 읽는 객체는 본문 토큰에서 `FROM`/`JOIN` 뒤 식별자(`schema`.`table` 은 table)로 판정해 컬럼 별칭·문자열 속 이름에 걸리지 않게 한다(토큰으로 나눌 수 없으면 `` `이름` `` 포함 여부, 5회차 개정).
+- 삭제되는 컬럼 이름을 겹침 허용 rename 이 다시 쓸 때(`DROP COLUMN y, RENAME COLUMN x TO y`), BASE 에서 그 컬럼을 식 인덱스(`((abs(y)))`)·생성 컬럼 식이 쓰거나 다른(자기 포함) 테이블 FK 가 참조하면 그 테이블과, 바뀌는 자식 테이블의 문장을 수동 확인으로 돌린다(생성 DDL 이 실패하거나 새 컬럼을 가리키게 된다. 식은 따옴표 식별자 토큰으로 비교해 문자열 속 `` `이름` `` 은 세지 않는다 — 5회차 개정). 일반 인덱스·FK 컬럼·CHECK 는 다시 만들어 골든 `remove-rename-column-index` 로 검증되었으므로 막지 않는다(4회차 개정).
+- 생성 컬럼의 VIRTUAL↔STORED 변경과 일반 컬럼↔VIRTUAL 생성 컬럼 전환은 `MODIFY` 로 할 수 없어(MySQL error 3106) 그 ALTER 를 수동 확인 문장으로 낸다. 일반 컬럼↔STORED 생성 컬럼 전환은 `MODIFY` 로 되므로(8.0/8.4 실측, STORED→일반은 저장된 값이 남는다) 그대로 낸다(골든 `generated-stored-convert`, 5회차 개정).
 - `parseError`가 있는 객체는 DDL 대신 `-- [수동 확인 필요] <객체>: 파싱 불가` 주석 문장(`comment: true`)을 만든다.
 - partial 출처가 있으면 출력 맨 위에 `-- [MD 기반] 일부 속성(…)은 비교하지 않았습니다` 주석을 단다. 실행 문장에 컬럼 rename(`RENAME COLUMN`·`CHANGE COLUMN`)이 있으면 `-- [MD 기반] MD 출처는 CHECK 를 알 수 없어, 실제 DB 에 CHECK 가 있으면 그 컬럼의 RENAME·CHANGE COLUMN 이 오류 3959 로 실패할 수 있습니다` 한 줄을 덧붙인다(4회차 개정).
 - partial(MD) TARGET으로 문장을 만들 때
