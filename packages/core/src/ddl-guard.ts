@@ -16,7 +16,7 @@ type Conflicts = Map<string, Conflict>;
 
 export function guardStatements(stmts: Statement[], diff: SchemaDiff): Statement[] {
   const alterBlocked = alterBlockedNames(diff);
-  const tables = spreadConflicts(diff, seedConflicts(diff), alterBlocked);
+  const tables = spreadConflicts(diff, seedConflicts(diff, stmts), alterBlocked);
   const unparsed = unparsedObjects(diff);
   const views = viewConflicts(diff.views, new Set([...blockedNames(diff, tables), ...alterBlocked, ...unparsed.views]), unparsed.functions);
   if (!tables.size && !views.size) return stmts;
@@ -41,8 +41,8 @@ const addConflict = (out: Conflicts, table: string, reason: string, note: string
 };
 
 // 출발점: 순서로 풀 수 없는 rename ('이름 충돌'로 적용되지 않은 매핑. 컬럼은 TARGET 테이블, 테이블 매핑은 옛·새 이름 두
-// 테이블 — 옛 이름 테이블이 그대로 남거나 새 이름 테이블이 따로 만들어진다)과 diff 가 찾은 수동 확인 테이블
-function seedConflicts(diff: SchemaDiff): Conflicts {
+// 테이블 — 옛 이름 테이블이 그대로 남거나 새 이름 테이블이 따로 만들어진다), diff 가 찾은 수동 확인 테이블, 생성이 막힌 새 테이블
+function seedConflicts(diff: SchemaDiff, stmts: Statement[]): Conflicts {
   const out: Conflicts = new Map();
   for (const { mapping: m, reason } of diff.ignoredRenames) {
     if (reason !== '이름 충돌') continue;
@@ -54,9 +54,11 @@ function seedConflicts(diff: SchemaDiff): Conflicts {
     }
   }
   for (const t of diff.manualTables) addConflict(out, t.table, t.reason, t.note);
-  // 파싱 실패 새 테이블: CREATE 를 실행하지 않으므로 그 테이블을 참조하는 FK·읽는 뷰도 막는다
-  for (const d of diff.tables) {
-    if (d.op === 'add' && d.to?.parseError) addConflict(out, d.name, `${d.name}: 파싱할 수 없는 테이블 정의입니다 — 원문을 확인해 직접 실행하세요`, '파싱 실패 객체는 생성 문장을 실행하지 않습니다');
+  // 생성 문장이 수동 확인(주석)인 새 테이블: 이유(파싱 실패, MD 생성식 미상·파싱 실패 등)와 무관하게 CREATE 를 실행하지 않으므로
+  // 그 테이블을 참조하는 FK(바뀌는 FK 는 DROP/ADD 를 함께)·읽는 뷰도 막는다. 실제로 만든 문장으로 판정해 이유가 늘어도 빠지지 않는다
+  for (const st of stmts) {
+    if (st.kind !== 'table' || st.op !== 'add' || !st.comment || st.fkAdds) continue;
+    addConflict(out, st.object, `${st.object}: 생성 문장이 수동 확인이라 실행하지 않습니다 — 원문을 확인해 직접 실행하세요`, '생성 문장을 실행하지 않는 테이블입니다');
   }
   return out;
 }
