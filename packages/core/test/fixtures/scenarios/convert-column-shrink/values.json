@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `article` (`id`, `title`) VALUES (1, 'café')",
+  "query": "SELECT `id`, `title` FROM `article`",
+  "rows": [{ "id": 1, "title": "café" }]
+}

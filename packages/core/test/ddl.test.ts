@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isLosslessConversion } from '../src/charset-ddl';
+import { keyLimit, oversizedIndexes } from '../src/convert-keys';
 import { generateDdl, objectStatements, renderDdl } from '../src/ddl';
 import { diffSchemas } from '../src/diff';
 import { parseSqlDump } from '../src/parse-dump';
@@ -458,5 +459,42 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     const { statements, dependencies } = objectStatements(stmts, 'table', name);
     expect(statements).toEqual(stmts.filter((s) => s.kind === 'table' && (s.object === name || s.related?.includes(name))));
     expect(dependencies).toEqual([]);
+  });
+});
+
+describe('CONVERT 직후 키 길이 일반 판정 (9회차 4)', () => {
+  const t = (name: string, cols: string, opts: string) => `CREATE TABLE \`${name}\` (\n${cols}\n) ENGINE=InnoDB ${opts};`;
+  const ddl = (base: string, target: string) => generateDdl(diffSchemas(parseSqlDump(base).model, parseSqlDump(target).model));
+  const UTF8MB4 = 'DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci';
+
+  it('키 바이트 = 문자 길이(prefix 반영) × 새 문자셋 maxlen, 한도는 TARGET 행 저장 형식 (COMPACT 키 파트 767·전체 3072)', () => {
+    const cols = [{ name: 'a', type: 'varchar(250)', nullable: true, invisible: false, autoIncrement: false }, { name: 'b', type: 'varbinary(800)', nullable: true, invisible: false, autoIncrement: false }];
+    const ix = (parts: { column: string; length?: number }[]) => ({ name: 'ix', kind: 'INDEX' as const, parts: parts.map((p) => ({ ...p, desc: false })), invisible: false });
+    expect(oversizedIndexes([ix([{ column: 'a' }])], cols, 4, keyLimit('COMPACT'))).toEqual(['ix']);
+    expect(oversizedIndexes([ix([{ column: 'a' }])], cols, 4, keyLimit(undefined))).toEqual([]);
+    expect(oversizedIndexes([ix([{ column: 'a', length: 191 }])], cols, 4, keyLimit('REDUNDANT'))).toEqual([]);
+    expect(oversizedIndexes([ix([{ column: 'b' }])], cols, 4, keyLimit('COMPACT'))).toEqual(['ix']);
+    expect(oversizedIndexes([ix([{ column: 'a' }, { column: 'a' }, { column: 'a' }, { column: 'b' }])], cols, 4, keyLimit('DYNAMIC'))).toEqual(['ix']);
+  });
+
+  it('DYNAMIC→COMPACT + CONVERT: 767 한도를 넘는 인덱스 교체를 CONVERT 와 같은 ALTER 에 넣는다', () => {
+    const stmts = ddl(t('t', '  `a` varchar(250) DEFAULT NULL,\n  KEY `ix` (`a`)', 'DEFAULT CHARSET=latin1'),
+      t('t', '  `a` varchar(250) DEFAULT NULL,\n  KEY `ix` (`a`(191))', `${UTF8MB4} ROW_FORMAT=COMPACT`));
+    expect(stmts.map((s) => s.sql)).toEqual(['ALTER TABLE `t`\n  DROP INDEX `ix`,\n  CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci,\n  ROW_FORMAT=COMPACT,\n  ADD INDEX `ix` (`a`(191))']);
+  });
+
+  it('합쳐도 한도를 넘으면(판정 불가) 수동 확인, 그 테이블을 참조하는 새 FK 도 막는다', () => {
+    const base = t('t', '  `id` int NOT NULL,\n  `a` varchar(1000) DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix` (`a`)', 'DEFAULT CHARSET=latin1');
+    const target = t('t', '  `id` int NOT NULL,\n  `a` varchar(1000) DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix` (`a`)', UTF8MB4)
+      + t('c', '  `t_id` int NOT NULL,\n  KEY `fk_c_t` (`t_id`),\n  CONSTRAINT `fk_c_t` FOREIGN KEY (`t_id`) REFERENCES `t` (`id`)', UTF8MB4);
+    const stmts = ddl(base, target);
+    expect(stmts.filter((s) => !s.comment)).toEqual([]);
+    expect(stmts.find((s) => s.object === 't')!.sql).toMatch(/^-- \[수동 확인 필요\] t: CONVERT 뒤 인덱스\(`ix`\) 키 길이가 한도를 넘는/);
+  });
+
+  it('한도를 넘지 않으면 CONVERT 를 따로 둔다 (기존 동작)', () => {
+    const stmts = ddl(t('t', '  `a` varchar(100) DEFAULT NULL,\n  KEY `ix` (`a`)', 'DEFAULT CHARSET=latin1'),
+      t('t', '  `a` varchar(100) NOT NULL,\n  KEY `ix` (`a`)', UTF8MB4));
+    expect(stmts.map((s) => s.sql)).toEqual(['ALTER TABLE `t` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci', 'ALTER TABLE `t`\n  MODIFY COLUMN `a` varchar(100) NOT NULL']);
   });
 });

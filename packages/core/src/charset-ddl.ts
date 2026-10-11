@@ -16,6 +16,9 @@ export interface CharsetPlan {
   convert?: string; // 안전할 때만 만드는 CONVERT TO 절 ('ALTER TABLE …' 없이)
   columns: Set<string>; // 본 ALTER에서 MODIFY로 다시 정의할 컬럼 (TARGET 이름)
   notes: string[]; // convert가 있으면 CONVERT 문장, 없으면 본 ALTER에 붙인다
+  charset?: string; // convert 의 대상 문자셋
+  widenedNotes?: string[]; // notes 중 넓힌 TEXT 계열 컬럼 되돌리기 안내
+  widened?: Set<string>; // convert 가 넓힌 TEXT 계열 컬럼 (columns 의 부분 집합). CONVERT 와 같은 ALTER 에서 정의하면 다시 넓어지므로 뒤 ALTER 에서만 되돌린다 (8.4 실측)
 }
 
 interface TableCharset {
@@ -119,7 +122,7 @@ function convertPlan(pairs: ColumnPair[], from: TableCharset, to: TableCharset, 
   const textNote = texts.length
     ? [`${DATA_NOTE_PREFIX} CONVERT TO가 넓힌 TEXT 계열 컬럼(${texts.map((p) => q(p.col.name)).join(', ')})을 TARGET 타입으로 되돌립니다. 변환으로 길어진 값이 타입 한도를 넘으면 실패하거나 잘릴 수 있습니다`]
     : [];
-  return { convert, columns: new Set([...restored, ...texts].map((p) => p.col.name)), notes: [...notes, ...textNote] };
+  return { convert, columns: new Set([...restored, ...texts].map((p) => p.col.name)), notes: [...notes, ...textNote], widenedNotes: textNote, charset: to.charset, widened: new Set(texts.map((p) => p.col.name)) };
 }
 
 function commonNotes(d: TableDiff): string[] {
