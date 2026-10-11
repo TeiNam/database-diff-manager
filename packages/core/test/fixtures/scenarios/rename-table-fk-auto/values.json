@@ -1,0 +1,5 @@
+{
+  "seed": "ALTER TABLE `child` DROP FOREIGN KEY `child_ibfk_2`, DROP INDEX `owner_id`; ALTER TABLE `child` ADD FOREIGN KEY (`owner_id`) REFERENCES `parent` (`id`); INSERT INTO `parent` (`id`) VALUES (1), (2); INSERT INTO `child` (`id`, `parent_id`, `owner_id`) VALUES (7, 1, 2); INSERT INTO `a` (`id`, `parent_id`, `memo`) VALUES (1, 1, 'hello'); INSERT INTO `b` (`id`, `parent_id`, `qty`) VALUES (1, 2, 5)",
+  "query": "SELECT `k`.`id`, `k`.`owner_id`, `x`.`memo`, `y`.`qty` FROM `kid` `k` JOIN `b` `x` ON `x`.`parent_id` = `k`.`parent_id` JOIN `a` `y` ON `y`.`parent_id` = `k`.`owner_id`",
+  "rows": [{ "id": 7, "owner_id": 2, "memo": "hello", "qty": 5 }]
+}

@@ -1,5 +1,6 @@
 // 두 스키마 모델의 차이 계산. unknown 목록의 속성은 비교하지 않고 skipped에 기록한다
 import { canonicalJson } from './canonical';
+import { quoteIdent } from './lexer';
 import type { Check, Column, ForeignKey, Index, IndexField, Partitioning, Routine, RoutineKind, SchemaModel, Table, View } from './model';
 import { normalizeBody, routineLexMode } from './normalize';
 import { isOtherKindFamily } from './partial-fill';
@@ -79,6 +80,8 @@ export interface SchemaDiff {
   objectNames: string[]; // BASE·TARGET 의 모든 테이블·뷰 이름 (맞바꾸기 임시 이름이 겹치지 않게 예약)
 }
 
+// 비교용 표식: 삭제되는 BASE 컬럼 이름 앞에 붙여 TARGET 의 같은 이름 컬럼과 다르게 만든다 (식별자에 나올 수 없는 문자)
+const DROPPED_MARK = '\u0000dropped:';
 const COLUMN_FIELDS = ['type', 'charset', 'collation', 'generated', 'nullable', 'srid', 'invisible', 'default', 'onUpdate', 'autoIncrement', 'comment'] as const;
 const INDEX_FIELDS = ['kind', 'using', 'parser', 'comment', 'invisible'] as const;
 const FK_FIELDS = ['columns', 'refSchema', 'refTable', 'refColumns', 'onDelete', 'onUpdate'] as const;
@@ -162,13 +165,17 @@ export function diffTable(b: Table, t: Table, renames: RenameMapping[] = [], con
   const keep = lcs(baseOrder, targetOrder);
   // RENAME/CHANGE COLUMN은 인덱스·FK의 컬럼 참조를 자동 갱신하므로, 적용된 rename을 BASE 사본에 반영해 비교한다
   const applied = new Map(columns.changes.filter((c) => c.op === 'rename').map((c) => [c.oldName!, c.name]));
-  const renameCol = (n: string) => applied.get(n) ?? n;
+  // 삭제되는 BASE 컬럼은 같은 이름으로 들어오는 다른 컬럼(x→y, 기존 y 삭제)과 구별한다. MySQL 은 그 컬럼을 쓰던 인덱스를
+  // 지우거나 줄이므로, 그 컬럼을 참조하던 인덱스·FK·CHECK 는 TARGET 과 같아 보여도 다시 만든다
+  const dropped = new Set(columns.changes.filter((c) => c.op === 'drop').map((c) => c.name));
+  const renameCol = (n: string) => (dropped.has(n) ? `${DROPPED_MARK}${n}` : applied.get(n) ?? n);
   // 단독 호출이면 이 테이블 자신의 rename 만 안다 (자기 참조 FK)
   const refs = context ?? { tables: new Map(b.name === t.name ? [] : [[b.name, t.name]]), columns: new Map([[b.name, applied]]) };
   const indexes = matchByName(b.indexes, t.indexes, mappingOf(renames, 'index', t.name), (x, y) =>
     indexFields({ ...x, parts: x.parts.map((p) => (p.column === undefined ? p : { ...p, column: renameCol(p.column) })) }, y, skipped),
   );
-  const foreignKeys = matchByName(b.foreignKeys, t.foreignKeys, new Map(), (x, y) =>
+  const baseFks = b.foreignKeys.map((f) => ({ ...f, name: renamedAutoName(f.name, b.name, t.name, 'ibfk') }));
+  const foreignKeys = matchByName(baseFks, t.foreignKeys, new Map(), (x, y) =>
     fieldDiff({ ...renamedReference(x, refs), columns: x.columns.map(renameCol) }, y, FK_FIELDS, skipped, 'fk.', fkEqual),
   );
   return {
@@ -177,7 +184,7 @@ export function diffTable(b: Table, t: Table, renames: RenameMapping[] = [], con
     moved: targetOrder.filter((n) => !keep.has(n)),
     indexes: indexes.changes,
     foreignKeys: foreignKeys.changes,
-    checks: checkChanges(b, t, skipped),
+    checks: checkChanges(b, t, skipped, dropped),
     options: optionChanges(b, t, skipped),
     partition: partitionChange(b, t, skipped),
     skipped: [...skipped].sort(),
@@ -305,20 +312,27 @@ function indexFields(a: Index, b: Index, skipped: Set<string>): string[] {
   return key(a) === key(b) ? fields : [...fields, 'parts'];
 }
 
-function checkChanges(a: Table, b: Table, skipped: Set<string>): Change<Check>[] {
+function checkChanges(a: Table, b: Table, skipped: Set<string>, dropped: ReadonlySet<string>): Change<Check>[] {
   if (a.unknown?.includes('checks') || b.unknown?.includes('checks')) {
     skipped.add('checks');
     return [];
   }
-  return matchByName(a.checks.map((c) => renamedCheck(c, a.name, b.name)), b.checks, new Map(), (x, y) => fieldDiff(x, y, CHECK_FIELDS, skipped, 'check.')).changes;
+  const checks = a.checks.map((c) => ({ ...c, name: renamedAutoName(c.name, a.name, b.name, 'chk') }));
+  // 삭제되는 컬럼을 쓰는 CHECK 는 MySQL 이 함께 지우거나(그 컬럼만 쓸 때) 컬럼 삭제를 거부한다(error 3959)
+  const usesDropped = (c: Check) => [...dropped].some((n) => c.expr.includes(quoteIdent(n)));
+  return matchByName(checks, b.checks, new Map(), (x, y) => {
+    const fields = fieldDiff(x, y, CHECK_FIELDS, skipped, 'check.');
+    return usesDropped(x) && !fields.includes('expr') ? ['expr', ...fields] : fields;
+  }).changes;
 }
 
-// RENAME TABLE 은 자동 제약명 '<옛 테이블>_chk_N' 을 '<새 테이블>_chk_N' 으로 바꾼다. ALTER 는 rename 뒤에 실행되므로 새 이름으로 비교·출력한다
-function renamedCheck(c: Check, from: string, to: string): Check {
-  if (from === to) return c;
-  const prefix = `${from}_chk_`;
-  const n = c.name.startsWith(prefix) ? c.name.slice(prefix.length) : '';
-  return /^\d+$/.test(n) ? { ...c, name: `${to}_chk_${n}` } : c;
+// RENAME TABLE 은 자동 제약명 '<옛 테이블>_chk_N'·'<옛 테이블>_ibfk_N' 을 '<새 테이블>_…_N' 으로 바꾼다 (맞바꾸기·연쇄의
+// 임시 이름을 거쳐도 마지막 이름이 남는다). CHECK·FK 추가는 rename 뒤에 실행되므로 새 이름으로 비교·출력한다
+export function renamedAutoName(name: string, from: string, to: string, kind: 'chk' | 'ibfk'): string {
+  if (from === to) return name;
+  const prefix = `${from}_${kind}_`;
+  const n = name.startsWith(prefix) ? name.slice(prefix.length) : '';
+  return /^\d+$/.test(n) ? `${to}_${kind}_${n}` : name;
 }
 
 function optionChanges(a: Table, b: Table, skipped: Set<string>): OptionChange[] {

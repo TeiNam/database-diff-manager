@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `team` (`id`, `code`) VALUES (1, 'kim'), (2, 'Kim Minsu'); INSERT INTO `member` (`id`, `name`, `full_name`, `code`) VALUES (1, 'kim', 'Kim Minsu', 'A1')",
+  "query": "SELECT `m`.`id`, `m`.`name`, `t`.`id` AS `team_id` FROM `member` `m` JOIN `team` `t` ON `t`.`code` = `m`.`name`",
+  "rows": [{ "id": 1, "name": "Kim Minsu", "team_id": 2 }]
+}
