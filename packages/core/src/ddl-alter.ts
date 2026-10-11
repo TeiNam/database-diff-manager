@@ -154,7 +154,7 @@ function mergedBodies(d: TableDiff, planned: Planned, main: Collected): Statemen
   const out = [reason ? manualBody(reason, sql, notes) : sqlBody(sql, notes)];
   const widened = plan!.widened ?? new Set<string>();
   const post: Collected = { clauses: [], notes: [...widenedNotes], missing: [], storage: [], virtual: [], dropCount: 0 };
-  columnClauses(d, widened, post, (n) => widened.has(n));
+  columnClauses(d, widened, post, (n) => widened.has(n), 'post');
   if (post.clauses.length) {
     const postSql = alter(d.name, post.clauses);
     out.push(reason ? manualBody(`${d.name}: 앞선 ALTER 가 수동 확인 문장이므로 함께 확인한 뒤 실행하세요`, postSql, post.notes) : sqlBody(postSql, post.notes));
@@ -188,7 +188,8 @@ function convertBody(d: TableDiff, planned: Planned, missing: string[]): Stateme
 }
 
 // 절 순서: 삭제(CHECK·인덱스·컬럼) → 컬럼 추가·변경(TARGET 순서) → 인덱스 추가·rename·가시성 → CHECK 추가 → 옵션.
-// CONVERT 와 합치는 경우(merged) 넓힌 TEXT 계열 컬럼은 뒤 ALTER 에서 정의하므로 뺀다
+// CONVERT 와 합치는 경우(merged) 넓힌 TEXT 계열 컬럼은 뒤 ALTER 에서 정의하므로 뺀다 — rename 된 컬럼은 이름만 본 ALTER 에서 바꾼다
+// (같은 ALTER 의 인덱스·CHECK 가 새 이름을 쓴다. 미루면 'Key column doesn't exist' error 1072, 8.4 실측)
 function alterClauses(d: TableDiff, planned: Planned): Collected {
   const out: Collected = { clauses: [], notes: [], missing: [], storage: [], virtual: [], dropCount: 0 };
 
@@ -197,7 +198,7 @@ function alterClauses(d: TableDiff, planned: Planned): Collected {
   for (const i of d.indexes) if (rebuildsIndex(i) || i.op === 'drop') out.clauses.push(dropIndex(i.oldName ?? i.name, i.from!.kind));
   for (const c of d.columns) if (c.op === 'drop') out.clauses.push(`DROP COLUMN ${q(c.name)}`);
   out.dropCount = out.clauses.length;
-  columnClauses(d, planned.plan?.columns ?? new Set(), out, (n) => !widened.has(n));
+  columnClauses(d, planned.plan?.columns ?? new Set(), out, (n) => !widened.has(n), 'main');
   for (const i of d.indexes) {
     if (i.op === 'add' || rebuildsIndex(i)) {
       const idx = fillIndex(i.to!, i.op === 'add' ? undefined : i.from);
@@ -222,15 +223,20 @@ export function inheritCollation(c: Column, t: Table): Column {
   return c.collation === t.options.find((o) => o.key === 'COLLATE')?.value ? { ...c, collation: undefined } : c;
 }
 
-function columnClauses(d: TableDiff, forced: ReadonlySet<string>, out: Collected, include: (name: string) => boolean = () => true): void {
+// split: merged 에서 넓힌 TEXT 컬럼 정의를 두 ALTER 로 나눌 때. 'main' 은 빠진(include=false) rename 컬럼의 RENAME COLUMN 만 내고,
+// 'post' 는 이미 새 이름이 된 rename 컬럼을 새 이름으로 MODIFY 한다
+function columnClauses(d: TableDiff, forced: ReadonlySet<string>, out: Collected, include: (name: string) => boolean = () => true, split?: 'main' | 'post'): void {
   const to = d.to!;
   // 삭제는 앞에서 DROP 으로 처리했다. 같은 이름으로 들어오는 rename(x→y, 기존 y 삭제)을 덮지 않도록 뺀다
   const changes = new Map(d.columns.filter((c) => c.op !== 'drop').map((c) => [c.name, c]));
   const moved = new Set(d.moved);
   const bases = baseColumns(d);
   to.columns.forEach((raw, idx) => {
-    if (!include(raw.name)) return;
     const ch = changes.get(raw.name);
+    if (!include(raw.name)) {
+      if (split === 'main' && ch?.op === 'rename') out.clauses.push(`RENAME COLUMN ${q(ch.oldName!)} TO ${q(raw.name)}`);
+      return;
+    }
     const isMoved = moved.has(raw.name);
     if (!isMoved && !forced.has(raw.name) && (!ch || ch.op === 'drop')) return;
     const col = fillColumn(raw, ch?.op === 'add' ? undefined : bases.get(raw.name));
@@ -245,7 +251,7 @@ function columnClauses(d: TableDiff, forced: ReadonlySet<string>, out: Collected
     if (ch?.op === 'add') out.clauses.push(`ADD COLUMN ${def}${idx === to.columns.length - 1 ? '' : pos}`);
     else if (ch?.op === 'rename' && !ch.fields.length && !isMoved && !forced.has(raw.name)) {
       out.clauses.push(`RENAME COLUMN ${q(ch.oldName!)} TO ${q(col.name)}`);
-    } else if (ch?.op === 'rename') out.clauses.push(`CHANGE COLUMN ${q(ch.oldName!)} ${def}${isMoved ? pos : ''}`);
+    } else if (ch?.op === 'rename' && split !== 'post') out.clauses.push(`CHANGE COLUMN ${q(ch.oldName!)} ${def}${isMoved ? pos : ''}`);
     else out.clauses.push(`MODIFY COLUMN ${def}${isMoved ? pos : ''}`);
   });
 }
