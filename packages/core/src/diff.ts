@@ -1,9 +1,10 @@
 // 두 스키마 모델의 차이 계산. unknown 목록의 속성은 비교하지 않고 skipped에 기록한다
 import { canonicalJson } from './canonical';
-import type { Check, Column, ForeignKey, Index, IndexField, Partitioning, SchemaModel, Table, View } from './model';
+import type { Check, Column, ForeignKey, Index, IndexField, Partitioning, Routine, RoutineKind, SchemaModel, Table, View } from './model';
+import { normalizeBody } from './normalize';
 import { isOtherKindFamily } from './partial-fill';
 import { subpartitionKey } from './partition-ddl';
-import { printColumn, printTable, printView } from './print';
+import { printColumn, printRoutine, printTable, printView } from './print';
 import { findIgnoredRenames, type IgnoredRename } from './rename-check';
 
 export type Op = 'add' | 'drop' | 'modify' | 'rename';
@@ -48,6 +49,15 @@ export interface ViewDiff {
   fields: string[];
 }
 
+export interface RoutineDiff {
+  op: 'add' | 'drop' | 'modify';
+  kind: RoutineKind;
+  name: string; // TARGET 표기 (drop 은 BASE 표기)
+  from?: Routine;
+  to?: Routine;
+  fields: string[]; // 'params', 'returns', 'characteristics.deterministic' …, 'body', 'sqlMode'
+}
+
 export interface RenameMapping {
   kind: 'table' | 'column' | 'index';
   table?: string; // column/index: TARGET 테이블명
@@ -64,6 +74,8 @@ export interface SchemaDiff {
   renameCandidates: RenameMapping[];
   ignoredRenames: IgnoredRename[]; // 적용하지 못한 rename 매핑과 이유
   partial: boolean;
+  routines: RoutineDiff[];
+  routinesUnknown: boolean; // 한쪽이라도 MD 출처라 루틴을 비교하지 않음 (routines 는 빈 배열)
 }
 
 const COLUMN_FIELDS = ['type', 'charset', 'collation', 'generated', 'nullable', 'srid', 'invisible', 'default', 'onUpdate', 'autoIncrement', 'comment'] as const;
@@ -81,12 +93,16 @@ const fkEqual: Equal = (f, a, b) => (f === 'onDelete' || f === 'onUpdate' ? fkAc
 export function diffSchemas(base: SchemaModel, target: SchemaModel, renames: RenameMapping[] = []): SchemaDiff {
   const tables = diffTables(base.tables, target.tables, renames);
   const all = [...base.tables, ...target.tables, ...base.views, ...target.views];
+  const routinesUnknown = Boolean(base.routinesUnknown || target.routinesUnknown);
   return {
     tables,
     views: diffViews(base.views, target.views),
     renameCandidates: findRenameCandidates(tables),
     ignoredRenames: findIgnoredRenames(base, target, tables, renames),
     partial: all.some((o) => o.fidelity === 'partial'),
+    // routines 가 없는 옛 모델(루틴 지원 전 JSON)은 빈 목록으로 본다
+    routines: routinesUnknown ? [] : diffRoutines(base.routines ?? [], target.routines ?? []),
+    routinesUnknown,
   };
 }
 
@@ -268,6 +284,42 @@ function diffViews(base: View[], target: View[]): ViewDiff[] {
     return fieldDiff(a, b, VIEW_FIELDS, new Set(), 'view.');
   });
   return changes.map((c) => ({ op: c.op as ViewDiff['op'], name: c.name, from: c.from, to: c.to, fields: c.fields }));
+}
+
+// 기본값과 같은 명시 특성은 생략한 것과 같다
+const ROUTINE_DEFAULTS: Record<string, unknown> = { deterministic: false, dataAccess: 'CONTAINS SQL', security: 'DEFINER', language: 'SQL' };
+const CHARACTERISTICS = ['deterministic', 'dataAccess', 'security', 'comment', 'language'] as const;
+const routineKey = (r: Routine) => `${r.kind}:${r.name.toLowerCase()}`;
+
+// (종류, 이름) 으로 짝짓는다. MySQL 루틴 이름은 대소문자를 구분하지 않는다. rename 후보는 만들지 않는다
+function diffRoutines(base: Routine[], target: Routine[]): RoutineDiff[] {
+  const targetByKey = new Map(target.map((r) => [routineKey(r), r]));
+  const baseKeys = new Set(base.map(routineKey));
+  const out: RoutineDiff[] = [];
+  for (const b of base) {
+    const t = targetByKey.get(routineKey(b));
+    if (!t) {
+      out.push({ op: 'drop', kind: b.kind, name: b.name, from: b, fields: [] });
+      continue;
+    }
+    const fields = routineFields(b, t);
+    if (fields.length) out.push({ op: 'modify', kind: t.kind, name: t.name, from: b, to: t, fields });
+  }
+  for (const t of target) if (!baseKeys.has(routineKey(t))) out.push({ op: 'add', kind: t.kind, name: t.name, to: t, fields: [] });
+  return out;
+}
+
+function routineFields(a: Routine, b: Routine): string[] {
+  if (a.parseError || b.parseError) return printRoutine(a) === printRoutine(b) ? [] : ['body'];
+  const ch = (r: Routine, k: (typeof CHARACTERISTICS)[number]) => r.characteristics[k] ?? ROUTINE_DEFAULTS[k];
+  return [
+    ...(a.params === b.params ? [] : ['params']),
+    ...(a.returns === b.returns ? [] : ['returns']),
+    ...CHARACTERISTICS.filter((k) => ch(a, k) !== ch(b, k)).map((k) => `characteristics.${k}`),
+    ...(normalizeBody(a.body) === normalizeBody(b.body) ? [] : ['body']),
+    // 한쪽만 SQL_MODE 를 알면(직접 쓴 덤프 등) 비교하지 않는다
+    ...(a.sqlMode !== undefined && b.sqlMode !== undefined && a.sqlMode !== b.sqlMode ? ['sqlMode'] : []),
+  ];
 }
 
 // 이름만 다른 drop/add 쌍을 rename 후보로 제시한다 (자동 적용하지 않음)

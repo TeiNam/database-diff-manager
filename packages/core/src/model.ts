@@ -106,8 +106,35 @@ export interface View {
   rawDdl?: string;
 }
 
+export type RoutineKind = 'function' | 'procedure';
+export type RoutineDataAccess = 'CONTAINS SQL' | 'NO SQL' | 'READS SQL DATA' | 'MODIFIES SQL DATA';
+
+// 루틴 특성. undefined 는 기본값(NOT DETERMINISTIC, CONTAINS SQL, SQL SECURITY DEFINER, LANGUAGE SQL, 주석 없음)
+export interface RoutineCharacteristics {
+  deterministic?: boolean;
+  dataAccess?: RoutineDataAccess;
+  security?: 'DEFINER' | 'INVOKER';
+  comment?: string; // 디코딩된 값
+  language?: 'SQL';
+}
+
+// 저장 함수·프로시저 (DEFINER는 비교 대상이 아니므로 버린다). 이름은 대소문자를 구분하지 않고 맞춘다
+export interface Routine {
+  kind: RoutineKind;
+  name: string;
+  params: string; // 괄호 안 원문 (앞뒤 공백 제거)
+  returns?: string; // function 전용: RETURNS 뒤 타입 원문
+  characteristics: RoutineCharacteristics;
+  body: string; // 특성 뒤 본문 원문
+  sqlMode?: string; // 루틴을 만들 때의 SQL_MODE (td-export 0.1.52+ 가 루틴마다 내보낸다)
+  parseError?: string;
+  rawDdl?: string; // 파싱 실패 또는 왕복 불일치 시 정규화된 원문
+}
+
 export interface SchemaModel {
   name: string;
   tables: Table[];
   views: View[];
+  routines: Routine[];
+  routinesUnknown?: boolean; // 출처(MD)에 루틴 정보가 없어 루틴을 알 수 없음
 }

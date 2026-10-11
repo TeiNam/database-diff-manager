@@ -31,3 +31,8 @@ export function normalizeDdl(ddl: string): string {
       base === 'tinyint' && width === '1' ? m : head + base,
     );
 }
+
+// 루틴 본문 비교·저장용: 줄바꿈(CRLF)과 줄 끝 공백 차이만 없앤다
+export function normalizeBody(body: string): string {
+  return body.replace(/\r\n?/g, '\n').split('\n').map((line) => line.trimEnd()).join('\n').trim();
+}

@@ -20,7 +20,7 @@ describe('lcs', () => {
 describe('diffSchemas', () => {
   it('같은 실데이터끼리는 변경이 없다', () => {
     const m = parseSqlDump(sample('sql')).model;
-    expect(diffSchemas(m, m)).toEqual({ tables: [], views: [], renameCandidates: [], ignoredRenames: [], partial: false });
+    expect(diffSchemas(m, m)).toEqual({ tables: [], views: [], renameCandidates: [], ignoredRenames: [], partial: false, routines: [], routinesUnknown: false });
   });
 
   it('columns: 컬럼·인덱스·옵션 변경, AUTO_INCREMENT는 무시', () => {
@@ -87,7 +87,7 @@ describe('diffSchemas', () => {
 
 const tbl = (body: string, tail = ''): Table =>
   parseCreateTable(`CREATE TABLE \`t\` (\n${body}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4${tail}`);
-const model = (tables: Table[], views: View[] = []) => ({ name: 's', tables, views });
+const model = (tables: Table[], views: View[] = []) => ({ name: 's', tables, views, routines: [] });
 const diffOne = diffTable;
 
 describe('rename 컬럼 참조 갱신', () => {

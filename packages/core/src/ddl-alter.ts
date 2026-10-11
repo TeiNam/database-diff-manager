@@ -7,11 +7,12 @@ import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated
 import { partitionStatements } from './partition-ddl';
 import { printCheck, printColumn, printIndexParts } from './print';
 
-// 문장 본문: sql은 ';' 없음. comment=true면 '-- ' 주석 줄로만 이루어진다
+// 문장 본문: sql은 ';' 없음(delimited 제외). comment=true면 '-- ' 주석 줄로만 이루어진다
 export interface StatementBody {
   sql: string;
   comment: boolean;
   notes?: string[];
+  delimited?: boolean; // sql 이 스스로 문장 끝(DELIMITER … ;;)을 갖고 있어 ';' 를 덧붙이지 않는다 (루틴 CREATE)
 }
 
 const ADD_KEYWORD: Record<IndexKind, string> = {

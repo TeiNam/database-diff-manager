@@ -1,26 +1,28 @@
 // SchemaDiff → BASE를 TARGET으로 바꾸는 DDL. 순서는 FK·뷰 의존성 때문에 고정 (스펙 4.6)
-import type { Op, SchemaDiff, TableDiff, ViewDiff } from './diff';
+import type { Op, RoutineDiff, SchemaDiff, TableDiff, ViewDiff } from './diff';
 import { alter, alterStatements, commentBody, inheritCollation, manualBody, sqlBody, type StatementBody } from './ddl-alter';
-import { quoteIdent as q } from './lexer';
-import type { Table } from './model';
+import { quoteIdent as q, quoteString } from './lexer';
+import type { Routine, RoutineKind, Table } from './model';
 import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated, indexNote, printable, tableNote } from './partial-fill';
-import { printForeignKey, printTable, printView } from './print';
+import { printForeignKey, printRoutine, printTable, printView } from './print';
 
 export interface Statement extends StatementBody {
   object: string;
-  kind: 'table' | 'view';
+  kind: 'table' | 'view' | RoutineKind;
   op: Op;
-  // sql: ';' 없음. comment=true(실행할 SQL 없는 안내 문장)면 '-- ' 주석 줄로만 이루어진다
+  // sql: ';' 없음(delimited=true 인 루틴 CREATE 는 DELIMITER 로 감싼 완결된 문장). comment=true(실행할 SQL 없는 안내 문장)면 '-- ' 주석 줄로만 이루어진다
   // notes: 문장 위에 '-- '로 붙는 안내 (MD 기반 미확인 속성 등)
 }
 
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };
+const DEFINER_NOTE = 'DEFINER 없이 생성합니다 — 실행한 사용자가 DEFINER 가 됩니다';
 const PARTIAL_NOTE = '-- [MD 기반] 일부 속성(Normal 인덱스 종류, 기본값, 생성 컬럼, 문자셋·콜레이션, CHECK, 파티션)은 비교하지 않았습니다';
 
 export function generateDdl(diff: SchemaDiff): Statement[] {
   const out: Statement[] = [];
   const table = (d: TableDiff, body: StatementBody) => out.push({ object: d.name, kind: 'table', op: d.op, ...body });
   const view = (v: ViewDiff, body: StatementBody) => out.push({ object: v.name, kind: 'view', op: v.op, ...body });
+  const routine = (r: RoutineDiff, body: StatementBody) => out.push({ object: r.name, kind: r.kind, op: r.op, ...body });
   const altered = diff.tables.filter((d) => d.op === 'modify' || d.op === 'rename');
 
   // 1. FK 삭제 (rename 전 이름 사용)
@@ -33,8 +35,12 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
     const fks = d.op === 'drop' ? d.from?.foreignKeys ?? [] : [];
     if (fks.length) table(d, sqlBody(alter(d.name, fks.map((f) => `DROP FOREIGN KEY ${q(f.name)}`))));
   }
-  // 2. 뷰 삭제
+  // 2. 뷰 삭제, 루틴 삭제(변경은 삭제 후 8-b 에서 다시 만든다)
   for (const v of diff.views) if (v.op === 'drop') view(v, sqlBody(`DROP VIEW ${q(v.name)}`));
+  for (const r of diff.routines) {
+    const name = r.op === 'drop' ? r.from!.name : r.name;
+    if (r.op !== 'add') routine(r, sqlBody(`DROP ${r.kind.toUpperCase()} IF EXISTS ${q(name)}`));
+  }
   // 3. 테이블 rename
   for (const d of altered) if (d.op === 'rename') table(d, sqlBody(`RENAME TABLE ${q(d.oldName!)} TO ${q(d.name)}`));
   // 4. 테이블 생성 (FK는 8단계에서)
@@ -50,6 +56,8 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
       : d.foreignKeys.filter((f) => f.op === 'add' || f.op === 'modify').map((f) => f.to!);
     if (adds.length) table(d, sqlBody(alter(d.name, adds.map((f) => `ADD ${printForeignKey(f)}`))));
   }
+  // 8-b. 루틴 생성 (뷰가 함수를 부를 수 있어 뷰보다 먼저)
+  for (const r of diff.routines) if (r.op !== 'drop') routine(r, createRoutine(r.to!));
   // 9. 뷰 생성·교체 (뷰가 참조하는 뷰를 먼저)
   for (const v of sortViews(diff.views.filter((x) => x.op !== 'drop'))) {
     view(v, v.to!.parseError
@@ -61,10 +69,23 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
 
 export function renderDdl(stmts: Statement[], partial = false): string {
   const blocks = stmts.map((s) =>
-    [`-- [${MARK[s.op]}] ${s.kind.toUpperCase()} ${s.object}`, ...(s.notes ?? []).map((n) => `-- ${n}`), s.comment ? s.sql : `${s.sql};`].join('\n'),
+    [`-- [${MARK[s.op]}] ${s.kind.toUpperCase()} ${s.object}`, ...(s.notes ?? []).map((n) => `-- ${n}`), statementText(s)].join('\n'),
   );
   if (partial && blocks.length) blocks.unshift(PARTIAL_NOTE);
   return blocks.length ? `${blocks.join('\n\n')}\n` : '';
+}
+
+// 화면·파일에 찍을 문장 본문: 주석과 DELIMITER 로 감싼 루틴은 그대로, 나머지는 ';' 를 붙인다
+export const statementText = (s: StatementBody): string => (s.comment || s.delimited ? s.sql : `${s.sql};`);
+
+// DELIMITER ;; 로 감싸 mysql 클라이언트에 그대로 붙여 넣을 수 있게 한다. SQL_MODE 를 알면 앞뒤로 설정·복원한다
+function createRoutine(r: Routine): StatementBody {
+  if (r.parseError) return commentBody(`-- [수동 확인 필요] ${r.name}: 파싱할 수 없는 루틴입니다. 원문을 확인하세요`);
+  const lines = ['DELIMITER ;;', `${printRoutine(r)};;`, 'DELIMITER ;'];
+  const sql = r.sqlMode === undefined
+    ? lines
+    : [`SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = ${quoteString(r.sqlMode)};`, ...lines, 'SET SQL_MODE = @OLD_SQL_MODE;'];
+  return { sql: sql.join('\n'), comment: false, notes: [DEFINER_NOTE], delimited: true };
 }
 
 // partial 출처 테이블은 알 수 없는 속성을 안내하고, 생성 컬럼 표현식을 모르면 수동 확인으로 돌린다
