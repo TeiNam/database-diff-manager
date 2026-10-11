@@ -52,6 +52,14 @@ function assertIdentified({ warnings }: ParsedDump): void {
 }
 
 // 객체 0개: td-export SQL 헤더(/* Database : x */)가 있으면 빈 스키마로 받고 경고를 남긴다. 그 밖(헤더 없는 SQL, MD)은 거부한다
+// 스키마 정의가 아닌 문장(ALTER·INSERT 등)·구조(MD 제목·Table List 없음)가 있으면 거부한다 (14회차 1)
+function assertSchemaDump({ warnings }: ParsedDump): void {
+  const bad = warnings.filter((w) => w.code === 'non-schema');
+  if (!bad.length) return;
+  const where = bad.some((w) => w.kind === 'schema' && w.message.includes('정의서가 아닙니다')) ? '' : ` (줄 ${bad.map((w) => w.line).join(', ')})`;
+  throw new AppError(400, `${bad[0].message}${where} — 스키마 덤프(td-export) 파일인지 확인하세요`);
+}
+
 function withEmptySchemaWarning(format: SourceFormat, { model, warnings }: ParsedDump): ParseWarning[] {
   if (model.tables.length || model.views.length || model.routines.length) return warnings;
   if (format !== 'sql' || model.name === '') throw new AppError(400, '파일에서 테이블이나 뷰를 찾지 못했습니다');
@@ -73,13 +81,17 @@ export function ingest(db: Db, input: IngestInput): IngestResult {
   const { model } = parsed;
   assertIdentified(parsed);
   const warnings = withEmptySchemaWarning(format, parsed);
+  assertSchemaDump(parsed);
   assertUniqueNames(model);
   const hash = modelHash(model);
+  // 끊긴 파일 등 완전성을 확인하지 못한 버전은 사유를 저장해 diff 가 TARGET 일 때 파괴적 문장을 막는다
+  const incomplete = model.incomplete ? JSON.stringify(model.incomplete) : null;
   return tx(db, () => {
     const schemaId = ensureSchema(db, ensureDatabase(db, input.databaseName), input.schemaName);
     const latest = one<{ id: number; version_no: number; model_hash: string; source_format: SourceFormat }>(db,
       'SELECT id, version_no, model_hash, source_format FROM schema_versions WHERE schema_id = ? ORDER BY version_no DESC LIMIT 1', schemaId);
-    if (latest && latest.model_hash === hash && knowsRoutines(latest.source_format) === knowsRoutines(format)) return { status: 'duplicate', versionId: Number(latest.id), versionNo: Number(latest.version_no), warnings };
+    // 모델이 같아도 완전성이 다르면(끊긴 파일 → 완전한 파일) 새 버전이다
+    if (latest && latest.model_hash === hash && knowsRoutines(latest.source_format) === knowsRoutines(format) && storedIncomplete(db, latest.id) === incomplete) return { status: 'duplicate', versionId: Number(latest.id), versionNo: Number(latest.version_no), warnings };
     const versionNo = takeNumber(db, 'UPDATE schemas SET next_version_no = next_version_no + 1 WHERE id = ? RETURNING next_version_no - 1 AS n', schemaId);
     const versionId = run(db, `
       INSERT INTO schema_versions (schema_id, version_no, source_format, source_filename, source_sha256, model_hash, note, uploaded_by, uploaded_at)
@@ -87,11 +99,15 @@ export function ingest(db: Db, input: IngestInput): IngestResult {
       schemaId, versionNo, format, input.filename, sha256(input.text), hash, input.note ?? null, input.userId, new Date().toISOString(),
     ).lastInsertRowid;
     run(db, 'INSERT INTO schema_version_sources (version_id, source_text) VALUES (?, ?)', versionId, input.text);
+    if (incomplete !== null) run(db, 'INSERT INTO schema_version_incomplete (version_id, incomplete_json) VALUES (?, ?)', versionId, incomplete);
     const routineIds = routineObjectIds(db, schemaId);
     for (const obj of [...model.tables, ...model.views, ...model.routines]) linkObject(db, schemaId, versionId, obj, routineIds);
     return { status: 'ok', versionId, versionNo, warnings };
   });
 }
+
+const storedIncomplete = (db: Db, versionId: number): string | null =>
+  one<{ incomplete_json: string }>(db, 'SELECT incomplete_json FROM schema_version_incomplete WHERE version_id = ?', versionId)?.incomplete_json ?? null;
 
 // 번호 카운터를 같은 트랜잭션 안에서 1 올리고 올리기 전 값을 쓴다 (지운 번호를 다시 쓰지 않는다)
 function takeNumber(db: Db, sql: string, id: number): number {

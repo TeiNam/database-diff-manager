@@ -87,8 +87,11 @@ export interface SchemaDiff {
   // BASE·TARGET 스키마 이름 (빈 이름 제외). 뷰 본문의 `스키마`.`객체` 참조가 이 목록 밖이면 다른 스키마 객체라 로컬 의존이 아니다.
   // 비었거나 없으면(옛 JSON) 한정자로 판정하지 않는다 (같은 이름이면 로컬로 보는 안전 쪽)
   schemaNames?: string[];
-  // TARGET 이 불완전하다고 보는 이유 (식별 불가 파싱 실패 문장이 있거나 객체가 0개). 있으면 객체 DROP 을 수동 확인으로 막는다
+  // TARGET 이 불완전하다고 보는 이유 (식별 불가 파싱 실패 문장, 객체 0개, 원문 판정 — SchemaModel.incomplete). 있으면 객체 DROP·
+  // DROP COLUMN 이 든 테이블 문장을 수동 확인으로 막는다
   targetIncomplete?: string;
+  // 불완전한 TARGET 에서 정의가 끊겼을 수 있는 객체 (TARGET 이름). 이 객체의 문장은 모두 수동 확인
+  incompleteObjects?: string[];
 }
 
 // 뷰 본문의 한정자 중 로컬로 보는 스키마 이름 (schemaNames). 스키마 이름을 모르면 undefined — 한정자를 보지 않는다(로컬로 본다)
@@ -130,9 +133,12 @@ export function diffSchemas(base: SchemaModel, target: SchemaModel, renames: Ren
   };
 }
 
-// 식별 불가 문장은 어떤 객체 정의를 잃었는지 알 수 없고, 객체 0개는 잘못된 파일일 수 있어 삭제 근거로 쓰지 않는다
-function incompleteTarget(target: SchemaModel): Pick<SchemaDiff, 'targetIncomplete'> {
-  if ([...target.tables, ...target.views].some(isUnidentified)) return { targetIncomplete: 'TARGET 에 식별할 수 없는 파싱 실패 문장이 있습니다' };
+// 식별 불가 문장은 어떤 객체 정의를 잃었는지 알 수 없고, 객체 0개는 잘못된 파일일 수 있어 삭제 근거로 쓰지 않는다.
+// 원문 판정(끊긴 파일·트레일러 없음·비스키마 문장 — completeness)도 같다 (14회차 1)
+function incompleteTarget(target: SchemaModel): Pick<SchemaDiff, 'targetIncomplete' | 'incompleteObjects'> {
+  const objects = target.incomplete?.objects.length ? { incompleteObjects: target.incomplete.objects } : {};
+  if ([...target.tables, ...target.views].some(isUnidentified)) return { targetIncomplete: 'TARGET 에 식별할 수 없는 파싱 실패 문장이 있습니다', ...objects };
+  if (target.incomplete) return { targetIncomplete: `TARGET 원문: ${target.incomplete.reason}`, ...objects };
   if (!target.tables.length && !target.views.length && !(target.routines ?? []).length) return { targetIncomplete: 'TARGET 에 객체가 없습니다' };
   return {};
 }

@@ -1,4 +1,4 @@
-import type { Routine, SchemaModel, SourceFormat, Table, View } from '@tdm/core';
+import type { Routine, SchemaIncomplete, SchemaModel, SourceFormat, Table, View } from '@tdm/core';
 import { all, one, run, tx, type Db } from '../db/connection';
 import { AppError } from '../errors';
 import { getSchema } from './catalog';
@@ -95,8 +95,22 @@ export function listVersions(db: Db, schemaId: number): VersionSummary[] {
   return summaries.reverse();
 }
 
+// 저장된 완전성 판정 (ingest). 형식이 어긋나면 사유만 남겨 불완전으로 본다 (안전 쪽)
+function incompleteOf(json: string | null | undefined): SchemaIncomplete | undefined {
+  if (json === null || json === undefined) return undefined;
+  try {
+    const v = JSON.parse(json) as Partial<SchemaIncomplete>;
+    const objects = Array.isArray(v.objects) ? v.objects.filter((o): o is string => typeof o === 'string') : [];
+    return { reason: typeof v.reason === 'string' ? v.reason : '저장된 불완전 표시를 읽지 못했습니다', objects };
+  } catch {
+    return { reason: '저장된 불완전 표시를 읽지 못했습니다', objects: [] };
+  }
+}
+
 export function loadVersion(db: Db, id: number): VersionDetail {
   const version = getVersionMeta(db, id);
+  const flag = one<{ incomplete_json: string }>(db, 'SELECT incomplete_json FROM schema_version_incomplete WHERE version_id = ?', id);
+  const incomplete = incompleteOf(flag?.incomplete_json);
   const rows = all<{ object_id: number; kind: ObjectKind; name: string; revision_no: number; model_json: string }>(db, `
     SELECT o.id AS object_id, o.kind, o.name, r.revision_no, r.model_json
       FROM version_objects vo
@@ -104,7 +118,10 @@ export function loadVersion(db: Db, id: number): VersionDetail {
       JOIN objects o ON o.id = r.object_id
      WHERE vo.version_id = ? ORDER BY o.kind, o.name`, id);
   // MD 출처는 루틴을 알 수 없다 (diff 가 루틴을 비교하지 않도록 표시)
-  const model: SchemaModel = { name: version.schemaName, tables: [], views: [], routines: [], ...(version.sourceFormat === 'md' ? { routinesUnknown: true } : {}) };
+  const model: SchemaModel = {
+    name: version.schemaName, tables: [], views: [], routines: [],
+    ...(version.sourceFormat === 'md' ? { routinesUnknown: true } : {}), ...(incomplete ? { incomplete } : {}),
+  };
   for (const r of rows) {
     const obj = JSON.parse(r.model_json) as Table | View | Routine;
     if (obj.kind === 'table') model.tables.push(obj);

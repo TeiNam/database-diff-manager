@@ -95,7 +95,7 @@ describe('FK 자동 이름 보정이 다른 FK 이름과 겹칠 때 (4회차 5)'
 describe('MD 출처 CHECK 안내 (4회차 6)', () => {
   const md = '# s\n\n## Table List\n- [t ()](#t)\n\n## t\n**Information**\n|Table type|Engine|Row format|Collate|Comment|\n|---|---|---|---|---|\n'
     + '|BASE TABLE|InnoDB|Dynamic|utf8mb4_0900_ai_ci||\n\n**Columns**\n|Name|Type|Nullable|Default|Charset|Collation|Key|Extra|Comment|\n|---|---|---|---|---|---|---|---|---|\n'
-    + '|id|int|NO||||PRI|||\n|b|int|NO||||||\n';
+    + '|id|int|NO||||PRI|||\n|b|int|NO||||||\n\n \n';
   const base = dump(tbl('t', '  `id` int NOT NULL,\n  `a` int NOT NULL,\n  PRIMARY KEY (`id`)'));
 
   it('컬럼 rename 이 있으면 CHECK 오류 3959 가능성을 한 줄 덧붙인다', () => {

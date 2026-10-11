@@ -25,7 +25,8 @@ describe.each(MD_SCENARIOS)('골든(MD TARGET): %s', (name) => {
 
 const MD_HEAD = '# s\n\n## Table List\n- [t ()](#t)\n\n## t\n**Information**\n|Table type|Engine|Row format|Collate|Comment|\n|---|---|---|---|---|\n' +
   '|BASE TABLE|InnoDB|Dynamic|utf8mb4_0900_ai_ci||\n\n**Columns**\n|Name|Type|Nullable|Default|Charset|Collation|Key|Extra|Comment|\n|---|---|---|---|---|---|---|---|---|\n';
-const mdTable = (rows: string) => parseMdDump(MD_HEAD + rows).model;
+const MD_END = '\n \n'; // td-export 섹션 끝 줄 (없으면 끊긴 MD 로 본다)
+const mdTable = (rows: string) => parseMdDump(MD_HEAD + rows + MD_END).model;
 const sqlTable = (cols: string) =>
   parseSqlDump(`CREATE TABLE \`t\` (\n${cols}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`).model;
 
@@ -113,7 +114,7 @@ describe('generateDdl: 테이블 문자셋 변경', () => {
 
   it('본 ALTER가 수동 확인이면 CONVERT도 수동 확인', () => {
     const base = sqlTable('  `a` int NOT NULL');
-    const md = (MD_HEAD + '|a|int|NO|||||||\n|v|int|YES|||||VIRTUAL GENERATED||\n').replace('|utf8mb4_0900_ai_ci||', '|utf8mb4_unicode_ci||');
+    const md = (MD_HEAD + '|a|int|NO|||||||\n|v|int|YES|||||VIRTUAL GENERATED||\n' + MD_END).replace('|utf8mb4_0900_ai_ci||', '|utf8mb4_unicode_ci||');
     const stmts = generateDdl(diffSchemas(base, parseMdDump(md).model));
     expect(stmts.map((s) => [s.comment, s.sql.split('\n')[1]])).toEqual([
       [true, '-- ALTER TABLE `t` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci'],

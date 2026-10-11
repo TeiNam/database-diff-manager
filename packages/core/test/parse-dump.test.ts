@@ -71,11 +71,12 @@ describe('parseSqlDump', () => {
     expect(warnings.map((w) => [w.code, w.object])).toEqual([['parse-error', 'a']]);
   });
 
-  it('SET 문(td-export 0.1.30 FOREIGN_KEY_CHECKS)은 경고 없이 건너뛰고, 다른 문장은 계속 경고한다', () => {
+  it('SET 문(td-export 0.1.30 FOREIGN_KEY_CHECKS)은 경고 없이 건너뛰고, 다른 문장은 계속 경고한다 (14회차: CREATE 밖 문장은 비스키마·불완전)', () => {
     const text = '/* Database : s */\nSET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;\n\nCREATE TABLE `t` (\n  `a` int\n);\nset names utf8mb4;\nDROP TABLE `x`;\nSET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;\n';
     const { model, warnings } = parseSqlDump(text);
     expect(model.tables.map((t) => t.name)).toEqual(['t', 'x']);
-    expect(warnings.map((w) => [w.code, w.object, w.line])).toEqual([['parse-error', 'x', 8]]);
+    expect(warnings.map((w) => [w.code, w.object, w.line])).toEqual([['non-schema', 's', 8], ['parse-error', 'x', 8], ['incomplete', 's', 1]]);
+    expect(model.incomplete?.reason).toContain('줄 8');
   });
 });
 

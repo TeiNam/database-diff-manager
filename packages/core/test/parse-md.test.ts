@@ -16,7 +16,8 @@ describe('parseMdDump: 기본 형식', () => {
   });
 
   it('Columns 표 없는 섹션은 경고와 parseError 테이블', () => {
-    expect(warnings).toMatchObject([{ code: 'parse-error', kind: 'table', object: 'broken', message: 'Columns 표 없음' }]);
+    // md/basic.md 는 손으로 만든 픽스처라 마지막 섹션 끝 줄(' ')이 없어 incomplete 경고도 붙는다 (14회차 1)
+    expect(warnings.filter((w) => w.code !== 'incomplete')).toMatchObject([{ code: 'parse-error', kind: 'table', object: 'broken', message: 'Columns 표 없음' }]);
     const broken = model.tables.find((t) => t.name === 'broken');
     expect(broken?.parseError).toBe('Columns 표 없음');
   });
@@ -24,7 +25,7 @@ describe('parseMdDump: 기본 형식', () => {
   it('뷰 섹션 파싱 실패는 kind=view 경고와 parseError 뷰', () => {
     const md = '# s\n\n## v_bad\n**Information**\n|Table type|Charset|Collation|\n|---|---|---|\n|VIEW|utf8mb4|x|\n';
     const r = parseMdDump(md);
-    expect(r.warnings).toMatchObject([{ code: 'parse-error', kind: 'view', object: 'v_bad' }]);
+    expect(r.warnings.filter((w) => w.code === 'parse-error')).toMatchObject([{ code: 'parse-error', kind: 'view', object: 'v_bad' }]);
     expect(r.model.views.map((v) => [v.name, Boolean(v.parseError)])).toEqual([['v_bad', true]]);
   });
 

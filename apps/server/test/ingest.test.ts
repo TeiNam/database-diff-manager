@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { one, openDb, type Db } from '../src/db/connection';
 import { createUser } from '../src/repos/users';
 import { deleteVersion, getSource, listVersions, loadVersion } from '../src/repos/versions';
+import { diffSchemas, generateDdl } from '@tdm/core';
 import { ingest, modelHash } from '../src/services/ingest';
 import { SAMPLE_MD, SAMPLE_SQL, sampleText } from './helpers';
 
@@ -87,10 +88,38 @@ describe('ingest', () => {
   });
 
   it('td-export 헤더만 있는 빈 스키마는 저장하고 객체 0개 경고를 남긴다 (13회차 1)', () => {
-    const r = upload('empty.sql', '/* Database : x */\nSET NAMES utf8mb4;\nSET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;\n');
+    // td-export 는 객체가 없어도 트레일러를 낸다 (트레일러가 없으면 끊긴 파일 — 14회차 1)
+    const r = upload('empty.sql', '/* Database : x */\nSET NAMES utf8mb4;\nSET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;\n\nSET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;\n');
     expect(r).toMatchObject({ status: 'ok', versionNo: 1 });
     expect(r.warnings.map((w) => w.code)).toEqual(['empty-schema']);
     expect(r.warnings[0].message).toContain('객체가 0개');
+  });
+
+  it('스키마 정의가 아닌 파일은 거부한다 — ALTER 만 든 SQL, 릴리스 노트 MD (14회차 1)', () => {
+    expect(() => upload('alter.sql', 'ALTER TABLE `ai_usage_log` ADD COLUMN `x` int;\n')).toThrow('스키마 정의가 아닌');
+    expect(() => upload('notes.md', '# Release notes\n## Changes\nSome notes\n')).toThrow('스키마 정의서가 아닙니다');
+    expect(count(db, 'schema_versions')).toBe(0);
+  });
+
+  it('끊긴 파일은 저장하되 incomplete 경고를 남기고, 그 버전을 TARGET 으로 비교하면 파괴적 문장을 실행하지 않는다 (14회차 1)', () => {
+    upload(SAMPLE_SQL, SQL);
+    const cut = SQL.slice(0, SQL.indexOf('CREATE TABLE `chat_history`') + 80);
+    const r = upload(SAMPLE_SQL, cut);
+    expect(r.status).toBe('ok');
+    expect(r.warnings.map((w) => w.code)).toContain('incomplete');
+    const [target, base] = listVersions(db, 1).map((v) => loadVersion(db, v.id).model);
+    expect(target.incomplete).toMatchObject({ objects: ['chat_history'] });
+    expect(base.incomplete).toBeUndefined();
+    const stmts = generateDdl(diffSchemas(base, target));
+    expect(stmts.filter((s) => !s.comment && /DROP\s+(TABLE|VIEW|COLUMN)/.test(s.sql))).toEqual([]);
+  });
+
+  it('모델이 같아도 완전성이 다르면 duplicate 로 합치지 않는다 (14회차 1)', () => {
+    const md = sampleText(SAMPLE_MD);
+    const cut = md.replace(/\n \n\s*$/, '\n');
+    expect(upload(SAMPLE_MD, cut)).toMatchObject({ status: 'ok', versionNo: 1 });
+    expect(upload(SAMPLE_MD, md)).toMatchObject({ status: 'ok', versionNo: 2 });
+    expect(upload(SAMPLE_MD, md)).toMatchObject({ status: 'duplicate', versionNo: 2 });
   });
 
   it('modelHash는 객체 순서에 무관하다', () => {
