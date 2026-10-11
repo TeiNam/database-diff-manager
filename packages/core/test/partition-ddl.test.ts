@@ -25,8 +25,29 @@ describe('listPartitionStatements', () => {
       const bodies = listPartitionBodies('`t`', a, b);
       expect(bodies).toHaveLength(1);
       expect(bodies[0].sql.split('\n').every((l) => l.startsWith('--'))).toBe(true);
-      expect(bodies[0].sql).toMatch(/^-- \[수동 확인 필요\] `t`: RANGE 마지막 파티션 상한이 줄어/);
+      expect(bodies[0].sql).toMatch(/^-- \[수동 확인 필요\] `t`: RANGE 마지막 파티션 상한이 줄거나 비교할 수 없어/);
       expect(bodies[0].sql).toContain('-- ALTER TABLE `t` REORGANIZE PARTITION');
+    }
+  });
+
+  it('괄호형 (MAXVALUE)·비교할 수 없는 상한(날짜·문자열·다중 컬럼)이 마지막 파티션에서 바뀌면 수동 확인 (4회차 4)', () => {
+    const cases: [string, string][] = [
+      ['(MAXVALUE)', '(20)'],
+      ["('2025-01-01')", "('2024-01-01')"],
+      ['(10,MAXVALUE)', '(10,5)'],
+      ['(MAXVALUE,MAXVALUE)', "('a',1)"],
+    ];
+    for (const [a, b] of cases) {
+      const bodies = listPartitionBodies('`t`', [P('p1'), P('pz', a.slice(1, -1))], [P('p1'), P('py', b.slice(1, -1))]);
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0].sql).toMatch(/^-- \[수동 확인 필요\] `t`: RANGE 마지막 파티션 상한/);
+    }
+  });
+
+  it('새 상한이 (MAXVALUE)·(MAXVALUE,MAXVALUE) 면 그대로 REORGANIZE', () => {
+    for (const [a, b] of [["'2025-01-01'", 'MAXVALUE'], ['10,5', 'MAXVALUE,MAXVALUE']]) {
+      const [body] = listPartitionBodies('`t`', [P('p1'), P('pz', a)], [P('p1'), P('py', b)]);
+      expect(body.sql).toMatch(/^ALTER TABLE `t` REORGANIZE PARTITION `pz`/);
     }
   });
 
