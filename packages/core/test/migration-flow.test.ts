@@ -281,3 +281,21 @@ describe('컬럼 삭제와 rename 이 같은 이름에서 겹칠 때', () => {
     expect(stmts.filter((x) => x.object === 'u').map((x) => x.comment)).toEqual([false]);
   });
 });
+
+// 같은 컬럼에 rename(id=2) 과 remove-column(id=9) 이 함께 있으면 rule-id 가 낮은 rename 만 반영한다 (7회차 3)
+describe('같은 컬럼의 이종 DMS 룰', () => {
+  const asIsT = parseSqlDump(table('t', ['id', 'a'])).model;
+  const toBeT = parseSqlDump(table('t', ['id', 'x'])).model;
+  const locator = { 'schema-name': 'legacy', 'table-name': 't', 'column-name': 'a' };
+  const rules = [
+    { 'rule-id': '2', 'rule-type': 'transformation', 'rule-target': 'column', 'object-locator': locator, 'rule-action': 'rename', value: 'x' },
+    { 'rule-id': '9', 'rule-type': 'transformation', 'rule-target': 'column', 'object-locator': locator, 'rule-action': 'remove-column' },
+  ];
+
+  it('삭제가 아니라 rename 으로 보고 진 룰은 duplicate 경고', () => {
+    const { mapping: m, warnings } = parseDmsMapping(JSON.stringify({ rules }));
+    expect(warnings.map((w) => [w.ruleId, w.code])).toEqual([['9', 'duplicate']]);
+    const t = buildMigrationFlow(asIsT, toBeT, m).tables.find((r) => r.asIs === 't')!;
+    expect(t.columns.map((c) => [c.asIs, c.toBe, c.status])).toEqual([['id', 'id', 'same'], ['a', 'x', 'renamed']]);
+  });
+});

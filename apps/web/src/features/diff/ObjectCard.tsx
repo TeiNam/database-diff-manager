@@ -23,7 +23,7 @@ const COPY_LABEL: Record<CopyState, string> = { idle: 'DDL 복사', done: '복�
 // 복사 직전에 받은 최신 diff 에 이 객체의 문장이 없으면 옛 내용을 복사하지 않는다
 class StaleObjectError extends Error {}
 
-// 카드가 복사할 문장: 그 객체 문장(related 포함)과 함께 실행해야 하는 다른 객체 문장(depends), 전체 DDL 순서
+// 카드가 복사할 문장: 그 객체 문장(related 포함)과 단독 실행에 필요한 다른 객체 문장(FK 그래프·depends·뷰 참조), 전체 DDL 순서
 const cardStatements = (statements: Statement[], entry: ObjectEntry) => objectStatements(statements, entry.kind, entry.name);
 
 function ChangeBar({ added, removed }: { added: number; removed: number }) {

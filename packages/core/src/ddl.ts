@@ -5,10 +5,12 @@ import { RETYPED_FIELD, retypeGroups } from './fk-retype';
 import { type Op, type RoutineDiff, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
 import { alter, alterStatements, commentBody, inheritCollation, manualBody, sqlBody, type StatementBody } from './ddl-alter';
 import { quoteIdent as q, quoteString } from './lexer';
-import type { Routine, RoutineKind, Table } from './model';
+import type { ForeignKey, Routine, RoutineKind, Table } from './model';
 import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated, indexNote, printable, tableNote } from './partial-fill';
 import { printForeignKey, printRoutine, printTable, printView } from './print';
 import { renameGroups, renameTableSql } from './table-rename';
+
+export { objectStatements } from './card-bundle';
 
 export interface Statement extends StatementBody {
   object: string;
@@ -21,6 +23,9 @@ export interface Statement extends StatementBody {
   // depends: 이 문장을 다른 테이블 문장과 함께 실행해야 할 때 그 묶음의 테이블들 (TARGET 이름, object 포함). 예: FK 로 묶인
   // 컬럼 타입 변경 — 부모 MODIFY 는 자식 FK 해제·재추가 없이 실행하면 실패한다. 객체 카드 복사는 objectStatements 로 묶음을 낸다
   depends?: string[];
+  // fkDrops / fkAdds: 이 문장이 해제 / 추가하는 FK 가 참조하는 같은 스키마 테이블 (TARGET 이름). 객체 카드 복사 묶음 계산에 쓴다
+  fkDrops?: string[];
+  fkAdds?: string[];
 }
 
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };
@@ -32,10 +37,13 @@ const PARTIAL_CHECK_NOTE = '-- [MD 기반] MD 출처는 CHECK 를 알 수 없어
 
 export function generateDdl(diff: SchemaDiff): Statement[] {
   const out: Statement[] = [];
-  const table = (d: TableDiff, body: StatementBody) => out.push({ object: d.name, kind: 'table', op: d.op, ...body });
+  const table = (d: TableDiff, body: StatementBody & Pick<Statement, 'fkDrops' | 'fkAdds'>) => out.push({ object: d.name, kind: 'table', op: d.op, ...body });
   const view = (v: ViewDiff, body: StatementBody) => out.push({ object: v.name, kind: 'view', op: v.op, ...body });
   const routine = (r: RoutineDiff, body: StatementBody) => out.push({ object: r.name, kind: r.kind, op: r.op, ...body });
   const altered = diff.tables.filter((d) => d.op === 'modify' || d.op === 'rename');
+  const targetName = new Map(diff.tables.flatMap((d) => (d.oldName ? [[d.oldName, d.name] as const] : [])));
+  const refs = (fks: ForeignKey[], base: boolean) => [...new Set(fks.filter((f) => f.refSchema === undefined)
+    .map((f) => (base ? targetName.get(f.refTable) ?? f.refTable : f.refTable)))];
 
   // 1. FK 삭제 (rename 전 테이블·FK 이름 사용)
   for (const d of altered) {
@@ -44,12 +52,12 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
     const pinned = pinnedIndexes(d, drops);
     const clauses = [...drops.map((f) => `DROP FOREIGN KEY ${q(baseFkName(d, f.name))}`), ...pinned.map((n) => `RENAME INDEX ${q(n)} TO ${q(n)}`)];
     const notes = [...(pinned.length ? [PIN_NOTE] : []), ...(drops.some((f) => f.fields.includes(RETYPED_FIELD)) ? [RETYPE_NOTE] : [])];
-    table(d, sqlBody(alter(d.oldName ?? d.name, clauses), notes));
+    table(d, { ...sqlBody(alter(d.oldName ?? d.name, clauses), notes), fkDrops: refs(drops.map((f) => f.from!), true) });
   }
   // 1-b. 삭제될 테이블의 FK도 먼저 제거 (부모/자식 DROP 순서 무관하게, error 3730 방지)
   for (const d of diff.tables) {
     const fks = d.op === 'drop' ? d.from?.foreignKeys ?? [] : [];
-    if (fks.length) table(d, sqlBody(alter(d.name, fks.map((f) => `DROP FOREIGN KEY ${q(f.name)}`))));
+    if (fks.length) table(d, { ...sqlBody(alter(d.name, fks.map((f) => `DROP FOREIGN KEY ${q(f.name)}`))), fkDrops: refs(fks, true) });
   }
   // 2. 뷰 삭제, 루틴 삭제(변경은 삭제 후 8-b 에서 다시 만든다)
   for (const v of diff.views) if (v.op === 'drop') view(v, sqlBody(`DROP VIEW ${q(v.name)}`));
@@ -82,7 +90,7 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
     const adds = d.op === 'add' ? d.to!.foreignKeys
       : d.op === 'drop' ? []
       : d.foreignKeys.filter((f) => f.op === 'add' || f.op === 'modify').map((f) => f.to!);
-    if (adds.length) table(d, sqlBody(alter(d.name, adds.map((f) => `ADD ${printForeignKey(f)}`))));
+    if (adds.length) table(d, { ...sqlBody(alter(d.name, adds.map((f) => `ADD ${printForeignKey(f)}`))), fkAdds: refs(adds, false) });
   }
   // 8-b. 루틴 생성 (뷰가 함수를 부를 수 있어 뷰보다 먼저)
   for (const r of diff.routines) if (r.op !== 'drop') routine(r, createRoutine(r.to!));
@@ -102,16 +110,6 @@ function withDepends(stmts: Statement[], diff: SchemaDiff): Statement[] {
     const g = st.kind === 'table' ? groups.get(st.object) : undefined;
     return g ? { ...st, depends: g } : st;
   });
-}
-
-// 객체 카드에서 복사할 문장: 그 객체의 문장(여러 테이블을 함께 다루는 문장은 related 의 모든 테이블)과, 그 문장들이 depends 로
-// 요구하는 다른 테이블의 묶음 문장. 순서는 전체 DDL 순서를 따른다. dependencies: 함께 들어간 다른 객체 이름 (이름순)
-export function objectStatements(stmts: Statement[], kind: Statement['kind'], name: string): { statements: Statement[]; dependencies: string[] } {
-  const isOwn = (st: Statement) => st.kind === kind && (st.object === name || Boolean(st.related?.includes(name)));
-  const needed = new Set(stmts.filter(isOwn).flatMap((st) => st.depends ?? []));
-  const statements = stmts.filter((st) => isOwn(st) || (st.kind === 'table' && st.depends !== undefined && needed.has(st.object)));
-  const dependencies = [...new Set(statements.filter((st) => !isOwn(st)).map((st) => st.object))].sort();
-  return { statements, dependencies };
 }
 
 // diff 의 FK 이름(rename 된 테이블의 자동 이름은 새 테이블 이름으로 바꾼 것)에 해당하는 BASE FK 이름

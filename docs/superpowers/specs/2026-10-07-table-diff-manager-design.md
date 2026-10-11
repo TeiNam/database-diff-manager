@@ -224,8 +224,18 @@ interface Statement {
   notes?: string[];   // 문장 위에 '-- '로 붙는 안내 (MD 기반 미확인 속성 등)
   related?: string[]; // 한 문장이 여러 테이블을 다룰 때(얽힌 테이블 rename) 그 테이블들의 TARGET 이름. 화면은 관련 카드 모두에 보여 준다
   depends?: string[]; // 다른 테이블 문장과 함께 실행해야 하는 묶음의 테이블들(object 포함, 이름순). FK 로 묶인 컬럼 타입·문자셋 변경(fk-retype 묶음) — 부모 MODIFY 만 실행하면 자식 FK 해제·재추가가 없어 error 3780 (6회차 개정)
+  fkDrops?: string[]; fkAdds?: string[]; // 이 문장이 해제(1·1-b단계) / 추가(8단계)하는 FK 가 참조하는 같은 스키마 테이블(TARGET 이름). 객체 카드 복사 묶음 계산용 (7회차 개정)
 }
 ```
+
+**객체 카드 복사 묶음** (`objectStatements(stmts, kind, name)`, 7회차 개정): 그 객체의 문장(related 포함)에서 시작해 단독 실행에 필요한 다른 객체 문장을 고정점까지 더하고, 전체 DDL 순서의 부분 집합으로 낸다. 함께 들어간 다른 객체는 `dependencies`(이름순)로 카드에 "의존 문장 포함: …" 으로 보인다. 의존이 없으면 자기 문장만이다.
+
+- `depends` 묶음(fk-retype)의 테이블 문장 전부
+- FK 추가 문장(`fkAdds`): 그 테이블과 참조 테이블의 생성·rename·변경 문장(FK 문장·DROP TABLE 제외)
+- 테이블을 바꾸거나(rename·변경) 지우는 문장: 그 테이블을 참조하는 다른 테이블의 FK 해제 문장(`fkDrops`) — 삭제되는 자식은 해제 문장만(자식 DROP TABLE 은 넣지 않는다), 남는 자식은 재추가까지 그 테이블 문장 전부 (error 3780·3730; `drop-fk-tables`, `fk-drop-parent-widen`, `fk-rename-widen`)
+- 뷰 생성·교체: 본문이 참조하는 테이블(생성·변경)·뷰·함수 문장 (예: `routines` 의 `order_net` 은 새 함수 `net`)
+
+`test:mysql` 은 골든 시나리오마다 모든 카드 묶음을 새 BASE DB 에 단독 적용해 오류가 없는지도 확인한다.
 
 **문장 순서** (FK·뷰 의존성 때문에 이 순서를 고정한다)
 
@@ -244,7 +254,7 @@ interface Statement {
    - `ALTER INDEX x [IN]VISIBLE` (가시성만 바뀐 경우)
    - `ADD CONSTRAINT … CHECK`
    - 테이블 옵션: `ENGINE=`, `DEFAULT CHARSET= COLLATE=`, `ROW_FORMAT=`, `COMMENT=`
-   - 테이블 기본 문자셋·콜레이션이 바뀌면 손실 없는 변환일 때만 이 ALTER **앞에** `ALTER TABLE … CONVERT TO CHARACTER SET cs COLLATE coll` 문장을 따로 둔다(같은 ALTER 안에서는 CONVERT가 컬럼별 문자셋 지정을 덮어쓴다). 손실 없는 변환은 모든 문자열 컬럼이 TARGET에서 테이블 기본값을 상속하고, 테이블과 각 컬럼의 문자셋 변화가 같은 문자셋(콜레이션만 변경)·ascii에서·latin1/ascii/utf8mb3에서 utf8mb4로 중 하나인 경우다. 이때 BASE에서 명시했던 컬럼과 CONVERT가 넓힌 TEXT 계열 컬럼을 이 ALTER에서 `MODIFY`로 다시 정의하고, DEFAULT CHARSET/COLLATE 옵션 절은 생략한다. 본 ALTER가 수동 확인 문장이면 CONVERT도 수동 확인 문장이 된다.
+   - 테이블 기본 문자셋·콜레이션이 바뀌면 손실 없는 변환일 때만 이 ALTER **앞에** `ALTER TABLE … CONVERT TO CHARACTER SET cs COLLATE coll` 문장을 따로 둔다(같은 ALTER 안에서는 CONVERT가 컬럼별 문자셋 지정을 덮어쓴다). 손실 없는 변환은 모든 문자열 컬럼이 TARGET에서 테이블 기본값을 상속하고, 테이블과 각 컬럼의 문자셋 변화가 같은 문자셋(콜레이션만 변경)·ascii에서·latin1/ascii/utf8mb3에서 utf8mb4로 중 하나인 경우다. 이때 BASE에서 명시했던 컬럼과 CONVERT가 넓힌 TEXT 계열 컬럼을 이 ALTER에서 `MODIFY`로 다시 정의하고, DEFAULT CHARSET/COLLATE 옵션 절은 생략한다. 본 ALTER가 수동 확인 문장이면 CONVERT도 수동 확인 문장이 된다 행 저장 형식 옵션(`ROW_FORMAT`·`KEY_BLOCK_SIZE`)이 함께 바뀌면 본 ALTER 가 아니라 CONVERT 문장에 `, ROW_FORMAT=…` 로 넣는다 — 인덱스 키 길이 한도(COMPACT 767바이트)를 정하므로 따로 실행하면 `COMPACT`/latin1 → `DYNAMIC`/utf8mb4 의 UNIQUE varchar(255) 는 CONVERT 먼저 error 3886, 반대 방향은 ROW_FORMAT 먼저 error 1071 이다(같은 ALTER 는 두 방향 모두 성공, 8.0/8.4 실측, 골든 `row-format-convert`·`row-format-convert-reverse`, 7회차 개정).
    - 그 밖에는 CONVERT를 쓰지 않는다. 이 ALTER에 `DEFAULT CHARSET=…`(·`COLLATE=…`) 옵션 절과, 실제 문자셋·콜레이션이 바뀌는 문자열 컬럼의 `MODIFY`를 넣는다(같은 ALTER의 MODIFY는 새 테이블 기본값을 상속한다). 문자셋이 좁아지는 컬럼이 있으면 문장 notes에 `[데이터 확인]` 안내를 단다.
    - 테이블 콜레이션과 같은 `COLLATE`만 붙은 컬럼은 상속한 값이므로 `COLLATE`를 빼고 출력한다(명시하면 `SHOW CREATE` 출력이 달라진다).
 6. 파티션 변경은 테이블별로 별도 `ALTER TABLE` 하나로 처리한다(다른 변경과 섞지 않는다). 예외: 5단계 ALTER 가 BASE 파티션 식이 쓰는 컬럼을 rename·삭제하면(`chat_history.create_at → created_at`) 따로 실행할 때 error 3855 이므로, 전체 재정의(`PARTITION BY …`)·`REMOVE PARTITIONING` 을 그 ALTER 끝에 쉼표 없이 붙여 한 문장으로 낸다(MySQL 8.0/8.4 실측, notes 로 안내, 골든 `partition-key-rename`, 5회차 개정). `RANGE COLUMNS(d)` 처럼 따옴표 없는 이름도 lexer 토큰으로 찾는다.
