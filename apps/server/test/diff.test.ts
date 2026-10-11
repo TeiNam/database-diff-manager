@@ -67,6 +67,55 @@ describe('PUT /api/diff/renames', () => {
   });
 });
 
+describe('Database 이름 변경과 diff 캐시', () => {
+  it('PATCH 로 이름을 바꾸면 캐시된 diff 응답 메타도 새 이름이다', async () => {
+    const ctx = await loggedInApp();
+    const v1 = await upload(ctx, SAMPLE_SQL, SQL);
+    const v2 = await upload(ctx, SAMPLE_SQL, SQL_V2);
+    const url = `/api/diff?base=${v1}&target=${v2}`;
+    const before = (await ctx.app.inject({ method: 'GET', url, headers: ctx.viewer })).json();
+    expect(before.base.databaseName).toBe('db');
+    const patched = await ctx.app.inject({ method: 'PATCH', url: `/api/databases/${before.base.databaseId}`, headers: ctx.admin, payload: { name: 'db-renamed' } });
+    expect(patched.statusCode).toBe(200);
+    const after = (await ctx.app.inject({ method: 'GET', url, headers: ctx.viewer })).json();
+    expect([after.base.databaseName, after.target.databaseName]).toEqual(['db-renamed', 'db-renamed']);
+  });
+});
+
+describe('수동 rename 의 역방향 적용', () => {
+  const put = (ctx: App, base: number, target: number, renames: unknown[]) =>
+    ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.dba, payload: { base, target, renames } });
+  const get = async (ctx: App, base: number, target: number) =>
+    (await ctx.app.inject({ method: 'GET', url: `/api/diff?base=${base}&target=${target}`, headers: ctx.viewer })).json();
+
+  it('(v1,v2) 에 저장한 테이블·컬럼 rename 을 (v2,v1) 에서는 뒤집어 적용한다 (column 의 table 은 TARGET 쪽 이름)', async () => {
+    const ctx = await loggedInApp();
+    const v1 = await upload(ctx, 's.sql', 'CREATE TABLE `members` (\n  `id` int NOT NULL,\n  `nick` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n);');
+    const v2 = await upload(ctx, 's.sql', 'CREATE TABLE `member` (\n  `id` int NOT NULL,\n  `nickname` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n);');
+    await get(ctx, v2, v1); // 저장 전 역방향 결과가 캐시에 남아도 저장 뒤에는 다시 계산된다
+    expect((await put(ctx, v1, v2, [{ kind: 'table', from: 'members', to: 'member' }, { kind: 'column', table: 'member', from: 'nick', to: 'nickname' }])).statusCode).toBe(200);
+
+    const rev = await get(ctx, v2, v1);
+    expect(rev.renames).toEqual([
+      { kind: 'table', from: 'member', to: 'members', source: 'manual', reversed: true },
+      { kind: 'column', table: 'members', from: 'nickname', to: 'nick', source: 'manual', reversed: true },
+    ]);
+    expect(rev.diff.ignoredRenames).toEqual([]);
+    expect(rev.ddl).toContain('RENAME TABLE `member` TO `members`');
+    expect(rev.ddl).toContain('RENAME COLUMN `nickname` TO `nick`');
+    expect(rev.ddl).not.toContain('DROP');
+  });
+
+  it('정방향 쌍에 수동 매핑이 있으면 역쌍 매핑은 쓰지 않는다', async () => {
+    const ctx = await loggedInApp();
+    const v1 = await upload(ctx, 's.sql', 'CREATE TABLE `a` (\n  `id` int NOT NULL\n);\nCREATE TABLE `c` (\n  `id` int NOT NULL\n);');
+    const v2 = await upload(ctx, 's.sql', 'CREATE TABLE `b` (\n  `id` int NOT NULL\n);\nCREATE TABLE `d` (\n  `id` int NOT NULL\n);');
+    await put(ctx, v1, v2, [{ kind: 'table', from: 'a', to: 'b' }]);
+    await put(ctx, v2, v1, [{ kind: 'table', from: 'd', to: 'c' }]);
+    expect((await get(ctx, v2, v1)).renames).toEqual([{ kind: 'table', from: 'd', to: 'c', source: 'manual' }]);
+  });
+});
+
 describe('GET /api/objects/:id/history', () => {
   it('리비전과 처음 나온 버전', async () => {
     const ctx = await loggedInApp();

@@ -119,6 +119,21 @@ describe('PUT /api/diff/renames 권한 순서', () => {
   });
 });
 
+describe('POST /api/uploads 권한 순서', () => {
+  it('익명이 큰 본문(깨진 JSON 2MB)을 보내도 400·413 이 아니라 401 (본문 파싱 전에 거절)', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/uploads', headers: { ...CSRF_ONLY, 'content-type': 'application/json' }, payload: `{${'x'.repeat(2 * 1024 * 1024)}` });
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+// 본문이 있는 모든 변경 라우트: 깨진 JSON 본문이어도 권한부터 거절한다 (익명 401, 권한 없는 viewer 403)
+const BODY_CASES = CASES.filter((c) => c.method !== 'GET' && c.anon === 401);
+describe.each(BODY_CASES)('$method $url 깨진 본문의 권한 순서', (c) => {
+  const broken = (headers: Headers) => app.inject({ method: c.method, url: c.url, headers: { ...headers, 'content-type': 'application/json' }, payload: '{ not json' });
+  it('익명 401', async () => expect((await broken(CSRF_ONLY)).statusCode).toBe(401));
+  if (c.viewer === 403) it('viewer 403', async () => expect((await broken(viewer)).statusCode).toBe(403));
+});
+
 describe.each(CASES)('$method $url', (c) => {
   it(`익명 ${c.anon}`, async () => expect((await call(c, CSRF_ONLY)).statusCode).toBe(c.anon));
   it(`viewer ${c.viewer}`, async () => expectStatus((await call(c, viewer)).statusCode, c.viewer));
