@@ -1,3 +1,4 @@
+import { routineNameKey } from '@tdm/core';
 import { useEffect, useMemo } from 'react';
 import { useFreshDiff, useVersion } from '../../api/hooks';
 import type { DiffResponse } from '../../api/types';
@@ -5,6 +6,9 @@ import { useSchemaContext } from '../../hooks/useSchemaContext';
 import { changedObjects, objectAnchor, objectEntry } from '../../lib/object-diff';
 import { ObjectCard } from './ObjectCard';
 import s from './ObjectCard.module.css';
+
+// 이력 객체 키: 루틴은 이름 대소문자를 구분하지 않는다 (서버 객체는 처음 표기, diff 는 TARGET 표기 — Tax→TAX)
+const historyKey = (kind: string, name: string) => `${kind}:${kind === 'function' || kind === 'procedure' ? routineNameKey(name) : name}`;
 
 // ponytail: 가상 스크롤 대신 51번째 카드부터 본문을 접어 렌더링 비용을 줄인다. 수천 개 객체가 흔해지면 가상화로 바꾼다
 const EAGER_CARDS = 50;
@@ -26,9 +30,9 @@ export function DiffTab({ data }: { data: DiffResponse }) {
   const entries = useMemo(() => changedObjects(data.diff), [data.diff]);
   const resetKey = `${data.base.id}:${data.target.id}`;
   const selected = ctx.obj ? objectEntry(ctx.objKind, ctx.obj, data.baseModel, data.targetModel, data.diff) : undefined;
-  const objectIds = new Map((version.data?.objects ?? []).map((o) => [`${o.kind}:${o.name}`, o.objectId]));
+  const objectIds = new Map((version.data?.objects ?? []).map((o) => [historyKey(o.kind, o.name), o.objectId]));
   const historyHref = (kind: string, name: string) => {
-    const id = objectIds.get(`${kind}:${name}`);
+    const id = objectIds.get(historyKey(kind, name));
     return id ? `/objects/${id}` : undefined;
   };
 

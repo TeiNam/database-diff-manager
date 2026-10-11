@@ -61,6 +61,17 @@ describe('DiffTab', () => {
     expect(await grid.findByRole('link', { name: '이력' })).toHaveAttribute('href', '/objects/5');
   });
 
+  it('루틴 이름 대소문자만 바뀌어도(Tax→TAX) 이력 링크를 찾는다 (13회차 4)', async () => {
+    const fn = (name: string, body: string) => parseSqlDump(`DELIMITER ;;\nCREATE DEFINER=\`root\`@\`%\` FUNCTION \`${name}\`(a int) RETURNS int\n    DETERMINISTIC\nRETURN ${body};;\nDELIMITER ;`).model;
+    const [b, t] = [fn('Tax', 'a'), fn('TAX', 'a * 2')];
+    const d = diffSchemas(b, t);
+    const data = { base: { id: 11, versionNo: 1 }, target: { id: 12, versionNo: 2 }, baseModel: b, targetModel: t, diff: d, statements: generateDdl(d), ddl: '', renames: [] } as never;
+    mockApi({ '/api/versions/12': { version: {}, model: t, objects: [{ objectId: 9, kind: 'function', name: 'Tax', revisionNo: 2 }] } });
+    renderWithProviders(<DiffTab data={data} />, { route: ROUTE, path: PATH });
+    const card = within(screen.getByRole('region', { name: 'function TAX' }));
+    expect(await card.findByRole('link', { name: '이력' })).toHaveAttribute('href', '/objects/9');
+  });
+
   it('카드의 DDL 복사는 그 객체 문장만 복사한다', async () => {
     // user-event 의 setup() 이 navigator.clipboard 스텁을 덮어쓰므로 먼저 만든 뒤 spy 를 심는다
     const user = userEvent.setup();
