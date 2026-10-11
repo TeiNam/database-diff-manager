@@ -1,4 +1,8 @@
 /* Database : shop */
+SET NAMES utf8mb4;
+SET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;
+SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';
+
 CREATE TABLE `member` (
   `id` int unsigned NOT NULL AUTO_INCREMENT,
   `last_name` varchar(30) NOT NULL,
@@ -6,3 +10,6 @@ CREATE TABLE `member` (
   PRIMARY KEY (`id`),
   KEY `ix_first` (`last_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;
+SET SQL_MODE = @OLD_SQL_MODE;

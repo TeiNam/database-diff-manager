@@ -10,6 +10,7 @@ export * from './print';
 export * from './comment-text';
 export * from './canonical';
 export * from './diff';
+export { holdsAbsenceDrops, targetEvidence, UNVERIFIED_PREFIX } from './completeness';
 export * from './rename-check';
 export * from './manual-review';
 export * from './ddl';

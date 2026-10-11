@@ -20,7 +20,8 @@ describe('lcs', () => {
 describe('diffSchemas', () => {
   it('같은 실데이터끼리는 변경이 없다', () => {
     const m = parseSqlDump(sample('sql')).model;
-    expect(diffSchemas(m, m)).toEqual({ tables: [], views: [], renameCandidates: [], ignoredRenames: [], partial: false, routines: [], routinesUnknown: false, objectNames: [...m.tables, ...m.views].map((o) => o.name), manualTables: [], schemaNames: [m.name] });
+    expect(diffSchemas(m, m)).toEqual({ tables: [], views: [], renameCandidates: [], ignoredRenames: [], partial: false, routines: [], routinesUnknown: false, objectNames: [...m.tables, ...m.views].map((o) => o.name), manualTables: [], schemaNames: [m.name],
+      targetEvidence: { level: 'unknown', reason: expect.stringContaining('0.1.15'), objects: [] } });
   });
 
   it('columns: 컬럼·인덱스·옵션 변경, AUTO_INCREMENT는 무시', () => {

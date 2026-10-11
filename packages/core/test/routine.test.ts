@@ -190,6 +190,7 @@ describe('generateDdl: 루틴', () => {
       ...model(fn({ body: 'BEGIN RETURN a * 0.2; END' })),
       tables: parseSqlDump('CREATE TABLE `t` (\n  `a` bigint\n);').model.tables,
       views: [{ kind: 'view', name: 'v', body: 'select `tax`(1) AS `x`', fidelity: 'full' }],
+      evidence: { level: 'complete', objects: [] }, // 루틴 삭제(DROP)는 완전한 TARGET 에서만 실행한다 (15회차)
     };
     const stmts = generateDdl(diffSchemas(base, target));
     expect(stmts.map((s) => `${s.kind} ${s.object} ${s.sql.split('\n').find((l) => !l.startsWith('SET') && !l.startsWith('DELIMITER'))}`)).toEqual([

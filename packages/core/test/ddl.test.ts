@@ -5,7 +5,7 @@ import { generateDdl, objectStatements, renderDdl } from '../src/ddl';
 import { diffSchemas } from '../src/diff';
 import { parseSqlDump } from '../src/parse-dump';
 import { parseMdDump } from '../src/parse-md';
-import { fixture, MD_SCENARIOS, mdScenario, sample, scenario, SCENARIOS } from './helpers';
+import { fixture, MD_SCENARIOS, mdScenario, sample, scenario, SCENARIOS, tdExport } from './helpers';
 
 describe.each(SCENARIOS)('골든: %s', (name) => {
   it('expected.sql과 같은 DDL을 생성한다', () => {
@@ -254,13 +254,13 @@ describe('FK 로 묶인 컬럼 타입·문자셋 변경 (5회차 1)', () => {
 });
 
 describe('파티션 키 컬럼 rename·삭제 (5회차 2)', () => {
-  const t = (cols: string, key: string, part: string) => parseSqlDump(`CREATE TABLE \`t\` (\n  \`id\` int NOT NULL,\n${cols},\n  PRIMARY KEY (\`id\`,${key})\n) ENGINE=InnoDB\n/*!50100 ${part} */;`).model;
+  const t = (cols: string, key: string, part: string) => parseSqlDump(tdExport(`CREATE TABLE \`t\` (\n  \`id\` int NOT NULL,\n${cols},\n  PRIMARY KEY (\`id\`,${key})\n) ENGINE=InnoDB\n/*!50100 ${part} */;`)).model;
 
   it('삭제·REMOVE PARTITIONING 도 같은 ALTER 에 넣는다 (MySQL 8.0/8.4 실측)', () => {
     const base = t('  `a` int NOT NULL,\n  `b` int NOT NULL', '`a`,`b`', 'PARTITION BY HASH ((`id` + `a`))\nPARTITIONS 2');
     const [drop] = generateDdl(diffSchemas(base, t('  `b` int NOT NULL', '`b`', 'PARTITION BY HASH (`id`)\nPARTITIONS 2')));
     expect(drop.sql).toBe('ALTER TABLE `t`\n  DROP PRIMARY KEY,\n  DROP COLUMN `a`,\n  ADD PRIMARY KEY (`id`,`b`)\n  PARTITION BY HASH (`id`)\nPARTITIONS 2');
-    const target = parseSqlDump('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `a2` int NOT NULL,\n  `b` int NOT NULL,\n  PRIMARY KEY (`id`,`a2`,`b`)\n) ENGINE=InnoDB;').model;
+    const target = parseSqlDump(tdExport('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `a2` int NOT NULL,\n  `b` int NOT NULL,\n  PRIMARY KEY (`id`,`a2`,`b`)\n) ENGINE=InnoDB;')).model;
     const stmts = generateDdl(diffSchemas(base, target, [{ kind: 'column', table: 't', from: 'a', to: 'a2' }]));
     expect(stmts.map((s) => s.sql)).toEqual(['ALTER TABLE `t`\n  RENAME COLUMN `a` TO `a2`\n  REMOVE PARTITIONING']);
   });
@@ -449,13 +449,13 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
   });
 
   it('다른 스키마로 한정된 참조(`ext`.`t`)는 로컬 t 의존이 아니다 (11회차 6)', () => {
-    const table = (cols: string) => `/* Database : shop */\nCREATE TABLE \`t\` (\n${cols}\n) ENGINE=InnoDB;\n`;
+    const table = (cols: string) => `CREATE TABLE \`t\` (\n${cols}\n) ENGINE=InnoDB;\n`;
     const view = (body: string) => `CREATE ALGORITHM=UNDEFINED DEFINER=\`root\`@\`%\` SQL SECURITY DEFINER VIEW \`v\` AS ${body};`;
-    const base = parseSqlDump(table('  `id` int NOT NULL,\n  `payload` int') + view('select 1 AS `a`')).model;
-    const target = parseSqlDump(table('  `id` int NOT NULL') + view('select `x`.`id` AS `a`,`ext`.`f`() AS `b` from `ext`.`t` `x`')).model;
+    const base = parseSqlDump(tdExport(table('  `id` int NOT NULL,\n  `payload` int') + view('select 1 AS `a`'))).model;
+    const target = parseSqlDump(tdExport(table('  `id` int NOT NULL') + view('select `x`.`id` AS `a`,`ext`.`f`() AS `b` from `ext`.`t` `x`'))).model;
     const stmts = generateDdl(diffSchemas(base, target));
     expect(objectStatements(stmts, 'view', 'v').dependencies).toEqual([]);
-    const local = parseSqlDump(table('  `id` int NOT NULL') + view('select `x`.`id` AS `a` from `shop`.`t` `x`')).model;
+    const local = parseSqlDump(tdExport(table('  `id` int NOT NULL') + view('select `x`.`id` AS `a` from `shop`.`t` `x`'))).model;
     expect(objectStatements(generateDdl(diffSchemas(base, local)), 'view', 'v').dependencies).toEqual(['t']);
   });
 

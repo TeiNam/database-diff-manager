@@ -80,3 +80,10 @@ export function commentPart(st: Statement): string {
   const block = renderDdl([st]).replace(/\n$/, '');
   return st.comment ? block : block.slice(0, block.length - statementText(st).length);
 }
+
+// td-export 0.1.52 형식 헤더·트레일러 (TARGET 완전성의 양성 증거, 15회차). 손으로 쓴 SQL 을 완전한 td-export 출력으로 감싼다
+const TD_EXPORT_HEADER = "SET NAMES utf8mb4;\nSET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;\nSET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';\n\n";
+const TD_EXPORT_TRAILER = '\n\nSET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;\nSET SQL_MODE = @OLD_SQL_MODE;\n';
+export const tdExport = (body: string, db = 'shop'): string => `/* Database : ${db} */\n${TD_EXPORT_HEADER}${body}${TD_EXPORT_TRAILER}`;
+// td-export 헤더 SET·트레일러를 뺀 0.1.15 형식 (끝을 확인할 수 없는 덤프)
+export const stripTdExport = (text: string): string => text.split('\n').filter((l) => !/^SET (NAMES|@OLD_|FOREIGN_KEY_CHECKS = @OLD|SQL_MODE = @OLD)/.test(l)).join('\n');

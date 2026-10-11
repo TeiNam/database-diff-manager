@@ -6,7 +6,7 @@ import { diffSchemas } from '../src/diff';
 import { type DmsMapping, parseDmsMapping } from '../src/dms-mapping';
 import { buildMigrationFlow, toRenameMappings, toReverseRenameMappings } from '../src/migration-flow';
 import { parseSqlDump } from '../src/parse-dump';
-import { fixture } from './helpers';
+import { fixture, tdExport } from './helpers';
 
 const asIs = parseSqlDump(fixture('dms/as-is.sql')).model;
 const toBe = parseSqlDump(fixture('dms/to-be.sql')).model;
@@ -213,7 +213,7 @@ describe.skipIf(samples.length === 0)('로컬 DMS 샘플', () => {
 // t(a,b) 에서 a 를 지우고 b 를 a 로 rename (지워질 컬럼과 rename 대상 이름이 같다)
 describe('컬럼 삭제와 rename 이 같은 이름에서 겹칠 때', () => {
   const asIsT = parseSqlDump(table('t', ['id', 'a', 'b'])).model;
-  const toBeT = parseSqlDump(table('t', ['id', 'a'])).model;
+  const toBeT = parseSqlDump(tdExport(table('t', ['id', 'a']))).model; // DROP COLUMN 을 실행하려면 완전한 td-export TARGET 이어야 한다 (15회차)
   const overlap = (): DmsMapping => ({
     ...noRules(), columns: [{ ruleId: '1', table: 't', from: 'b', to: 'a' }], removedColumns: [{ ruleId: '2', table: 't', column: 'a' }], ruleCount: 2,
   });
@@ -266,7 +266,7 @@ describe('컬럼 삭제와 rename 이 같은 이름에서 겹칠 때', () => {
     const child = (name: string, cols: string[], fkCol: string) => `CREATE TABLE \`${name}\` (\n  \`id\` int NOT NULL,\n${cols.map((c) => `  \`${c}\` int NOT NULL,`).join('\n')}\n` +
       `  PRIMARY KEY (\`id\`),\n  KEY \`fk\` (\`${fkCol}\`),\n  CONSTRAINT \`fk\` FOREIGN KEY (\`${fkCol}\`) REFERENCES \`p\` (\`id\`)\n) ENGINE=InnoDB;\n`;
     const before = parseSqlDump(parent + child('t', ['a', 'b'], 'a') + table('u', ['id', 'x'])).model;
-    const after = parseSqlDump(parent + child('t2', ['b', 'c'], 'c') + table('u', ['id', 'y'])).model;
+    const after = parseSqlDump(tdExport(parent + child('t2', ['b', 'c'], 'c') + table('u', ['id', 'y']))).model;
     // a→b 는 BASE 의 b 가 그대로 남아 순서로 풀 수 없는 이름 충돌이다
     const d = diffSchemas(before, after, [
       { kind: 'table', from: 't', to: 't2' },
