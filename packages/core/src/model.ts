@@ -3,6 +3,9 @@ export type Fidelity = 'full' | 'partial';
 
 export type ColumnField = 'charset' | 'collation' | 'default' | 'onUpdate' | 'generated' | 'invisible' | 'srid';
 
+export type ColumnStorage = 'DISK' | 'MEMORY';
+export type ColumnFormat = 'FIXED' | 'DYNAMIC' | 'DEFAULT';
+
 export interface Column {
   name: string;
   type: string; // 정규화된 타입 원문: 'varchar(32)', 'int unsigned', "enum('a','b')"
@@ -11,6 +14,8 @@ export interface Column {
   generated?: { expr: string; stored: boolean }; // expr은 바깥 괄호 안쪽 원문
   nullable: boolean;
   srid?: number;
+  storage?: ColumnStorage; // /*!50606 STORAGE DISK|MEMORY */ (NDB 용, InnoDB 는 보존만 한다)
+  columnFormat?: ColumnFormat; // /*!50606 COLUMN_FORMAT FIXED|DYNAMIC|DEFAULT */
   invisible: boolean;
   default?: string; // SQL 원문: "NULL", "'0'", "CURRENT_TIMESTAMP", "(uuid())". undefined = DEFAULT 절 없음
   onUpdate?: string;
@@ -34,6 +39,7 @@ export interface Index {
   kind: IndexKind;
   parts: IndexPart[];
   using?: string;
+  keyBlockSize?: number; // KEY_BLOCK_SIZE=n (테이블 값과 다를 때만 SHOW CREATE 에 나온다)
   parser?: string;
   comment?: string;
   invisible: boolean;

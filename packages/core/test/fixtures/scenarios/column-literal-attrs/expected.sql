@@ -1,0 +1,11 @@
+-- [~] TABLE lit
+ALTER TABLE `lit`
+  MODIFY COLUMN `bin2` binary(2) DEFAULT 0x00FE,
+  MODIFY COLUMN `flags` bit(3) DEFAULT b'110',
+  MODIFY COLUMN `hid` varchar(8) DEFAULT NULL INVISIBLE COMMENT '숨김',
+  MODIFY COLUMN `mem_col` int STORAGE DISK DEFAULT NULL,
+  ADD COLUMN `fixed_col` int STORAGE DISK COLUMN_FORMAT FIXED DEFAULT '1';
+
+-- [~] TABLE zip
+ALTER TABLE `zip`
+  ADD INDEX `ix_zip_code` (`code`) KEY_BLOCK_SIZE=4 COMMENT 'k';

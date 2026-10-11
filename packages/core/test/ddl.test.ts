@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isLosslessConversion } from '../src/charset-ddl';
+import { keyLimit, oversizedIndexes } from '../src/convert-keys';
 import { generateDdl, objectStatements, renderDdl } from '../src/ddl';
 import { diffSchemas } from '../src/diff';
 import { parseSqlDump } from '../src/parse-dump';
@@ -371,7 +372,7 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(objectStatements(stmts, 'table', 'orders')).toEqual({ statements: stmts, dependencies: ['member'] });
   });
 
-  const cardOf = (name: string, kind: 'table' | 'view', object: string) => {
+  const cardOf = (name: string, kind: Parameters<typeof objectStatements>[1], object: string) => {
     const { base, target, renames } = scenario(name);
     const stmts = generateDdl(diffSchemas(base, target, renames));
     return { stmts, ...objectStatements(stmts, kind, object) };
@@ -433,6 +434,24 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(statements.some((s) => s.sql.includes('DROP COLUMN'))).toBe(false);
   });
 
+  it('이름 비우기 의존은 같은 이름 공간(테이블↔뷰)끼리만: 테이블 p 삭제 + 프로시저 p 추가 카드에 DROP TABLE 을 넣지 않는다 (9회차 1)', () => {
+    const { statements, dependencies } = cardOf('card-table-proc-same-name', 'procedure', 'p');
+    expect(statements.map((s) => s.kind)).toEqual(['procedure']);
+    expect(dependencies).toEqual([]);
+  });
+
+  it('같은 이름의 함수를 부르는 뷰 카드는 그 함수 생성을 포함한다 — 자기 자신(같은 종류·이름)만 뺀다 (9회차 2)', () => {
+    const { statements } = cardOf('card-function-view-same-name', 'view', 'v');
+    expect(statements.map((s) => s.kind)).toEqual(['function', 'view']);
+  });
+
+  it('뷰 카드와 뷰 생성 순서는 같은 토큰 기반 참조를 쓴다: 별칭 `z` 는 뷰 z 참조가 아니다 (9회차 3)', () => {
+    const { stmts, statements } = cardOf('view-order-alias', 'view', 'a');
+    expect(stmts.map((s) => s.object)).toEqual(['a', 'z']);
+    expect(statements.map((s) => s.object)).toEqual(['a']);
+    expect(cardOf('view-order-alias', 'view', 'z').statements.map((s) => s.object)).toEqual(['a', 'z']);
+  });
+
   it('의존이 없으면 자기 문장만', () => {
     const { base, target } = scenario('columns');
     const stmts = generateDdl(diffSchemas(base, target));
@@ -440,5 +459,42 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     const { statements, dependencies } = objectStatements(stmts, 'table', name);
     expect(statements).toEqual(stmts.filter((s) => s.kind === 'table' && (s.object === name || s.related?.includes(name))));
     expect(dependencies).toEqual([]);
+  });
+});
+
+describe('CONVERT 직후 키 길이 일반 판정 (9회차 4)', () => {
+  const t = (name: string, cols: string, opts: string) => `CREATE TABLE \`${name}\` (\n${cols}\n) ENGINE=InnoDB ${opts};`;
+  const ddl = (base: string, target: string) => generateDdl(diffSchemas(parseSqlDump(base).model, parseSqlDump(target).model));
+  const UTF8MB4 = 'DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci';
+
+  it('키 바이트 = 문자 길이(prefix 반영) × 새 문자셋 maxlen, 한도는 TARGET 행 저장 형식 (COMPACT 키 파트 767·전체 3072)', () => {
+    const cols = [{ name: 'a', type: 'varchar(250)', nullable: true, invisible: false, autoIncrement: false }, { name: 'b', type: 'varbinary(800)', nullable: true, invisible: false, autoIncrement: false }];
+    const ix = (parts: { column: string; length?: number }[]) => ({ name: 'ix', kind: 'INDEX' as const, parts: parts.map((p) => ({ ...p, desc: false })), invisible: false });
+    expect(oversizedIndexes([ix([{ column: 'a' }])], cols, 4, keyLimit('COMPACT'))).toEqual(['ix']);
+    expect(oversizedIndexes([ix([{ column: 'a' }])], cols, 4, keyLimit(undefined))).toEqual([]);
+    expect(oversizedIndexes([ix([{ column: 'a', length: 191 }])], cols, 4, keyLimit('REDUNDANT'))).toEqual([]);
+    expect(oversizedIndexes([ix([{ column: 'b' }])], cols, 4, keyLimit('COMPACT'))).toEqual(['ix']);
+    expect(oversizedIndexes([ix([{ column: 'a' }, { column: 'a' }, { column: 'a' }, { column: 'b' }])], cols, 4, keyLimit('DYNAMIC'))).toEqual(['ix']);
+  });
+
+  it('DYNAMIC→COMPACT + CONVERT: 767 한도를 넘는 인덱스 교체를 CONVERT 와 같은 ALTER 에 넣는다', () => {
+    const stmts = ddl(t('t', '  `a` varchar(250) DEFAULT NULL,\n  KEY `ix` (`a`)', 'DEFAULT CHARSET=latin1'),
+      t('t', '  `a` varchar(250) DEFAULT NULL,\n  KEY `ix` (`a`(191))', `${UTF8MB4} ROW_FORMAT=COMPACT`));
+    expect(stmts.map((s) => s.sql)).toEqual(['ALTER TABLE `t`\n  DROP INDEX `ix`,\n  CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci,\n  ROW_FORMAT=COMPACT,\n  ADD INDEX `ix` (`a`(191))']);
+  });
+
+  it('합쳐도 한도를 넘으면(판정 불가) 수동 확인, 그 테이블을 참조하는 새 FK 도 막는다', () => {
+    const base = t('t', '  `id` int NOT NULL,\n  `a` varchar(1000) DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix` (`a`)', 'DEFAULT CHARSET=latin1');
+    const target = t('t', '  `id` int NOT NULL,\n  `a` varchar(1000) DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix` (`a`)', UTF8MB4)
+      + t('c', '  `t_id` int NOT NULL,\n  KEY `fk_c_t` (`t_id`),\n  CONSTRAINT `fk_c_t` FOREIGN KEY (`t_id`) REFERENCES `t` (`id`)', UTF8MB4);
+    const stmts = ddl(base, target);
+    expect(stmts.filter((s) => !s.comment)).toEqual([]);
+    expect(stmts.find((s) => s.object === 't')!.sql).toMatch(/^-- \[수동 확인 필요\] t: CONVERT 뒤 인덱스\(`ix`\) 키 길이가 한도를 넘는/);
+  });
+
+  it('한도를 넘지 않으면 CONVERT 를 따로 둔다 (기존 동작)', () => {
+    const stmts = ddl(t('t', '  `a` varchar(100) DEFAULT NULL,\n  KEY `ix` (`a`)', 'DEFAULT CHARSET=latin1'),
+      t('t', '  `a` varchar(100) NOT NULL,\n  KEY `ix` (`a`)', UTF8MB4));
+    expect(stmts.map((s) => s.sql)).toEqual(['ALTER TABLE `t` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci', 'ALTER TABLE `t`\n  MODIFY COLUMN `a` varchar(100) NOT NULL']);
   });
 });

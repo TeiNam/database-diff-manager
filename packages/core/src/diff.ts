@@ -88,8 +88,10 @@ export interface SchemaDiff {
 
 // 비교용 표식: 삭제되는 BASE 컬럼 이름 앞에 붙여 TARGET 의 같은 이름 컬럼과 다르게 만든다 (식별자에 나올 수 없는 문자)
 const DROPPED_MARK = '\u0000dropped:';
-const COLUMN_FIELDS = ['type', 'charset', 'collation', 'generated', 'nullable', 'srid', 'invisible', 'default', 'onUpdate', 'autoIncrement', 'comment'] as const;
-const INDEX_FIELDS = ['kind', 'using', 'parser', 'comment', 'invisible'] as const;
+const COLUMN_FIELDS = ['type', 'charset', 'collation', 'generated', 'nullable', 'srid', 'storage', 'columnFormat', 'invisible', 'default', 'onUpdate', 'autoIncrement', 'comment'] as const;
+const INDEX_FIELDS = ['kind', 'using', 'keyBlockSize', 'parser', 'comment', 'invisible'] as const;
+// SHOW CREATE 에만 나오는 속성: partial(MD) 출처는 알 수 없으므로 한쪽이 partial 이면 값이 달라도 변경이 아니라 skipped 로 남긴다
+const SQL_ONLY_FIELDS: ReadonlySet<string> = new Set(['storage', 'columnFormat', 'keyBlockSize']);
 const FK_FIELDS = ['columns', 'refSchema', 'refTable', 'refColumns', 'onDelete', 'onUpdate'] as const;
 const CHECK_FIELDS = ['expr', 'enforced'] as const;
 const VIEW_FIELDS = ['algorithm', 'security', 'checkOption', 'columnList', 'body'] as const;
@@ -114,7 +116,7 @@ export function diffSchemas(base: SchemaModel, target: SchemaModel, renames: Ren
     routines: routinesUnknown ? [] : diffRoutines(base.routines ?? [], target.routines ?? []),
     routinesUnknown,
     objectNames: [...new Set(all.map((o) => o.name))],
-    manualTables: findManualTables(base, tables),
+    manualTables: findManualTables(base, target, tables),
   };
 }
 
@@ -284,7 +286,12 @@ function fieldDiff<T extends object>(
   a: T, b: T, fields: readonly (keyof T & string)[], skipped: Set<string>, prefix: string, eq: Equal = sameJson,
 ): string[] {
   const unknownOf = (x: T) => (x as { unknown?: readonly string[] }).unknown ?? [];
+  const isPartial = (x: T) => (x as { unknown?: readonly string[] }).unknown !== undefined;
   return fields.filter((f) => {
+    if (SQL_ONLY_FIELDS.has(f) && (isPartial(a) || isPartial(b))) {
+      if (!eq(f, a[f], b[f])) skipped.add(prefix + f);
+      return false;
+    }
     if (unknownOf(a).includes(f) || unknownOf(b).includes(f)) {
       skipped.add(prefix + f);
       return false;

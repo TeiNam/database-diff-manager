@@ -7,7 +7,8 @@ const KEY_PREFIX: Record<IndexKind, string> = {
   PRIMARY: 'PRIMARY KEY', UNIQUE: 'UNIQUE KEY', INDEX: 'KEY', FULLTEXT: 'FULLTEXT KEY', SPATIAL: 'SPATIAL KEY',
 };
 
-// SHOW CREATE 속성 순서: 타입, 문자셋, 콜레이션, GENERATED, NULL, SRID, INVISIBLE, DEFAULT, ON UPDATE, AUTO_INCREMENT, COMMENT
+// SHOW CREATE 속성 순서 (8.4 실측): 타입, 문자셋, 콜레이션, GENERATED, NULL, SRID, STORAGE, COLUMN_FORMAT, DEFAULT, ON UPDATE,
+// AUTO_INCREMENT, INVISIBLE, COMMENT
 export function printColumn(c: Column, versioned = true): string {
   let s = `${q(c.name)} ${c.type}`;
   if (c.charset) s += ` CHARACTER SET ${c.charset}`;
@@ -16,10 +17,12 @@ export function printColumn(c: Column, versioned = true): string {
   if (!c.nullable) s += ' NOT NULL';
   else if (/^timestamp\b/i.test(c.type)) s += ' NULL';
   if (c.srid !== undefined) s += versioned ? ` /*!80003 SRID ${c.srid} */` : ` SRID ${c.srid}`;
-  if (c.invisible) s += versioned ? ' /*!80023 INVISIBLE */' : ' INVISIBLE';
+  if (c.storage) s += versioned ? ` /*!50606 STORAGE ${c.storage} */` : ` STORAGE ${c.storage}`;
+  if (c.columnFormat) s += versioned ? ` /*!50606 COLUMN_FORMAT ${c.columnFormat} */` : ` COLUMN_FORMAT ${c.columnFormat}`;
   if (c.default !== undefined) s += ` DEFAULT ${c.default}`;
   if (c.onUpdate) s += ` ON UPDATE ${c.onUpdate}`;
   if (c.autoIncrement) s += ' AUTO_INCREMENT';
+  if (c.invisible) s += versioned ? ' /*!80023 INVISIBLE */' : ' INVISIBLE';
   if (c.comment !== undefined) s += ` COMMENT ${quoteString(c.comment)}`;
   return s;
 }
@@ -35,6 +38,7 @@ export function printIndexParts(parts: IndexPart[]): string {
 export function printIndex(i: Index): string {
   let s = KEY_PREFIX[i.kind] + (i.kind === 'PRIMARY' ? '' : ` ${q(i.name)}`) + ` ${printIndexParts(i.parts)}`;
   if (i.using) s += ` USING ${i.using}`;
+  if (i.keyBlockSize !== undefined) s += ` KEY_BLOCK_SIZE=${i.keyBlockSize}`;
   if (i.parser) s += ` /*!50100 WITH PARSER ${q(i.parser)} */`;
   if (i.comment !== undefined) s += ` COMMENT ${quoteString(i.comment)}`;
   if (i.invisible) s += ' /*!80000 INVISIBLE */';

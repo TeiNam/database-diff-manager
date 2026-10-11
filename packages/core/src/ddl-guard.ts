@@ -4,7 +4,7 @@ import type { Statement } from './ddl';
 import { commentBody, isAlterBlocked, manualBody } from './ddl-alter';
 import { retypeGroups } from './fk-retype';
 import type { SchemaDiff, TableDiff, ViewDiff } from './diff';
-import { quoteIdent as q, tableReferences } from './lexer';
+import { quoteIdent as q, viewReferences } from './lexer';
 import { renameGroups } from './table-rename';
 
 interface Conflict {
@@ -17,7 +17,7 @@ type Conflicts = Map<string, Conflict>;
 export function guardStatements(stmts: Statement[], diff: SchemaDiff): Statement[] {
   const alterBlocked = alterBlockedNames(diff);
   const tables = spreadConflicts(diff, seedConflicts(diff), alterBlocked);
-  const views = viewConflicts(diff.views, new Set([...blockedNames(diff, tables), ...alterBlocked]));
+  const views = viewConflicts(diff.views, new Set([...blockedNames(diff, tables), ...alterBlocked, ...unparsedObjects(diff)]));
   if (!tables.size && !views.size) return stmts;
   return guard(stmts, tables, views);
 }
@@ -53,7 +53,20 @@ function seedConflicts(diff: SchemaDiff): Conflicts {
     }
   }
   for (const t of diff.manualTables) addConflict(out, t.table, t.reason, t.note);
+  // 파싱 실패 새 테이블: CREATE 를 실행하지 않으므로 그 테이블을 참조하는 FK·읽는 뷰도 막는다
+  for (const d of diff.tables) {
+    if (d.op === 'add' && d.to?.parseError) addConflict(out, d.name, `${d.name}: 파싱할 수 없는 테이블 정의입니다 — 원문을 확인해 직접 실행하세요`, '파싱 실패 객체는 생성 문장을 실행하지 않습니다');
+  }
   return out;
+}
+
+// 생성 문장을 실행하지 않는 파싱 실패 객체 이름: 새 함수·프로시저, TARGET 뷰 (그 객체를 읽거나 부르는 뷰를 막는다).
+// 바뀌는 루틴은 옛 정의를 지우지 않으므로(2단계 수동 확인) 남는다
+function unparsedObjects(diff: SchemaDiff): string[] {
+  return [
+    ...diff.routines.filter((r) => r.op === 'add' && r.to?.parseError).map((r) => r.name),
+    ...diff.views.filter((v) => v.op !== 'drop' && v.to?.parseError).map((v) => v.name),
+  ];
 }
 
 // 막힌 테이블의 옛·새 이름
@@ -109,8 +122,8 @@ const referencingFks = (d: TableDiff, blocked: ReadonlySet<string>): { name: str
   return d.foreignKeys.filter((f) => [f.from?.refTable, f.to?.refTable].some((n) => n !== undefined && blocked.has(n)));
 };
 
-// 본문이 읽는 객체 이름: FROM/JOIN 뒤 식별자. 토큰으로 나눌 수 없으면 `이름` 이 나오기만 해도 읽는 것으로 본다
-const readsName = (body: string, name: string): boolean => tableReferences(body)?.includes(name) ?? body.includes(q(name));
+// 본문이 쓰는 객체 이름: FROM/JOIN 뒤 테이블·뷰와 함수 호출 (viewReferences). 토큰으로 나눌 수 없으면 `이름` 이 나오기만 해도 쓰는 것으로 본다
+const readsName = (body: string, name: string): boolean => viewReferences(body)?.includes(name) ?? body.includes(q(name));
 
 // 막힌 테이블(또는 막힌 뷰)을 읽는 뷰의 생성·삭제도 막는다
 function viewConflicts(views: ViewDiff[], blocked: ReadonlySet<string>): Conflicts {

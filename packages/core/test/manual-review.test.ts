@@ -181,3 +181,63 @@ describe('FK 가 참조하는 부모 UNIQUE 교체 (8회차 5, 8.4 restrict_fk_o
     expect(blocked('UNIQUE KEY `uq` (`code`)', 'KEY `uq` (`code`)', noFk)).toBe(false);
   });
 });
+
+describe('파싱 실패 객체는 출처와 무관하게 수동 확인, 의존 문장에도 전파 (9회차 6)', () => {
+  const peTable = tbl('pe', "  `id` int NOT NULL,\n  `a` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix` (`a`) /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"y\": 2}' */");
+  const view = (name: string, body: string) => `CREATE ALGORITHM=UNDEFINED DEFINER=\`root\`@\`%\` SQL SECURITY DEFINER VIEW \`${name}\` AS ${body};`;
+
+  it('SQL 출처의 파싱 실패 새 테이블 CREATE 는 주석 처리한 수동 확인, 그 테이블을 읽는 뷰·참조하는 FK 도 막는다', () => {
+    const base = dump(tbl('m', '  `id` int NOT NULL,\n  PRIMARY KEY (`id`)'));
+    const target = dump(tbl('m', '  `id` int NOT NULL,\n  PRIMARY KEY (`id`)'), peTable,
+      tbl('c', '  `id` int NOT NULL,\n  `pe_id` int NOT NULL,\n  KEY `fk_c_pe` (`pe_id`),\n  CONSTRAINT `fk_c_pe` FOREIGN KEY (`pe_id`) REFERENCES `pe` (`id`)'),
+      view('v', 'select `pe`.`id` AS `id` from `pe`'), view('w', 'select `m`.`id` AS `id` from `m`'));
+    const stmts = generateDdl(diffSchemas(base, target));
+    expect(runnable(stmts, ['pe', 'c'])).toEqual([]);
+    const pe = stmts.find((s) => s.object === 'pe')!;
+    expect(pe.sql).toMatch(/^-- \[수동 확인 필요\] pe: /);
+    expect(pe.sql).toContain('-- CREATE TABLE `pe` (');
+    expect(stmts.filter((s) => s.kind === 'view').map((s) => [s.object, s.comment])).toEqual([['v', true], ['w', false]]);
+  });
+
+  it('파싱 실패 새 함수를 부르는 뷰, 파싱 실패 뷰를 읽는 뷰도 막는다', () => {
+    const fn = 'CREATE DEFINER=`root`@`%` FUNCTION `f` RETURNS int RETURN 1';
+    const base = dump(tbl('m', '  `id` int NOT NULL'));
+    const target = dump(tbl('m', '  `id` int NOT NULL'), `DELIMITER ;;\n${fn};;\nDELIMITER ;`,
+      view('calls', 'select `f`() AS `x`'), 'CREATE VIEW `bad` ???;', view('reads_bad', 'select `bad`.`x` AS `x` from `bad`'));
+    const parsed = diffSchemas(base, target);
+    expect(parsed.routines.map((r) => [r.name, Boolean(r.to?.parseError)])).toEqual([['f', true]]);
+    const stmts = generateDdl(parsed);
+    const views = Object.fromEntries(stmts.filter((s) => s.kind === 'view').map((s) => [s.object, s.comment]));
+    expect(views).toEqual({ bad: true, calls: true, reads_bad: true });
+  });
+});
+
+describe('FK 표준 키 검사 일반화 (9회차 5)', () => {
+  const blocked = (name: string) => {
+    const { base, target, renames } = scenario(name);
+    return diffSchemas(base, target, renames).manualTables.map((t) => t.table).sort();
+  };
+
+  it('부모 UNIQUE 제거 + 자식 FK 재생성(ON DELETE 변경): 자식·부모 모두 수동 확인 (8.4 error 6125 로 FK 소실 방지)', () => {
+    expect(blocked('fk-unique-replace-cascade')).toEqual(['coupon', 'member']);
+    const { base, target } = scenario('fk-unique-replace-cascade');
+    const reason = diffSchemas(base, target).manualTables[0].reason;
+    expect(reason).toContain('restrict_fk_on_non_standard_key=ON');
+    expect(reason).toContain('8.0 은 실행 가능');
+  });
+
+  it('새 테이블의 FK 가 비UNIQUE 부모 컬럼을 참조하면 그 새 테이블을 막는다', () => {
+    const base = dump(tbl('p', '  `id` int NOT NULL,\n  `code` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix_code` (`code`)'));
+    const target = dump(tbl('p', '  `id` int NOT NULL,\n  `code` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix_code` (`code`)'),
+      tbl('c', '  `code` int NOT NULL,\n  KEY `fk_c_p` (`code`),\n  CONSTRAINT `fk_c_p` FOREIGN KEY (`code`) REFERENCES `p` (`code`)'));
+    expect(diffSchemas(base, target).manualTables.map((t) => t.table)).toEqual(['c']);
+  });
+
+  it('표준 키가 TARGET 에 있거나, 비표준 FK 를 아무 문장도 건드리지 않으면 막지 않는다', () => {
+    const parent = (extra: string) => tbl('p', `  \`id\` int NOT NULL,\n  \`code\` int NOT NULL,\n  \`n\` int DEFAULT NULL,\n  PRIMARY KEY (\`id\`),\n  KEY \`ix_code\` (\`code\`)${extra}`);
+    const child = tbl('c', '  `code` int NOT NULL,\n  KEY `fk_c_p` (`code`),\n  CONSTRAINT `fk_c_p` FOREIGN KEY (`code`) REFERENCES `p` (`code`)');
+    // 부모의 무관한 인덱스 추가는 FK 와 관계없다
+    expect(diffSchemas(dump(parent(''), child), dump(parent(',\n  KEY `ix_n` (`n`)'), child)).manualTables).toEqual([]);
+    expect(blocked('fk-type-widen')).toEqual([]);
+  });
+});
