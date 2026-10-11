@@ -224,8 +224,18 @@ interface Statement {
   notes?: string[];   // 문장 위에 '-- '로 붙는 안내 (MD 기반 미확인 속성 등)
   related?: string[]; // 한 문장이 여러 테이블을 다룰 때(얽힌 테이블 rename) 그 테이블들의 TARGET 이름. 화면은 관련 카드 모두에 보여 준다
   depends?: string[]; // 다른 테이블 문장과 함께 실행해야 하는 묶음의 테이블들(object 포함, 이름순). FK 로 묶인 컬럼 타입·문자셋 변경(fk-retype 묶음) — 부모 MODIFY 만 실행하면 자식 FK 해제·재추가가 없어 error 3780 (6회차 개정)
+  fkDrops?: string[]; fkAdds?: string[]; // 이 문장이 해제(1·1-b단계) / 추가(8단계)하는 FK 가 참조하는 같은 스키마 테이블(TARGET 이름). 객체 카드 복사 묶음 계산용 (7회차 개정)
 }
 ```
+
+**객체 카드 복사 묶음** (`objectStatements(stmts, kind, name)`, 7회차 개정): 그 객체의 문장(related 포함)에서 시작해 단독 실행에 필요한 다른 객체 문장을 고정점까지 더하고, 전체 DDL 순서의 부분 집합으로 낸다. 함께 들어간 다른 객체는 `dependencies`(이름순)로 카드에 "의존 문장 포함: …" 으로 보인다. 의존이 없으면 자기 문장만이다.
+
+- `depends` 묶음(fk-retype)의 테이블 문장 전부
+- FK 추가 문장(`fkAdds`): 그 테이블과 참조 테이블의 생성·rename·변경 문장(FK 문장·DROP TABLE 제외)
+- 테이블을 바꾸거나(rename·변경) 지우는 문장: 그 테이블을 참조하는 다른 테이블의 FK 해제 문장(`fkDrops`) — 삭제되는 자식은 해제 문장만(자식 DROP TABLE 은 넣지 않는다), 남는 자식은 재추가까지 그 테이블 문장 전부 (error 3780·3730; `drop-fk-tables`, `fk-drop-parent-widen`, `fk-rename-widen`)
+- 뷰 생성·교체: 본문이 참조하는 테이블(생성·변경)·뷰·함수 문장 (예: `routines` 의 `order_net` 은 새 함수 `net`)
+
+`test:mysql` 은 골든 시나리오마다 모든 카드 묶음을 새 BASE DB 에 단독 적용해 오류가 없는지도 확인한다.
 
 **문장 순서** (FK·뷰 의존성 때문에 이 순서를 고정한다)
 

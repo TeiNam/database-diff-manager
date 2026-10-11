@@ -354,6 +354,40 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(objectStatements(stmts, 'table', 'orders')).toEqual({ statements: stmts, dependencies: ['member'] });
   });
 
+  const cardOf = (name: string, kind: 'table' | 'view', object: string) => {
+    const { base, target, renames } = scenario(name);
+    const stmts = generateDdl(diffSchemas(base, target, renames));
+    return { stmts, ...objectStatements(stmts, kind, object) };
+  };
+
+  it('부모·자식 동시 삭제: 부모 카드는 자식 FK 해제를 먼저 포함하고 자식 DROP TABLE 은 넣지 않는다 (7회차 1)', () => {
+    const { statements, dependencies } = cardOf('drop-fk-tables', 'table', 'a');
+    expect(statements.map((s) => s.sql)).toEqual(['ALTER TABLE `b`\n  DROP FOREIGN KEY `fk_b_a`', 'DROP TABLE `a`']);
+    expect(dependencies).toEqual(['b']);
+    expect(cardOf('drop-fk-tables', 'table', 'b').dependencies).toEqual([]);
+  });
+
+  it('자식 FK 삭제 + 부모 PK 확장: 부모 카드는 자식 FK 해제를 포함한다 (7회차 1)', () => {
+    const { stmts, statements, dependencies } = cardOf('fk-drop-parent-widen', 'table', 'member');
+    expect(statements).toEqual(stmts);
+    expect(dependencies).toEqual(['comment']);
+    expect(cardOf('fk-drop-parent-widen', 'table', 'comment').dependencies).toEqual([]);
+  });
+
+  it('FK 이름 변경 + 타입 확장: 부모·자식 카드 모두 서로의 문장을 포함한다 (7회차 1)', () => {
+    for (const [object, other] of [['member', 'comment'], ['comment', 'member']]) {
+      const { stmts, statements, dependencies } = cardOf('fk-rename-widen', 'table', object);
+      expect(statements).toEqual(stmts);
+      expect(dependencies).toEqual([other]);
+    }
+  });
+
+  it('뷰 카드는 본문이 부르는 새 함수의 생성 문장을 포함한다 (7회차 1)', () => {
+    const { statements, dependencies } = cardOf('routines', 'view', 'order_net');
+    expect(dependencies).toContain('net');
+    expect(statements.at(-1)?.object).toBe('order_net');
+  });
+
   it('의존이 없으면 자기 문장만', () => {
     const { base, target } = scenario('columns');
     const stmts = generateDdl(diffSchemas(base, target));
