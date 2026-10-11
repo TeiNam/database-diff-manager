@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isLosslessConversion } from '../src/charset-ddl';
-import { generateDdl, renderDdl } from '../src/ddl';
+import { generateDdl, objectStatements, renderDdl } from '../src/ddl';
 import { diffSchemas } from '../src/diff';
 import { parseSqlDump } from '../src/parse-dump';
 import { parseMdDump } from '../src/parse-md';
@@ -336,5 +336,30 @@ describe('ALTER 단위 수동 확인의 전파 (6회차 4)', () => {
     const stmts = generateDdl(diffSchemas(parseSqlDump(v1).model, parseSqlDump(v2).model));
     expect(stmts.length).toBeGreaterThanOrEqual(2);
     expect(renderDdl(stmts)).not.toContain('수동 확인');
+  });
+});
+
+describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
+  it('FK 묶인 컬럼 타입 변경은 부모 카드에 자식 FK 해제·변경·재추가를 전체 순서대로 포함한다', () => {
+    const { base, target } = scenario('fk-type-widen');
+    const stmts = generateDdl(diffSchemas(base, target));
+    const { statements, dependencies } = objectStatements(stmts, 'table', 'member');
+    expect(statements).toEqual(stmts);
+    expect(dependencies).toEqual(['comment', 'post']);
+  });
+
+  it('상속 문자셋 변경도 부모·자식 문장을 묶는다', () => {
+    const { base, target } = scenario('fk-charset-convert');
+    const stmts = generateDdl(diffSchemas(base, target));
+    expect(objectStatements(stmts, 'table', 'orders')).toEqual({ statements: stmts, dependencies: ['member'] });
+  });
+
+  it('의존이 없으면 자기 문장만', () => {
+    const { base, target } = scenario('columns');
+    const stmts = generateDdl(diffSchemas(base, target));
+    const name = stmts[0].object;
+    const { statements, dependencies } = objectStatements(stmts, 'table', name);
+    expect(statements).toEqual(stmts.filter((s) => s.kind === 'table' && (s.object === name || s.related?.includes(name))));
+    expect(dependencies).toEqual([]);
   });
 });

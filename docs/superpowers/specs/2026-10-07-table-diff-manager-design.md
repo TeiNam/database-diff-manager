@@ -223,6 +223,7 @@ interface Statement {
   comment: boolean;   // 실행할 SQL이 없는 안내 문장 (수동 확인, 파티션 COMMENT 변경 등)
   notes?: string[];   // 문장 위에 '-- '로 붙는 안내 (MD 기반 미확인 속성 등)
   related?: string[]; // 한 문장이 여러 테이블을 다룰 때(얽힌 테이블 rename) 그 테이블들의 TARGET 이름. 화면은 관련 카드 모두에 보여 준다
+  depends?: string[]; // 다른 테이블 문장과 함께 실행해야 하는 묶음의 테이블들(object 포함, 이름순). FK 로 묶인 컬럼 타입·문자셋 변경(fk-retype 묶음) — 부모 MODIFY 만 실행하면 자식 FK 해제·재추가가 없어 error 3780 (6회차 개정)
 }
 ```
 

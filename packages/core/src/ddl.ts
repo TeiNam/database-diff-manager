@@ -1,7 +1,7 @@
 // SchemaDiff → BASE를 TARGET으로 바꾸는 DDL. 순서는 FK·뷰 의존성 때문에 고정 (스펙 4.6)
 import { renamedFkNames } from './auto-name';
 import { guardStatements } from './ddl-guard';
-import { RETYPED_FIELD } from './fk-retype';
+import { RETYPED_FIELD, retypeGroups } from './fk-retype';
 import { type Op, type RoutineDiff, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
 import { alter, alterStatements, commentBody, inheritCollation, manualBody, sqlBody, type StatementBody } from './ddl-alter';
 import { quoteIdent as q, quoteString } from './lexer';
@@ -18,6 +18,9 @@ export interface Statement extends StatementBody {
   // notes: 문장 위에 '-- '로 붙는 안내 (MD 기반 미확인 속성 등)
   // related: 한 문장이 여러 테이블을 함께 다룰 때(얽힌 테이블 rename) 그 테이블들의 TARGET 이름. object 도 포함한다
   related?: string[];
+  // depends: 이 문장을 다른 테이블 문장과 함께 실행해야 할 때 그 묶음의 테이블들 (TARGET 이름, object 포함). 예: FK 로 묶인
+  // 컬럼 타입 변경 — 부모 MODIFY 는 자식 FK 해제·재추가 없이 실행하면 실패한다. 객체 카드 복사는 objectStatements 로 묶음을 낸다
+  depends?: string[];
 }
 
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };
@@ -89,7 +92,26 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
       ? commentBody(`-- [수동 확인 필요] ${v.name}: 파싱할 수 없는 뷰입니다. 원문을 확인하세요`)
       : sqlBody(printView(v.to!, { orReplace: true }), [DEFINER_NOTE]));
   }
-  return guardStatements(out, diff);
+  return guardStatements(withDepends(out, diff), diff);
+}
+
+function withDepends(stmts: Statement[], diff: SchemaDiff): Statement[] {
+  const groups = retypeGroups(diff.tables);
+  if (!groups.size) return stmts;
+  return stmts.map((st) => {
+    const g = st.kind === 'table' ? groups.get(st.object) : undefined;
+    return g ? { ...st, depends: g } : st;
+  });
+}
+
+// 객체 카드에서 복사할 문장: 그 객체의 문장(여러 테이블을 함께 다루는 문장은 related 의 모든 테이블)과, 그 문장들이 depends 로
+// 요구하는 다른 테이블의 묶음 문장. 순서는 전체 DDL 순서를 따른다. dependencies: 함께 들어간 다른 객체 이름 (이름순)
+export function objectStatements(stmts: Statement[], kind: Statement['kind'], name: string): { statements: Statement[]; dependencies: string[] } {
+  const isOwn = (st: Statement) => st.kind === kind && (st.object === name || Boolean(st.related?.includes(name)));
+  const needed = new Set(stmts.filter(isOwn).flatMap((st) => st.depends ?? []));
+  const statements = stmts.filter((st) => isOwn(st) || (st.kind === 'table' && st.depends !== undefined && needed.has(st.object)));
+  const dependencies = [...new Set(statements.filter((st) => !isOwn(st)).map((st) => st.object))].sort();
+  return { statements, dependencies };
 }
 
 // diff 의 FK 이름(rename 된 테이블의 자동 이름은 새 테이블 이름으로 바꾼 것)에 해당하는 BASE FK 이름
