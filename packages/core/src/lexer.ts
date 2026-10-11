@@ -110,3 +110,37 @@ export function quoteString(value: string): string {
     .replace(/\x1a/g, '\\Z');
   return `'${body}'`;
 }
+
+// 원문에 나오는 따옴표 식별자(`…`) 값. 문자열·주석 안은 빼고, 토큰으로 나눌 수 없으면 undefined
+export function quotedIdentifiers(src: string): string[] | undefined {
+  try {
+    return tokenize(src).filter((t) => t.t === 'ident').map((t) => t.v);
+  } catch (e) {
+    if (e instanceof LexError) return undefined;
+    throw e;
+  }
+}
+
+const TABLE_KEYWORD = /^(FROM|JOIN|STRAIGHT_JOIN)$/i;
+
+// SELECT 본문에서 FROM/JOIN 뒤에 오는 테이블 이름 (`schema`.`table` 은 table). 토큰으로 나눌 수 없으면 undefined
+export function tableReferences(src: string): string[] | undefined {
+  let tokens: Token[];
+  try {
+    tokens = tokenize(src);
+  } catch (e) {
+    if (e instanceof LexError) return undefined;
+    throw e;
+  }
+  const out: string[] = [];
+  tokens.forEach((tok, i) => {
+    if (tok.t !== 'word' || !TABLE_KEYWORD.test(tok.v)) return;
+    let j = i + 1;
+    while (tokens[j]?.v === '(' && tokens[j].t === 'op') j++;
+    const first = tokens[j];
+    if (first?.t !== 'ident') return;
+    const qualified = tokens[j + 1]?.t === 'op' && tokens[j + 1].v === '.' && tokens[j + 2]?.t === 'ident';
+    out.push(qualified ? tokens[j + 2].v : first.v);
+  });
+  return out;
+}

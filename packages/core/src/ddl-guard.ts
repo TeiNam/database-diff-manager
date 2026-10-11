@@ -3,7 +3,7 @@
 import type { Statement } from './ddl';
 import { commentBody, manualBody } from './ddl-alter';
 import type { SchemaDiff, TableDiff, ViewDiff } from './diff';
-import { quoteIdent as q } from './lexer';
+import { quoteIdent as q, tableReferences } from './lexer';
 import { renameGroups } from './table-rename';
 
 interface Conflict {
@@ -49,12 +49,13 @@ function blockedNames(diff: SchemaDiff, conflicts: Conflicts): Set<string> {
 }
 
 // 더 이상 늘지 않을 때까지 넓힌다: 막힌 테이블이 든 얽힌 rename 묶음의 모든 테이블 (묶음 RENAME 이 실행되지 않으면
-// 다른 테이블의 ALTER 가 엉뚱한 테이블의 데이터를 바꾼다), 막힌 테이블을 참조하는 FK 를 바꾸는 테이블
+// 다른 테이블의 ALTER 가 엉뚱한 테이블의 데이터를 바꾼다), 막힌 테이블을 참조하는 FK 를 바꾸거나 새로 추가하는 테이블
 function spreadConflicts(diff: SchemaDiff, seeds: Conflicts): Conflicts {
   if (!seeds.size) return seeds;
   const out = new Map(seeds);
   const groups = renameGroups(diff.tables, new Set());
-  const altered = diff.tables.filter((d) => d.op === 'modify' || d.op === 'rename');
+  // 새 테이블도 8단계에서 FK 를 추가하므로 함께 본다
+  const changed = diff.tables.filter((d) => d.op !== 'drop');
   for (;;) {
     const before = out.size;
     const blocked = blockedNames(diff, out);
@@ -66,7 +67,7 @@ function spreadConflicts(diff: SchemaDiff, seeds: Conflicts): Conflicts {
         out.set(d.name, { reason: `${d.name}: 함께 묶인 테이블 rename 이 수동 확인이라 실행하지 않습니다 — 값 대응을 확인해 직접 작성하세요`, notes: [`테이블 rename 묶음(${pairs})의 다른 테이블이 수동 확인입니다`] });
       }
     }
-    for (const d of altered) {
+    for (const d of changed) {
       const refs = out.has(d.name) ? [] : referencingFks(d, blocked);
       if (!refs.length) continue;
       out.set(d.name, { reason: `${d.name}: 참조하는 테이블의 문장이 수동 확인이라 FK 변경을 실행하지 않습니다 — 직접 작성하세요`, notes: [`FK ${refs.map((f) => f.name).join(', ')} 가 수동 확인 테이블을 참조합니다`] });
@@ -75,14 +76,20 @@ function spreadConflicts(diff: SchemaDiff, seeds: Conflicts): Conflicts {
   }
 }
 
-const referencingFks = (d: TableDiff, blocked: ReadonlySet<string>) =>
-  d.foreignKeys.filter((f) => [f.from?.refTable, f.to?.refTable].some((n) => n !== undefined && blocked.has(n)));
+// 막힌 테이블을 참조하는 FK: 바뀌는 테이블은 바뀌는 FK, 새 테이블은 추가할 FK 전부
+const referencingFks = (d: TableDiff, blocked: ReadonlySet<string>): { name: string }[] => {
+  if (d.op === 'add') return (d.to?.foreignKeys ?? []).filter((f) => f.refSchema === undefined && blocked.has(f.refTable));
+  return d.foreignKeys.filter((f) => [f.from?.refTable, f.to?.refTable].some((n) => n !== undefined && blocked.has(n)));
+};
 
-// 막힌 테이블(또는 막힌 뷰)을 읽는 뷰의 생성·삭제도 막는다 (본문에 `이름` 이 나오면 읽는 것으로 본다)
+// 본문이 읽는 객체 이름: FROM/JOIN 뒤 식별자. 토큰으로 나눌 수 없으면 `이름` 이 나오기만 해도 읽는 것으로 본다
+const readsName = (body: string, name: string): boolean => tableReferences(body)?.includes(name) ?? body.includes(q(name));
+
+// 막힌 테이블(또는 막힌 뷰)을 읽는 뷰의 생성·삭제도 막는다
 function viewConflicts(views: ViewDiff[], blocked: ReadonlySet<string>): Conflicts {
   const out: Conflicts = new Map();
   const names = new Set(blocked);
-  const reads = (v: ViewDiff) => [...names].filter((n) => [v.from?.body, v.to?.body].some((b) => b?.includes(q(n))));
+  const reads = (v: ViewDiff) => [...names].filter((n) => [v.from?.body, v.to?.body].some((b) => b !== undefined && readsName(b, n)));
   for (;;) {
     const before = out.size;
     for (const v of views) {
