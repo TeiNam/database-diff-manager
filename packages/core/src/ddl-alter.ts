@@ -1,11 +1,12 @@
 // 변경 테이블 하나의 ALTER TABLE 문장들 (스펙 4.6의 5·6단계)
 import { baseColumns, charsetOptions, charsetPlan, type CharsetPlan } from './charset-ddl';
+import { commentLine, commentLines } from './comment-text';
 import { charsetMaxlen, keyLimit, oversizedIndexes, rowFormatOf } from './convert-keys';
 import type { Change, OptionChange, TableDiff } from './diff';
 import { quoteIdent as q, quoteString, tokenize } from './lexer';
 import type { Column, Index, IndexKind, Table } from './model';
 import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated, indexNote, printable } from './partial-fill';
-import { partitionBodies, partitionRedefinition } from './partition-ddl';
+import { partitionBodies, partitionRedefinition, type PartitionStatement } from './partition-ddl';
 import { printCheck, printColumn, printIndexParts } from './print';
 
 // 문장 본문: sql은 ';' 없음(delimited 제외). comment=true면 '-- ' 주석 줄로만 이루어진다
@@ -31,11 +32,13 @@ const OPTION_RESET: Record<string, string> = {
 };
 
 export const sqlBody = (sql: string, notes: string[] = []): StatementBody => (notes.length ? { sql, comment: false, notes } : { sql, comment: false });
-export const commentBody = (text: string): StatementBody => ({ sql: text, comment: true });
+// 실행할 SQL 없는 안내 문장 한 줄. message 는 '-- ' 없이 넘기고, 이름 같은 사용자 유래 문자열의 줄바꿈은 이스케이프된다 (comment-text)
+const commentBody = (message: string): StatementBody => ({ sql: commentLine(message), comment: true });
+export const manualNote = (reason: string): StatementBody => commentBody(`[수동 확인 필요] ${reason}`);
 
 // 실행하면 안 되는 문장: 사유와 함께 SQL을 주석 처리해 보여 준다
 export function manualBody(reason: string, sql: string, notes: string[] = []): StatementBody {
-  const text = [`-- [수동 확인 필요] ${reason}`, ...sql.split('\n').map((l) => `-- ${l}`)].join('\n');
+  const text = `${commentLine(`[수동 확인 필요] ${reason}`)}\n${commentLines(sql)}`;
   return notes.length ? { sql: text, comment: true, notes } : { sql: text, comment: true };
 }
 
@@ -61,7 +64,7 @@ const storageReason = (table: string, storage: string[], virtual: string[]): str
 const storageOf = (c: Column) => (c.generated ? (c.generated.stored ? 'STORED' : 'VIRTUAL') : 'NONE');
 
 export function alterStatements(d: TableDiff): StatementBody[] {
-  if (d.unparsed) return [commentBody(`-- [수동 확인 필요] ${d.name}: 파싱할 수 없는 DDL이 변경되었습니다. 원문을 비교하세요`)];
+  if (d.unparsed) return [manualNote(`${d.name}: 파싱할 수 없는 DDL이 변경되었습니다. 원문을 비교하세요`)];
   const planned = planOptions(d);
   const main = alterClauses(d, planned);
   return alterBodies(d, planned, main);
@@ -135,7 +138,7 @@ function alterBodies(d: TableDiff, planned: Planned, main: Collected): Statement
   }
   out.push(...optionNotes(options).map(commentBody));
   if (redefinition) return out;
-  for (const p of partitionBodies(d)) out.push(p.sql.startsWith('--') ? commentBody(p.sql) : sqlBody(p.sql, p.notes));
+  out.push(...partitionBodies(d).map(partitionBody));
   return out;
 }
 
@@ -151,15 +154,18 @@ function mergedBodies(d: TableDiff, planned: Planned, main: Collected): Statemen
   const out = [reason ? manualBody(reason, sql, notes) : sqlBody(sql, notes)];
   const widened = plan!.widened ?? new Set<string>();
   const post: Collected = { clauses: [], notes: [...widenedNotes], missing: [], storage: [], virtual: [], dropCount: 0 };
-  columnClauses(d, widened, post, (n) => widened.has(n));
+  columnClauses(d, widened, post, (n) => widened.has(n), 'post');
   if (post.clauses.length) {
     const postSql = alter(d.name, post.clauses);
     out.push(reason ? manualBody(`${d.name}: 앞선 ALTER 가 수동 확인 문장이므로 함께 확인한 뒤 실행하세요`, postSql, post.notes) : sqlBody(postSql, post.notes));
   }
   out.push(...optionNotes(options).map(commentBody));
-  for (const p of partitionBodies(d)) out.push(p.sql.startsWith('--') ? commentBody(p.sql) : sqlBody(p.sql, p.notes));
+  out.push(...partitionBodies(d).map(partitionBody));
   return out;
 }
+
+// '--' 로 시작하는 파티션 문장은 partition-ddl 이 commentLine 으로 만든 안내다
+const partitionBody = (p: PartitionStatement): StatementBody => (p.sql.startsWith('--') ? { sql: p.sql, comment: true } : sqlBody(p.sql, p.notes));
 
 const partitionKeyNote = (columns: string[]): string =>
   `파티션 함수가 쓰는 컬럼(${columns.join(', ')})을 바꾸므로 파티션 재정의를 같은 ALTER 에 넣습니다 (따로 실행하면 error 3855)`;
@@ -182,7 +188,8 @@ function convertBody(d: TableDiff, planned: Planned, missing: string[]): Stateme
 }
 
 // 절 순서: 삭제(CHECK·인덱스·컬럼) → 컬럼 추가·변경(TARGET 순서) → 인덱스 추가·rename·가시성 → CHECK 추가 → 옵션.
-// CONVERT 와 합치는 경우(merged) 넓힌 TEXT 계열 컬럼은 뒤 ALTER 에서 정의하므로 뺀다
+// CONVERT 와 합치는 경우(merged) 넓힌 TEXT 계열 컬럼은 뒤 ALTER 에서 정의하므로 뺀다 — rename 된 컬럼은 이름만 본 ALTER 에서 바꾼다
+// (같은 ALTER 의 인덱스·CHECK 가 새 이름을 쓴다. 미루면 'Key column doesn't exist' error 1072, 8.4 실측)
 function alterClauses(d: TableDiff, planned: Planned): Collected {
   const out: Collected = { clauses: [], notes: [], missing: [], storage: [], virtual: [], dropCount: 0 };
 
@@ -191,7 +198,7 @@ function alterClauses(d: TableDiff, planned: Planned): Collected {
   for (const i of d.indexes) if (rebuildsIndex(i) || i.op === 'drop') out.clauses.push(dropIndex(i.oldName ?? i.name, i.from!.kind));
   for (const c of d.columns) if (c.op === 'drop') out.clauses.push(`DROP COLUMN ${q(c.name)}`);
   out.dropCount = out.clauses.length;
-  columnClauses(d, planned.plan?.columns ?? new Set(), out, (n) => !widened.has(n));
+  columnClauses(d, planned.plan?.columns ?? new Set(), out, (n) => !widened.has(n), 'main');
   for (const i of d.indexes) {
     if (i.op === 'add' || rebuildsIndex(i)) {
       const idx = fillIndex(i.to!, i.op === 'add' ? undefined : i.from);
@@ -216,15 +223,20 @@ export function inheritCollation(c: Column, t: Table): Column {
   return c.collation === t.options.find((o) => o.key === 'COLLATE')?.value ? { ...c, collation: undefined } : c;
 }
 
-function columnClauses(d: TableDiff, forced: ReadonlySet<string>, out: Collected, include: (name: string) => boolean = () => true): void {
+// split: merged 에서 넓힌 TEXT 컬럼 정의를 두 ALTER 로 나눌 때. 'main' 은 빠진(include=false) rename 컬럼의 RENAME COLUMN 만 내고,
+// 'post' 는 이미 새 이름이 된 rename 컬럼을 새 이름으로 MODIFY 한다
+function columnClauses(d: TableDiff, forced: ReadonlySet<string>, out: Collected, include: (name: string) => boolean = () => true, split?: 'main' | 'post'): void {
   const to = d.to!;
   // 삭제는 앞에서 DROP 으로 처리했다. 같은 이름으로 들어오는 rename(x→y, 기존 y 삭제)을 덮지 않도록 뺀다
   const changes = new Map(d.columns.filter((c) => c.op !== 'drop').map((c) => [c.name, c]));
   const moved = new Set(d.moved);
   const bases = baseColumns(d);
   to.columns.forEach((raw, idx) => {
-    if (!include(raw.name)) return;
     const ch = changes.get(raw.name);
+    if (!include(raw.name)) {
+      if (split === 'main' && ch?.op === 'rename') out.clauses.push(`RENAME COLUMN ${q(ch.oldName!)} TO ${q(raw.name)}`);
+      return;
+    }
     const isMoved = moved.has(raw.name);
     if (!isMoved && !forced.has(raw.name) && (!ch || ch.op === 'drop')) return;
     const col = fillColumn(raw, ch?.op === 'add' ? undefined : bases.get(raw.name));
@@ -239,7 +251,7 @@ function columnClauses(d: TableDiff, forced: ReadonlySet<string>, out: Collected
     if (ch?.op === 'add') out.clauses.push(`ADD COLUMN ${def}${idx === to.columns.length - 1 ? '' : pos}`);
     else if (ch?.op === 'rename' && !ch.fields.length && !isMoved && !forced.has(raw.name)) {
       out.clauses.push(`RENAME COLUMN ${q(ch.oldName!)} TO ${q(col.name)}`);
-    } else if (ch?.op === 'rename') out.clauses.push(`CHANGE COLUMN ${q(ch.oldName!)} ${def}${isMoved ? pos : ''}`);
+    } else if (ch?.op === 'rename' && split !== 'post') out.clauses.push(`CHANGE COLUMN ${q(ch.oldName!)} ${def}${isMoved ? pos : ''}`);
     else out.clauses.push(`MODIFY COLUMN ${def}${isMoved ? pos : ''}`);
   });
 }
@@ -272,5 +284,5 @@ function optionClauses(changes: OptionChange[]): string[] {
 function optionNotes(changes: OptionChange[]): string[] {
   return changes
     .filter((o) => o.to === undefined && !OPTION_RESET[o.key])
-    .map((o) => `-- [수동 확인 필요] ${o.key} 옵션 제거: 기본값으로 되돌리는 구문이 없습니다`);
+    .map((o) => `[수동 확인 필요] ${o.key} 옵션 제거: 기본값으로 되돌리는 구문이 없습니다`);
 }

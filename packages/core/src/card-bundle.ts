@@ -1,5 +1,6 @@
 // 객체 카드 복사 묶음: 그 객체의 문장과, 그 문장들이 새 BASE DB 에서 단독으로 성공하는 데 필요한 다른 객체 문장 (전체 DDL 순서의 부분 집합)
 import type { Statement } from './ddl';
+import { routineNameKey } from './diff';
 
 type Kind = Statement['kind'];
 
@@ -19,11 +20,14 @@ export function objectStatements(stmts: Statement[], kind: Kind, name: string): 
   const incoming = (t: string) => stmts
     .filter((st) => st.kind === 'table' && st.object !== t && Boolean(st.fkDrops?.includes(t)))
     .flatMap((st) => (st.op === 'drop' ? [st] : ofTable(st.object)));
-  // 뷰 본문이 참조하는 객체(테이블·뷰·함수)의 생성·변경 문장. 참조(reads)는 뷰 생성 순서와 같은 토큰 기반 판정이다 (objectReferences).
+  // 뷰 본문이 참조하는 객체의 생성·변경 문장. 참조는 뷰 생성 순서와 같은 토큰 기반 판정이다 (objectReferences). FROM/JOIN 참조(reads)는
+  // 테이블·뷰 문장만, 함수 호출(calls, 대소문자 무시)은 함수 문장만 묶는다 — 함수 f() 만 부르는 뷰에 테이블 f 의 DROP COLUMN 을 넣지 않는다.
   // 자기 자신(같은 종류·이름)만 빼므로 같은 이름의 함수를 부르는 뷰는 그 함수 생성을 포함한다
   const used = (view: Statement) => {
     const reads = new Set(view.reads ?? []);
-    return stmts.filter((st) => !(st.kind === view.kind && st.object === view.object) && st.op !== 'drop' && reads.has(st.object))
+    const calls = new Set((view.calls ?? []).map(routineNameKey));
+    const isUsed = (st: Statement) => (isRelation(st.kind) ? reads.has(st.object) : st.kind === 'function' && calls.has(routineNameKey(st.object)));
+    return stmts.filter((st) => !(st.kind === view.kind && st.object === view.object) && st.op !== 'drop' && isUsed(st))
       .flatMap((st) => (st.kind === 'table' ? prepare(st.object) : [st]));
   };
   // 이름 N 을 차지하는(생성·rename into) 문장 앞에 N 을 비워야 하는 문장: 같은 이름 공간(테이블·뷰는 공유, 함수·프로시저는 별개)의

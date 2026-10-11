@@ -1,0 +1,1 @@
+{ "seed": "INSERT INTO `precious` VALUES (1)", "query": "SELECT `id` FROM `precious`", "rows": [{ "id": 1 }] }

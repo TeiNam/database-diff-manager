@@ -1,10 +1,10 @@
 // 그대로 실행하면 데이터가 어긋나거나 DDL 이 실패하는 테이블·뷰의 문장을 수동 확인 문장으로 바꾼다 (스펙 4.6)
 // 원칙: MySQL 로 검증한 패턴만 실행 SQL 로 내고, 얽힌 조합은 관련 객체 전체를 막는다
 import type { Statement } from './ddl';
-import { commentBody, isAlterBlocked, manualBody } from './ddl-alter';
+import { isAlterBlocked, manualBody, manualNote } from './ddl-alter';
 import { retypeGroups } from './fk-retype';
-import type { SchemaDiff, TableDiff, ViewDiff } from './diff';
-import { quoteIdent as q, viewReferences } from './lexer';
+import { routineNameKey, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
+import { objectReferences } from './lexer';
 import { renameGroups } from './table-rename';
 
 interface Conflict {
@@ -16,8 +16,9 @@ type Conflicts = Map<string, Conflict>;
 
 export function guardStatements(stmts: Statement[], diff: SchemaDiff): Statement[] {
   const alterBlocked = alterBlockedNames(diff);
-  const tables = spreadConflicts(diff, seedConflicts(diff), alterBlocked);
-  const views = viewConflicts(diff.views, new Set([...blockedNames(diff, tables), ...alterBlocked, ...unparsedObjects(diff)]));
+  const tables = spreadConflicts(diff, seedConflicts(diff, stmts), alterBlocked);
+  const unparsed = unparsedObjects(diff);
+  const views = viewConflicts(diff.views, new Set([...blockedNames(diff, tables), ...alterBlocked, ...unparsed.views]), unparsed.functions);
   if (!tables.size && !views.size) return stmts;
   return guard(stmts, tables, views);
 }
@@ -40,8 +41,8 @@ const addConflict = (out: Conflicts, table: string, reason: string, note: string
 };
 
 // 출발점: 순서로 풀 수 없는 rename ('이름 충돌'로 적용되지 않은 매핑. 컬럼은 TARGET 테이블, 테이블 매핑은 옛·새 이름 두
-// 테이블 — 옛 이름 테이블이 그대로 남거나 새 이름 테이블이 따로 만들어진다)과 diff 가 찾은 수동 확인 테이블
-function seedConflicts(diff: SchemaDiff): Conflicts {
+// 테이블 — 옛 이름 테이블이 그대로 남거나 새 이름 테이블이 따로 만들어진다), diff 가 찾은 수동 확인 테이블, 생성이 막힌 새 테이블
+function seedConflicts(diff: SchemaDiff, stmts: Statement[]): Conflicts {
   const out: Conflicts = new Map();
   for (const { mapping: m, reason } of diff.ignoredRenames) {
     if (reason !== '이름 충돌') continue;
@@ -53,20 +54,22 @@ function seedConflicts(diff: SchemaDiff): Conflicts {
     }
   }
   for (const t of diff.manualTables) addConflict(out, t.table, t.reason, t.note);
-  // 파싱 실패 새 테이블: CREATE 를 실행하지 않으므로 그 테이블을 참조하는 FK·읽는 뷰도 막는다
-  for (const d of diff.tables) {
-    if (d.op === 'add' && d.to?.parseError) addConflict(out, d.name, `${d.name}: 파싱할 수 없는 테이블 정의입니다 — 원문을 확인해 직접 실행하세요`, '파싱 실패 객체는 생성 문장을 실행하지 않습니다');
+  // 생성 문장이 수동 확인(주석)인 새 테이블: 이유(파싱 실패, MD 생성식 미상·파싱 실패 등)와 무관하게 CREATE 를 실행하지 않으므로
+  // 그 테이블을 참조하는 FK(바뀌는 FK 는 DROP/ADD 를 함께)·읽는 뷰도 막는다. 실제로 만든 문장으로 판정해 이유가 늘어도 빠지지 않는다
+  for (const st of stmts) {
+    if (st.kind !== 'table' || st.op !== 'add' || !st.comment || st.fkAdds) continue;
+    addConflict(out, st.object, `${st.object}: 생성 문장이 수동 확인이라 실행하지 않습니다 — 원문을 확인해 직접 실행하세요`, '생성 문장을 실행하지 않는 테이블입니다');
   }
   return out;
 }
 
-// 생성 문장을 실행하지 않는 파싱 실패 객체 이름: 새 함수·프로시저, TARGET 뷰 (그 객체를 읽거나 부르는 뷰를 막는다).
-// 바뀌는 루틴은 옛 정의를 지우지 않으므로(2단계 수동 확인) 남는다
-function unparsedObjects(diff: SchemaDiff): string[] {
-  return [
-    ...diff.routines.filter((r) => r.op === 'add' && r.to?.parseError).map((r) => r.name),
-    ...diff.views.filter((v) => v.op !== 'drop' && v.to?.parseError).map((v) => v.name),
-  ];
+// 생성 문장을 실행하지 않는 파싱 실패 객체 이름: 새 함수, TARGET 뷰 (그 함수를 부르거나 그 뷰를 읽는 뷰를 막는다. 뷰는 프로시저를
+// 부를 수 없다). 바뀌는 루틴은 옛 정의를 지우지 않으므로(2단계 수동 확인) 남는다
+function unparsedObjects(diff: SchemaDiff): { functions: string[]; views: string[] } {
+  return {
+    functions: diff.routines.filter((r) => r.kind === 'function' && r.op === 'add' && r.to?.parseError).map((r) => r.name),
+    views: diff.views.filter((v) => v.op !== 'drop' && v.to?.parseError).map((v) => v.name),
+  };
 }
 
 // 막힌 테이블의 옛·새 이름
@@ -122,14 +125,19 @@ const referencingFks = (d: TableDiff, blocked: ReadonlySet<string>): { name: str
   return d.foreignKeys.filter((f) => [f.from?.refTable, f.to?.refTable].some((n) => n !== undefined && blocked.has(n)));
 };
 
-// 본문이 쓰는 객체 이름: FROM/JOIN 뒤 테이블·뷰와 함수 호출 (viewReferences). 토큰으로 나눌 수 없으면 `이름` 이 나오기만 해도 쓰는 것으로 본다
-const readsName = (body: string, name: string): boolean => viewReferences(body)?.includes(name) ?? body.includes(q(name));
+// 본문이 쓰는 막힌 객체: FROM/JOIN 참조는 막힌 테이블·뷰와, 함수 호출은 막힌 함수와(대소문자 무시) 비교한다 (objectReferences —
+// 토큰으로 나눌 수 없으면 `이름` 이 나오기만 해도 쓰는 것으로 본다). 막힌 테이블 f 와 같은 이름의 함수 f() 만 부르는 뷰는 막지 않는다
+const blockedUses = (body: string, relations: ReadonlySet<string>, functions: readonly string[]): string[] => {
+  const refs = objectReferences(body, [...relations, ...functions]);
+  const calls = new Set(refs.routines.map(routineNameKey));
+  return [...refs.relations.filter((n) => relations.has(n)), ...functions.filter((n) => calls.has(routineNameKey(n)))];
+};
 
-// 막힌 테이블(또는 막힌 뷰)을 읽는 뷰의 생성·삭제도 막는다
-function viewConflicts(views: ViewDiff[], blocked: ReadonlySet<string>): Conflicts {
+// 막힌 테이블·뷰를 읽거나 막힌 함수를 부르는 뷰의 생성·삭제도 막는다
+function viewConflicts(views: ViewDiff[], blocked: ReadonlySet<string>, functions: readonly string[]): Conflicts {
   const out: Conflicts = new Map();
   const names = new Set(blocked);
-  const reads = (v: ViewDiff) => [...names].filter((n) => [v.from?.body, v.to?.body].some((b) => b !== undefined && readsName(b, n)));
+  const reads = (v: ViewDiff) => [...new Set([v.from?.body, v.to?.body].flatMap((b) => (b === undefined ? [] : blockedUses(b, names, functions))))];
   for (;;) {
     const before = out.size;
     for (const v of views) {
@@ -155,7 +163,7 @@ function guard(stmts: Statement[], tables: Conflicts, views: Conflicts): Stateme
   });
   const covered = new Set(stmts.flatMap((st) => (st.kind === 'table' ? st.related ?? [st.object] : [])));
   const extra = [...tables].filter(([name]) => !covered.has(name)).map(([name, c]): Statement => (
-    { object: name, kind: 'table', op: 'modify', ...commentBody(`-- [수동 확인 필요] ${c.reason}`), notes: c.notes }
+    { object: name, kind: 'table', op: 'modify', ...manualNote(c.reason), notes: c.notes }
   ));
   return [...guarded, ...extra];
 }

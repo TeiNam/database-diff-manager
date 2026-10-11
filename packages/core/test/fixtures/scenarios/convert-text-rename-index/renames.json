@@ -1,0 +1,1 @@
+[{ "kind": "column", "table": "post", "from": "body", "to": "content" }]

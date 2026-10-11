@@ -445,6 +445,21 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(statements.map((s) => s.kind)).toEqual(['function', 'view']);
   });
 
+  it('함수 호출은 함수 문장만, FROM/JOIN 참조는 테이블·뷰 문장만 묶는다 — 함수 f() 만 부르는 뷰에 테이블 f 의 변경을 넣지 않고, 함수 이름은 대소문자 무시 (10회차 2)', () => {
+    const { statements, dependencies } = cardOf('card-function-table-same-name', 'view', 'v');
+    expect(statements.map((s) => `${s.kind} ${s.object}`)).toEqual(['function Gx', 'view v']);
+    expect(dependencies).toEqual(['Gx']);
+  });
+
+  it('막힌 테이블과 같은 이름의 함수만 부르는 뷰는 막지 않는다 (10회차 2)', () => {
+    const fn = 'DELIMITER ;;\nCREATE DEFINER=`root`@`%` FUNCTION `pe`() RETURNS int\n    NO SQL\nRETURN 1;;\nDELIMITER ;';
+    const view = 'CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `v` AS select `pe`() AS `n`;';
+    const pe = "CREATE TABLE `pe` (\n  `id` int NOT NULL,\n  `a` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix` (`a`) /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"y\": 2}' */\n) ENGINE=InnoDB;";
+    const stmts = generateDdl(diffSchemas(parseSqlDump(fn).model, parseSqlDump(`${pe}\n${view}\n${fn}`).model));
+    expect(stmts.find((s) => s.kind === 'table')?.comment).toBe(true);
+    expect(stmts.find((s) => s.kind === 'view')?.comment).toBe(false);
+  });
+
   it('뷰 카드와 뷰 생성 순서는 같은 토큰 기반 참조를 쓴다: 별칭 `z` 는 뷰 z 참조가 아니다 (9회차 3)', () => {
     const { stmts, statements } = cardOf('view-order-alias', 'view', 'a');
     expect(stmts.map((s) => s.object)).toEqual(['a', 'z']);
@@ -496,5 +511,42 @@ describe('CONVERT 직후 키 길이 일반 판정 (9회차 4)', () => {
     const stmts = ddl(t('t', '  `a` varchar(100) DEFAULT NULL,\n  KEY `ix` (`a`)', 'DEFAULT CHARSET=latin1'),
       t('t', '  `a` varchar(100) NOT NULL,\n  KEY `ix` (`a`)', UTF8MB4));
     expect(stmts.map((s) => s.sql)).toEqual(['ALTER TABLE `t` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci', 'ALTER TABLE `t`\n  MODIFY COLUMN `a` varchar(100) NOT NULL']);
+  });
+});
+
+describe('생성이 막힌 테이블로의 FK (10회차 3)', () => {
+  const INFO = '**Information**\n|Table type|Engine|Row format|Collate|Comment|\n|---|---|---|---|---|\n|BASE TABLE|InnoDB|Dynamic|utf8mb4_0900_ai_ci||\n\n';
+  const COLS = '**Columns**\n|Name|Type|Nullable|Default|Charset|Collation|Key|Extra|Comment|\n|---|---|---|---|---|---|---|---|---|\n';
+  const mdTableOf = (name: string, rows: string, fk = '') => `## ${name}\n${INFO}${COLS}${rows}\n${fk ? `**Constraint**\n${fk}\n\n` : ''}`;
+  const md = (tables: string[], names: string[]) => `# s\n\n## Table List\n${names.map((n) => `- [${n} ()](#${n})`).join('\n')}\n\n${tables.join('\n')}`;
+  const sqlT = (name: string, cols: string) => `CREATE TABLE \`${name}\` (\n${cols}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\n`;
+  const base = parseSqlDump(sqlT('p', '  `id` int NOT NULL,\n  PRIMARY KEY (`id`)')
+    + sqlT('c', '  `id` int NOT NULL,\n  `pid` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `fk_c` (`pid`),\n  CONSTRAINT `fk_c` FOREIGN KEY (`pid`) REFERENCES `p` (`id`)')).model;
+
+  it('MD 새 테이블 g 가 생성식 미상으로 CREATE 수동 확인이면, c 의 FK 를 p→g 로 바꾸는 DROP/ADD 도 실행하지 않는다', () => {
+    const target = parseMdDump(md([
+      mdTableOf('p', '|id|int|NO||||PRI|||\n'),
+      mdTableOf('g', '|id|int|NO||||PRI|||\n|v|int|YES|||||VIRTUAL GENERATED||\n'),
+      mdTableOf('c', '|id|int|NO||||PRI|||\n|pid|int|NO||||MUL|||\n', '- fk_c FOREIGN KEY (pid) Reference g.id ON DELETE RESTRICT ON UPDATE RESTRICT'),
+    ], ['p', 'g', 'c'])).model;
+    const stmts = generateDdl(diffSchemas(base, target));
+    const g = stmts.filter((s) => s.object === 'g');
+    expect(g.length).toBeGreaterThan(0);
+    expect(g.every((s) => s.comment)).toBe(true);
+    const c = stmts.filter((s) => s.object === 'c');
+    expect(c.map((s) => s.comment)).toEqual(c.map(() => true));
+    expect(c.some((s) => s.sql.includes('DROP FOREIGN KEY'))).toBe(true);
+    expect(c.some((s) => s.sql.includes('ADD CONSTRAINT `fk_c`'))).toBe(true);
+  });
+
+  it('MD 파싱 실패 새 테이블을 참조하는 새 FK 도 막는다', () => {
+    const target = parseMdDump(md([
+      mdTableOf('p', '|id|int|NO||||PRI|||\n'),
+      mdTableOf('g', '|id|int|NO||||PRI|||\n', '- broken'),
+      mdTableOf('c', '|id|int|NO||||PRI|||\n|pid|int|NO||||MUL|||\n', '- fk_c FOREIGN KEY (pid) Reference g.id ON DELETE RESTRICT ON UPDATE RESTRICT'),
+    ], ['p', 'g', 'c'])).model;
+    expect(target.tables.find((t) => t.name === 'g')?.parseError).toBeDefined();
+    const stmts = generateDdl(diffSchemas(base, target));
+    expect(stmts.filter((s) => s.object === 'c').every((s) => s.comment)).toBe(true);
   });
 });

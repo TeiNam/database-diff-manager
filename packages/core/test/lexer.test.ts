@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { quotedIdentifiers, quoteIdent, quoteString, tableReferences, tokenize, viewReferences } from '../src/lexer';
+import { objectReferences, quotedIdentifiers, quoteIdent, quoteString, tableReferences, tokenize, viewReferences } from '../src/lexer';
 
 describe('tokenize', () => {
   it('식별자·문자열·단어·숫자·기호를 구분한다', () => {
@@ -57,11 +57,15 @@ describe('tableReferences · quotedIdentifiers (5회차 6)', () => {
   });
 });
 
-describe('viewReferences (8회차 2)', () => {
-  it('FROM/JOIN 테이블과 함수 호출만 내고 별칭·컬럼·문자열은 뺀다', () => {
+describe('viewReferences (8회차 2, 10회차 2)', () => {
+  it('FROM/JOIN 테이블(relations)과 함수 호출(routines)을 나눠 내고 별칭·컬럼·문자열은 뺀다', () => {
     const body = "select `shop`.`tax`(`o`.`amt`) AS `chat_log`,'`log`' AS `s` from (`o` join `shop`.`m`) where coalesce(`o`.`x`, 0)";
-    expect(viewReferences(body)).toEqual(['o', 'm', 'tax', 'coalesce']);
+    expect(viewReferences(body)).toEqual({ relations: ['o', 'm'], routines: ['tax', 'coalesce'] });
     expect(viewReferences("from `a` where 'x")).toBeUndefined();
+  });
+
+  it('토큰으로 나눌 수 없으면 후보 중 `이름` 이 나오는 것을 양쪽 모두로 본다 (안전 쪽)', () => {
+    expect(objectReferences("select `f`() from `t` where 'x", ['f', 't', 'u'])).toEqual({ relations: ['f', 't'], routines: ['f', 't'] });
   });
 });
 

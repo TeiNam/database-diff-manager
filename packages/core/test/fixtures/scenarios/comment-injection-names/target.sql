@@ -1,0 +1,47 @@
+/* Database : shop */
+CREATE TABLE `ev
+DROP TABLE precious;` (
+  `id` int NOT NULL,
+  `c
+DROP TABLE precious;*/x` bigint DEFAULT NULL,
+  `n
+DELIMITER ;;
+DROP TABLE precious;;` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix
+# DROP TABLE precious;` (`n
+DELIMITER ;;
+DROP TABLE precious;;`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `pe
+DROP TABLE precious;` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix` (`a`) /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{"y": 2}' */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `precious` (
+  `id` int NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `v
+DROP TABLE precious;` AS select `ev
+DROP TABLE precious;`.`c
+DROP TABLE precious;*/x` AS `c
+DROP TABLE precious;*/x` from `ev
+DROP TABLE precious;`;
+
+/* Routines */
+SET @OLD_ROUTINE_SQL_MODE = @@SQL_MODE, SQL_MODE = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+DELIMITER ;;
+CREATE DEFINER=`root`@`localhost` FUNCTION `fn
+DELIMITER ;
+DROP TABLE precious;`() RETURNS int
+    NO SQL
+    DETERMINISTIC
+RETURN 1;;
+DELIMITER ;
+SET SQL_MODE = @OLD_ROUTINE_SQL_MODE;

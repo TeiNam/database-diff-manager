@@ -168,18 +168,27 @@ export function tableReferences(src: string): string[] | undefined {
 // '(' 앞에 오지만 함수 이름이 아닌 키워드
 const NOT_CALL = /^(FROM|JOIN|STRAIGHT_JOIN|IN|ON|AS|AND|OR|NOT|XOR|EXISTS|WHERE|SELECT|USING|ANY|ALL|SOME|UNION|VALUES|OVER|WINDOW|LATERAL|WITH|INTERVAL|HAVING|BY|THEN|ELSE|WHEN|CASE|IS)$/i;
 
-// 뷰 본문이 쓰는 객체 이름: FROM/JOIN 뒤 테이블·뷰와 `이름`( 형태의 함수 호출 (`schema`.`fn`( 은 fn).
+// 뷰 본문이 쓰는 객체 이름. relations: FROM/JOIN 뒤 테이블·뷰 (테이블·뷰 이름 공간), routines: `이름`( 형태의 함수 호출
+// (`schema`.`fn`( 은 fn. 함수 이름 공간 — 같은 이름의 테이블과 무관하다)
+export interface References {
+  relations: string[];
+  routines: string[];
+}
+
 // 별칭(AS 뒤)·컬럼 참조(`t`.`c`)·문자열·주석 안의 이름은 빼고, 토큰으로 나눌 수 없으면 undefined
-export function viewReferences(src: string): string[] | undefined {
+export function viewReferences(src: string): References | undefined {
   const tokens = tryTokenize(src);
   const tables = tableReferences(src);
   if (!tokens || !tables) return undefined;
   const calls = tokens.filter((tok, i) => (tok.t === 'ident' || (tok.t === 'word' && !NOT_CALL.test(tok.v))) && tokens[i + 1]?.t === 'op' && tokens[i + 1].v === '(').map((tok) => tok.v);
-  return [...new Set([...tables, ...calls])];
+  return { relations: [...new Set(tables)], routines: [...new Set(calls)] };
 }
 
-// 뷰 본문이 쓰는 객체 이름 (viewReferences). 토큰으로 나눌 수 없으면 후보 중 `이름` 이 나오기만 해도 쓰는 것으로 본다 (안전 쪽).
-// 뷰 생성 순서와 객체 카드 복사 묶음이 같은 판정을 쓰도록 한곳에 둔다
-export function objectReferences(body: string, candidates: Iterable<string>): string[] {
-  return viewReferences(body) ?? [...new Set(candidates)].filter((n) => body.includes(quoteIdent(n)));
+// 뷰 본문이 쓰는 객체 이름 (viewReferences). 토큰으로 나눌 수 없으면 후보 중 `이름` 이 나오기만 해도 양쪽 모두로 본다 (안전 쪽).
+// 뷰 생성 순서·객체 카드 복사 묶음·수동 확인 전파가 같은 판정을 쓰도록 한곳에 둔다
+export function objectReferences(body: string, candidates: Iterable<string>): References {
+  const refs = viewReferences(body);
+  if (refs) return refs;
+  const hits = [...new Set(candidates)].filter((n) => body.includes(quoteIdent(n)));
+  return { relations: hits, routines: hits };
 }
