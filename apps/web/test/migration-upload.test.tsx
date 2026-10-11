@@ -22,7 +22,7 @@ describe('MigrationUploadDialog', () => {
     expect(within(preview).getByText(/룰 19개/)).toBeInTheDocument();
     const counts = within(preview).getByRole('list', { name: '룰 종류별 개수' });
     expect(within(counts).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
-      'selection include 3', 'selection exclude 0', '테이블 이름변경 3', '컬럼 이름변경 9', '컬럼삭제 2', '스키마 이름변경 1', '반영하지 않는 룰 1',
+      'selection include 3', 'selection exclude 0', '테이블 이름변경 3', '컬럼 이름변경 9', '컬럼삭제 2', '스키마 이름변경 1', '반영하지 않는 룰 1', '목적지 충돌 룰 0',
     ]);
     const checks = within(preview).getByRole('list', { name: 'Schema 이름 확인' });
     expect(checks).toHaveTextContent('As-Is: 파일 legacy · Schema legacy — 일치');

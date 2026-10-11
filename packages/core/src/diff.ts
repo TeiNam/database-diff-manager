@@ -10,7 +10,7 @@ import { isOtherKindFamily } from './partial-fill';
 import { subpartitionKey } from './partition-ddl';
 import { printColumn, printRoutine, printTable, printView } from './print';
 import { findManualTables, type ManualTable } from './manual-review';
-import { findIgnoredRenames, type IgnoredRename } from './rename-check';
+import { conflictingRenames, findIgnoredRenames, type IgnoredRename } from './rename-check';
 
 export { renamedAutoName } from './auto-name';
 
@@ -114,7 +114,9 @@ const fkAction = (v: unknown) => (v === undefined || v === 'RESTRICT' || v === '
 const fkEqual: Equal = (f, a, b) => (f === 'onDelete' || f === 'onUpdate' ? fkAction(a) === fkAction(b) : sameJson(f, a, b));
 
 export function diffSchemas(base: SchemaModel, target: SchemaModel, renames: RenameMapping[] = []): SchemaDiff {
-  const tables = diffTables(base.tables, target.tables, renames);
+  // 매핑 충돌(다대일·일대다)은 어느 것도 적용하지 않는다 — ignoredRenames 에 '매핑 충돌' 로 남고 DDL 가드가 관련 테이블을 막는다 (17회차 2)
+  const conflicts = conflictingRenames(renames);
+  const tables = diffTables(base.tables, target.tables, renames.filter((r) => !conflicts.has(r)));
   const all = [...base.tables, ...target.tables, ...base.views, ...target.views];
   const routinesUnknown = Boolean(base.routinesUnknown || target.routinesUnknown);
   return {
@@ -220,7 +222,7 @@ function hasChanges(d: TableDiff): boolean {
     || d.checks.length > 0 || d.options.length > 0 || d.partition !== undefined;
 }
 
-// 같은 원본의 매핑이 여러 개면 처음 것만 쓴다 (나머지는 ignoredRenames에 '중복 매핑')
+// 같은 원본의 매핑이 여러 개면 처음 것만 쓴다 (목적지가 다른 매핑은 diffSchemas 가 매핑 충돌로 먼저 뺀다 — 남는 것은 똑같은 매핑의 반복)
 function mappingOf(renames: RenameMapping[], kind: RenameMapping['kind'], table?: string): Map<string, string> {
   const out = new Map<string, string>();
   for (const r of renames) if (r.kind === kind && (table === undefined || r.table === table) && !out.has(r.from)) out.set(r.from, r.to);

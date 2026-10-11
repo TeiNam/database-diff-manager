@@ -31,7 +31,8 @@ function rejectSharedTargets(manual: RenameMapping[], dms: RenameMapping[]): voi
   const effective = [...dms.filter((r) => !manualKeys.has(renameKey(r))).map((r) => ({ r, isManual: false })), ...manual.map((r) => ({ r, isManual: true }))];
   const byTarget = new Map<string, typeof effective>();
   for (const e of effective) {
-    const key = `${e.r.kind}:${e.r.table ?? ''}:${e.r.to}`;
+    // MySQL 컬럼·인덱스 이름은 대소문자를 구분하지 않으므로 목적지는 대소문자를 무시해 비교한다 (diff 의 매핑 충돌 판정과 같다)
+    const key = `${e.r.kind}:${(e.r.table ?? '').toLowerCase()}:${e.r.to.toLowerCase()}`;
     byTarget.set(key, [...(byTarget.get(key) ?? []), e]);
   }
   const clash = [...byTarget.values()].find((list) => list.length > 1 && list.some((e) => e.isManual));

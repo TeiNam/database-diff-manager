@@ -3,8 +3,9 @@ import type { RenameMapping } from './diff';
 import { compileSelection, type DmsColumnRename, type DmsMapping, type DmsRemovedColumn, type DmsTableRename } from './dms-mapping';
 import type { Column, SchemaModel, Table } from './model';
 
-export type TableFlowStatus = 'ok' | 'missing-target' | 'missing-source' | 'excluded' | 'unmapped-target';
-export type ColumnFlowStatus = 'renamed' | 'same' | 'removed' | 'added' | 'dropped' | 'missing';
+// conflict: 서로 다른 As-Is 원본(룰 없이 같은 이름으로 이어지는 것 포함)이 같은 To-Be 목적지로 간다 (17회차 2). 검증 완료가 아니다
+export type TableFlowStatus = 'ok' | 'conflict' | 'missing-target' | 'missing-source' | 'excluded' | 'unmapped-target';
+export type ColumnFlowStatus = 'renamed' | 'same' | 'conflict' | 'removed' | 'added' | 'dropped' | 'missing';
 
 export interface ColumnFlow {
   asIs?: string;
@@ -25,8 +26,8 @@ export interface TableFlow {
 export interface MigrationFlowTotals {
   tables: Record<TableFlowStatus, number>;
   columns: Record<ColumnFlowStatus, number>;
-  inScope: number; // 전환 대상 테이블 (ok + missing-target + missing-source)
-  verified: number; // ok 이면서 컬럼 missing 이 없는 테이블
+  inScope: number; // 전환 대상 테이블 (ok + conflict + missing-target + missing-source)
+  verified: number; // ok 이면서 컬럼 missing·conflict 가 없는 테이블
 }
 
 export interface MigrationFlow {
@@ -36,8 +37,15 @@ export interface MigrationFlow {
   totals: MigrationFlowTotals;
 }
 
-const TABLE_STATUSES: TableFlowStatus[] = ['ok', 'missing-target', 'missing-source', 'excluded', 'unmapped-target'];
-const COLUMN_STATUSES: ColumnFlowStatus[] = ['renamed', 'same', 'removed', 'added', 'dropped', 'missing'];
+const TABLE_STATUSES: TableFlowStatus[] = ['ok', 'conflict', 'missing-target', 'missing-source', 'excluded', 'unmapped-target'];
+const COLUMN_STATUSES: ColumnFlowStatus[] = ['renamed', 'same', 'conflict', 'removed', 'added', 'dropped', 'missing'];
+
+// 같은 목적지(대소문자 무시)로 이어진 원본이 둘 이상인 행을 conflict 로 바꾼 새 목록 (paired: 짝이 맞은 행인지)
+function markConflicts<R extends { toBe?: string; status: string }>(rows: R[], paired: (r: R) => boolean, conflict: R['status']): R[] {
+  const counts = new Map<string, number>();
+  for (const r of rows) if (paired(r)) counts.set(r.toBe!.toLowerCase(), (counts.get(r.toBe!.toLowerCase()) ?? 0) + 1);
+  return rows.map((r) => (paired(r) && counts.get(r.toBe!.toLowerCase())! > 1 ? { ...r, status: conflict } : r));
+}
 
 type Resolve<T> = (name: string) => T | undefined;
 
@@ -94,7 +102,7 @@ function flowIndex(base: SchemaModel, target: SchemaModel, mapping: DmsMapping):
 export function buildMigrationFlow(base: SchemaModel, target: SchemaModel, mapping: DmsMapping): MigrationFlow {
   const consumed = new Set<Table>();
   const index = flowIndex(base, target, mapping);
-  const rows: TableFlow[] = base.tables.map((asIs) => tableRow(asIs, index, consumed));
+  const rows: TableFlow[] = markConflicts(base.tables.map((asIs) => tableRow(asIs, index, consumed)), (r) => r.status === 'ok', 'conflict');
   rows.push(...missingSourceRows(index, mapping, consumed));
   for (const t of target.tables) {
     if (!consumed.has(t)) rows.push({ toBe: t.name, status: 'unmapped-target', renamed: false, columns: [] });
@@ -123,15 +131,19 @@ const lowerNames = (columns: ColumnFlow[], status: ColumnFlowStatus, pick: (c: C
 function pairedColumns(columns: ColumnFlow[]): PairedColumn[] {
   const removed = lowerNames(columns, 'removed', (c) => c.asIs);
   const added = lowerNames(columns, 'added', (c) => c.toBe);
-  return columns.filter((c) => c.status === 'renamed' || c.status === 'same').map((c) => ({
+  // 충돌 컬럼도 넘긴다 — diff 가 매핑 충돌(x→z·y→z)·이름 충돌(같은 이름 z 가 있는데 x→z)로 판정해 그 테이블 문장을 막는다
+  return columns.filter((c) => c.status === 'renamed' || c.status === 'same' || c.status === 'conflict').map((c) => ({
     asIs: c.asIs!,
     toBe: c.toBe!,
     overlap: removed.has(c.toBe!.toLowerCase()) || added.has(c.asIs!.toLowerCase()),
   }));
 }
 
+// 충돌(conflict) 테이블은 테이블 매핑만 넘긴다 — diff 가 매핑 충돌·이름 충돌로 판정해 관련 문장을 수동 확인으로 돌린다 (17회차 2).
+// 컬럼 매핑은 어느 원본의 것인지 정할 수 없어 넘기지 않는다
 const pairedTables = (flow: MigrationFlow): PairedTable[] =>
-  flow.tables.filter((row) => row.status === 'ok').map((row) => ({ asIs: row.asIs!, toBe: row.toBe!, columns: pairedColumns(row.columns) }));
+  flow.tables.filter((row) => row.status === 'ok' || row.status === 'conflict')
+    .map((row) => ({ asIs: row.asIs!, toBe: row.toBe!, columns: row.status === 'ok' ? pairedColumns(row.columns) : [] }));
 
 export type RenameDirection = 'forward' | 'reverse';
 
@@ -212,7 +224,7 @@ function columnRows(asIs: Table, toBe: Table, renames: DmsColumnRename[], remove
   for (const r of renames) if (!resolveAsIs(r.from)) rows.push({ asIs: r.from, toBe: r.to, status: 'missing' });
   for (const r of removed) if (!resolveAsIs(r.column)) rows.push({ asIs: r.column, status: 'missing' });
   for (const c of toBe.columns) if (!used.has(c)) rows.push({ toBe: c.name, toBeType: c.type, status: 'added' });
-  return rows;
+  return markConflicts(rows, (r) => r.status === 'renamed' || r.status === 'same', 'conflict');
 }
 
 function totalsOf(rows: TableFlow[]): MigrationFlowTotals {
@@ -222,7 +234,7 @@ function totalsOf(rows: TableFlow[]): MigrationFlowTotals {
   for (const row of rows) {
     tables[row.status] += 1;
     for (const c of row.columns) columns[c.status] += 1;
-    if (row.status === 'ok' && !row.columns.some((c) => c.status === 'missing')) verified += 1;
+    if (row.status === 'ok' && !row.columns.some((c) => c.status === 'missing' || c.status === 'conflict')) verified += 1;
   }
-  return { tables, columns, inScope: tables.ok + tables['missing-target'] + tables['missing-source'], verified };
+  return { tables, columns, inScope: tables.ok + tables.conflict + tables['missing-target'] + tables['missing-source'], verified };
 }

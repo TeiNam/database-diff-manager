@@ -1,0 +1,2 @@
+[{"kind": "column", "table": "t", "from": "x", "to": "z"},
+ {"kind": "column", "table": "t", "from": "y", "to": "z"}]

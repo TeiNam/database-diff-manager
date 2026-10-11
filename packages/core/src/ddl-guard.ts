@@ -4,12 +4,13 @@ import type { Statement } from './ddl';
 import { isAlterBlocked, manualBody, manualNote } from './ddl-alter';
 import { hasSafeIdentifiers, isSingleStatement, UNSAFE_IDENTIFIER_REASON, UNSAFE_STATEMENT_REASON } from './statement-check';
 import { retypeGroups } from './fk-retype';
-import { localSchemas, routineNameKey, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
+import { localSchemas, routineNameKey, type RenameMapping, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
+import { MAPPING_CONFLICT } from './rename-check';
 import { objectReferences } from './lexer';
 import { renameGroups } from './table-rename';
 import { halfBlockedPairs, isRoutineStatement, PAIR_NOTE, pairReason, routinePairKey, type PairKeys } from './replace-pairs';
 import { holdsAbsenceDrops, UNVERIFIED_PREFIX } from './completeness';
-import { partitionDropsRows } from './partition-ddl';
+import { absenceDrops, type AbsenceDrop, type AbsenceKind } from './absence-drops';
 import type { SchemaEvidence } from './model';
 
 interface Conflict {
@@ -43,23 +44,25 @@ function guardWith(checked: Statement[], unsafe: Statement[], diff: SchemaDiff, 
   const unsafeOf = (kind: Statement['kind']) => unsafe.filter((st) => st.kind === kind).map((st) => st.object);
   const views = viewConflicts(diff.views, localSchemas(diff), new Set([...blockedNames(diff, tables), ...unparsed.views, ...unsafeOf('view')]), [...unparsed.functions, ...unsafeOf('function')]);
   for (const n of pairs.relations) if (!views.has(n)) views.set(n, { reason: pairReason(n), notes: [PAIR_NOTE] });
+  const absent = absenceDrops(diff);
   if (holds(diff)) {
-    for (const v of diff.views) if ((v.op === 'drop' || isSuspect(diff, v.name)) && !views.has(v.name)) views.set(v.name, evidenceConflict(diff, v.name));
+    for (const v of diff.views) if ((dropsOf(absent, 'view', v.name) || isSuspect(diff, v.name)) && !views.has(v.name)) views.set(v.name, evidenceConflict(diff, v.name));
   }
   const out = tables.size || views.size ? guard(checked, tables, views) : checked;
   // 마지막 방어선: 막은 뒤의 문장도 다시 확인한다
   return out.map((st) => {
     if (!isRoutineStatement(st)) return st;
     if (pairs.routines.has(routinePairKey(st))) return toManual(st, pairReason(st.object), [PAIR_NOTE]);
-    if (holds(diff) && !st.comment && (st.op === 'drop' || isSuspect(diff, st.object))) return { ...toManual(st, evidenceConflict(diff, st.object).reason, [EVIDENCE_NOTE]), evidenceHold: true };
+    if (holds(diff) && !st.comment && ((st.op === 'drop' && dropsOf(absent, st.kind, st.object)) || isSuspect(diff, st.object))) return { ...toManual(st, evidenceConflict(diff, st.object).reason, [EVIDENCE_NOTE]), evidenceHold: true };
     return st;
   }).map(singleOrManual);
 }
 
-// 부재 기반 파괴 문장 (15회차 원칙): TARGET 에 없다는 이유로 나오는 객체 삭제(DROP TABLE·VIEW·ROUTINE)·컬럼 삭제·행이 지워지는 파티션
-// 변경은 TARGET 이 완전한 덤프라는 양성 증거(diff.targetEvidence = complete)가 있을 때만 실행한다. 증거가 없거나(unknown — td-export
-// 0.1.15 SQL 등) 불완전하면 수동 확인으로 돌린다. 정의가 끊겼을 수 있는 객체(evidence.objects)는 생성·변경 문장도 실행하지 않는다
-const EVIDENCE_NOTE = 'TARGET 이 완전한 덤프라는 증거가 없으면 객체·컬럼·파티션 삭제와 끊긴 객체의 문장을 실행하지 않습니다';
+// 부재 기반 파괴 문장 (15회차 원칙, 17회차 3 일반화 — absence-drops): TARGET 에 없다는 이유로 나오는 객체·컬럼·파티션(LIST 값)·
+// 인덱스·PRIMARY KEY·FK·CHECK 삭제는 TARGET 이 완전한 덤프라는 양성 증거(diff.targetEvidence = complete)가 있을 때만 실행한다.
+// 증거가 없거나(unknown — td-export 0.1.15 SQL, 끝 표식 없는 MD 등) 불완전하면 그 객체의 문장을 수동 확인으로 돌린다.
+// 정의가 끊겼을 수 있는 객체(evidence.objects)는 생성·변경 문장도 실행하지 않는다
+const EVIDENCE_NOTE = 'TARGET 이 완전한 덤프라는 증거가 없으면 객체·컬럼·파티션·인덱스·FK·CHECK 삭제와 끊긴 객체의 문장을 실행하지 않습니다';
 const UNKNOWN_EVIDENCE: SchemaEvidence = { level: 'unknown', reason: '판정 정보가 없습니다', objects: [] };
 const evidenceOf = (diff: SchemaDiff): SchemaEvidence => diff.targetEvidence ?? UNKNOWN_EVIDENCE;
 const holds = (diff: SchemaDiff): boolean => holdsAbsenceDrops(evidenceOf(diff));
@@ -67,9 +70,10 @@ const isSuspect = (diff: SchemaDiff, name: string): boolean => evidenceOf(diff).
 const evidenceConflict = (diff: SchemaDiff, name: string): Conflict => (
   { reason: `${name}: ${UNVERIFIED_PREFIX}: ${evidenceOf(diff).reason ?? '판정 정보가 없습니다'} — TARGET 파일을 확인하세요`, notes: [EVIDENCE_NOTE], evidence: true }
 );
-// 증거가 없을 때 막을 테이블: 삭제·끊긴 객체·컬럼을 지우는 변경·행이 지워지는 파티션 변경
-const evidenceBlocked = (diff: SchemaDiff, d: TableDiff): boolean =>
-  d.op === 'drop' || isSuspect(diff, d.name) || d.columns.some((c) => c.op === 'drop') || ((d.op === 'modify' || d.op === 'rename') && partitionDropsRows(d));
+// 그 객체(테이블은 안의 컬럼·인덱스 등 포함)에 부재 기반 삭제가 있다. 루틴은 종류도 맞춘다 (함수 f 와 프로시저 f 는 별개)
+const TABLE_KINDS: ReadonlySet<AbsenceKind> = new Set(['table', 'column', 'partition', 'index', 'primary-key', 'foreign-key', 'check']);
+const dropsOf = (absent: readonly AbsenceDrop[], kind: Statement['kind'], name: string): boolean =>
+  absent.some((a) => a.object === name && (kind === 'table' ? TABLE_KINDS.has(a.kind) : a.kind === kind));
 
 function toManual(st: Statement, reason: string, notes: string[] = []): Statement {
   if (st.comment) return st;
@@ -100,22 +104,30 @@ const addConflict = (out: Conflicts, table: string, reason: string, note: string
   out.set(table, { reason: prev?.reason ?? reason, notes: [...(prev?.notes ?? []), note], ...(isEvidence ? { evidence: true as const } : {}) });
 };
 
-// 출발점: 순서로 풀 수 없는 rename ('이름 충돌'로 적용되지 않은 매핑. 컬럼은 TARGET 테이블, 테이블 매핑은 옛·새 이름 두
-// 테이블 — 옛 이름 테이블이 그대로 남거나 새 이름 테이블이 따로 만들어진다), diff 가 찾은 수동 확인 테이블, 생성이 막힌 새 테이블
+// 출발점: 순서로 풀 수 없는 rename ('이름 충돌'로 적용되지 않은 매핑)과 매핑 충돌(서로 다른 원본이 같은 목적지로 가는 다대일·
+// 일대다 매핑, 17회차 2) — 컬럼·인덱스는 TARGET 테이블, 테이블 매핑은 옛·새 이름 테이블 모두 (옛 이름 테이블이 그대로 남거나
+// 지워지고 새 이름 테이블이 따로 만들어진다), diff 가 찾은 수동 확인 테이블, 생성이 막힌 새 테이블
+// 인덱스 매핑은 값이 없어(DROP·ADD 로 다시 만든다) 출발점이 아니다
+const KIND_LABEL: Partial<Record<RenameMapping['kind'], string>> = { table: '테이블', column: '컬럼' };
+const conflictNote = (reason: string, label: string): string | undefined => (reason === '이름 충돌' ? `이 다른 ${label} 이름과 겹쳐 적용하지 못했습니다`
+  : reason === MAPPING_CONFLICT ? `이 같은 목적지(또는 같은 원본)로 가는 다른 ${label} 매핑과 겹쳐 어느 것도 적용하지 않았습니다 — 서로 다른 원본의 값이 한 대상에 합쳐집니다`
+  : undefined);
+
 function seedConflicts(diff: SchemaDiff, stmts: Statement[], unsafe: Statement[]): Conflicts {
   const out: Conflicts = new Map();
   for (const { mapping: m, reason } of diff.ignoredRenames) {
-    if (reason !== '이름 충돌') continue;
-    if (m.kind === 'table') {
-      const note = `테이블 rename ${m.from}→${m.to} 이 다른 테이블 이름과 겹쳐 적용하지 못했습니다`;
-      for (const name of new Set([m.from, m.to])) addConflict(out, name, `${name}: 테이블 rename 이름 충돌 — 값 대응을 확인해 직접 작성하세요`, note);
-    } else if (m.kind === 'column' && m.table !== undefined) {
-      addConflict(out, m.table, `${m.table}: 컬럼 rename 이름 충돌 — 값 대응을 확인해 직접 작성하세요`, `컬럼 rename ${m.from}→${m.to} 이 다른 컬럼 이름과 겹쳐 적용하지 못했습니다`);
-    }
+    const label = KIND_LABEL[m.kind];
+    const tail = label === undefined ? undefined : conflictNote(reason, label);
+    if (label === undefined || tail === undefined) continue;
+    const names = m.kind === 'table' ? [m.from, m.to] : m.table === undefined ? [] : [m.table];
+    for (const name of new Set(names)) addConflict(out, name, `${name}: ${label} rename ${reason} — 값 대응을 확인해 직접 작성하세요`, `${label} rename ${m.from}→${m.to} ${tail}`);
   }
   for (const t of diff.manualTables) addConflict(out, t.table, t.reason, t.note);
   if (holds(diff)) {
-    for (const d of diff.tables) if (evidenceBlocked(diff, d)) addConflict(out, d.name, evidenceConflict(diff, d.name).reason, EVIDENCE_NOTE, true);
+    const absent = absenceDrops(diff);
+    for (const d of diff.tables) {
+      if (dropsOf(absent, 'table', d.name) || isSuspect(diff, d.name)) addConflict(out, d.name, evidenceConflict(diff, d.name).reason, EVIDENCE_NOTE, true);
+    }
   }
   // 생성 문장이 수동 확인(주석)인 새 테이블: 이유(파싱 실패, MD 생성식 미상·파싱 실패 등)와 무관하게 CREATE 를 실행하지 않으므로
   // 그 테이블을 참조하는 FK(바뀌는 FK 는 DROP/ADD 를 함께)·읽는 뷰도 막는다. 실제로 만든 문장으로 판정해 이유가 늘어도 빠지지 않는다

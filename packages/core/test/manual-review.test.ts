@@ -170,7 +170,9 @@ describe('FK 가 참조하는 부모 UNIQUE 교체 (8회차 5, 8.4 restrict_fk_o
 
   const parent = (key: string) => tbl('p', `  \`id\` int NOT NULL,\n  \`code\` varchar(10) NOT NULL,\n  \`n\` int NOT NULL,\n  PRIMARY KEY (\`id\`),\n  ${key}`);
   const child = tbl('c', '  `id` int NOT NULL,\n  `code` varchar(10) NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix_c` (`code`),\n  CONSTRAINT `fk_c_p` FOREIGN KEY (`code`) REFERENCES `p` (`code`)');
-  const blocked = (from: string, to: string, childTo = child) => runnable(generateDdl(diffSchemas(dump(parent(from), child), dump(parent(to), childTo))), ['p']).length === 0;
+  // TARGET 은 완전한 덤프 (FK 를 함께 지우는 경우가 부재 기반 삭제라 증거 보류에 걸리지 않게, 17회차 3)
+  const blocked = (from: string, to: string, childTo = child) =>
+    runnable(generateDdl(diffSchemas(dump(parent(from), child), parseSqlDump(tdExport([parent(to), childTo].join('\n'))).model)), ['p']).length === 0;
 
   it('부분(prefix) 키·컬럼이 늘어난 UNIQUE 도 막고, 표준 키가 남거나 FK 를 함께 지우면 막지 않는다', () => {
     expect(blocked('UNIQUE KEY `uq` (`code`)', 'UNIQUE KEY `uq` (`code`(5))')).toBe(true);

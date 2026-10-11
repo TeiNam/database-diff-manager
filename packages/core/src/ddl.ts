@@ -151,7 +151,8 @@ function withDepends(stmts: Statement[], diff: SchemaDiff): Statement[] {
   return stmts.map((st) => {
     if (st.kind !== 'table') return st;
     const g = groups.get(st.object);
-    const keeps = st.op === 'modify' && !st.related && safe.has(st.object);
+    // rename 된 테이블의 본 ALTER(op 'rename', related 없음)도 같은 판정이다. 묶음 RENAME(related)은 이미 keepsIncomingFks 를 단다
+    const keeps = (st.op === 'modify' || st.op === 'rename') && !st.related && safe.has(st.object);
     return g || keeps ? { ...st, ...(g ? { depends: g } : {}), ...(keeps ? { keepsIncomingFks: true } : {}) } : st;
   });
 }

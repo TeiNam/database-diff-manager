@@ -15,7 +15,7 @@ function Warnings({ warnings }: { warnings: DmsWarning[] }) {
   return (
     <Banner tone="warn" label="전환 매핑 경고" className={s.flush}>
       <details>
-        <summary>경고 {warnings.length}건 — 반영하지 않은 룰과 이름 불일치</summary>
+        <summary>경고 {warnings.length}건 — 반영하지 않은 룰·목적지 충돌·이름 불일치</summary>
         <ul className={s.warnings}>
           {warnings.map((w, i) => <li key={`${w.ruleId}-${i}`}>{w.ruleId ? `rule ${w.ruleId} · ` : ''}{w.message}</li>)}
         </ul>

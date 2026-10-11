@@ -28,7 +28,8 @@ export const SCENARIOS = ['columns', 'tables', 'rename-table', 'rename-column', 
   'card-function-table-same-name', 'convert-text-rename-index',
   'column-literal-binary', 'fk-alter-blocked', 'view-external-schema', 'card-view-fk-closure',
   'card-parent-child-drop', 'card-view-swap-rename', 'card-parent-rename-keep-fk', 'add-column-nondeterministic-default',
-  'card-parent-rename-child-drop', 'card-swap-rename-child-drop'];
+  'card-parent-rename-child-drop', 'card-swap-rename-child-drop', 'card-parent-rename-add-child-drop', 'card-swap-rename-add-child-drop',
+  'rename-table-many-to-one', 'rename-column-many-to-one'];
 
 // 값 보존 확인 (선택): base 에 seed 를 넣고 DDL 적용 뒤 query 결과가 rows 와 같아야 한다
 export interface ScenarioValues {

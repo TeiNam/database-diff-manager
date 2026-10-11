@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { all, migrate, one, openDb, run, type Db } from '../src/db/connection';
 import { createUser } from '../src/repos/users';
 import { listVersions, loadVersion } from '../src/repos/versions';
-import { backfillEvidence } from '../src/services/evidence-backfill';
+import { backfillEvidence, NO_SOURCE_STALE_REASON } from '../src/services/evidence-backfill';
 import { ingest } from '../src/services/ingest';
 
 const fixture = (rel: string) => readFileSync(fileURLToPath(new URL(`../../../packages/core/test/fixtures/${rel}`, import.meta.url)), 'utf8');
@@ -94,6 +94,8 @@ describe('기동 시 재판정 (006 이전 버전)', () => {
       { version_id: c, level: 'incomplete', judged_by: 'backfill' },
     ]);
     expect(loadVersion(reopened, c).model.evidence).toEqual({ level: 'incomplete', reason: '옛 판정', objects: ['orders'] });
+    // 원문이 없으면 저장 모델을 확인할 수 없으므로 stale 로 표시한다 — 이 버전이 낀 비교의 문장을 실행하지 않는다 (17회차 1)
+    expect([a, b, c].map((id) => loadVersion(reopened, id).staleReason)).toEqual([NO_SOURCE_STALE_REASON, undefined, NO_SOURCE_STALE_REASON]);
     expect(listVersions(reopened, 1)).toHaveLength(2);
     reopened.close();
   });

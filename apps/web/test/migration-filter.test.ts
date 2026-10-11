@@ -13,6 +13,15 @@ describe('filterFlowTables', () => {
     expect(names('new')).toEqual(['tb_cust', 'audit_log']); // To-Be 에만 있는 컬럼 email, 매핑되지 않은 테이블
   });
 
+  it('충돌(서로 다른 원본이 같은 To-Be 로 가는 테이블·컬럼)은 문제 필터에 든다 (17회차 2)', () => {
+    const tables = [
+      { asIs: 'a', toBe: 'c', status: 'conflict' as const, renamed: true, columns: [] },
+      { asIs: 't', toBe: 't', status: 'ok' as const, renamed: false, columns: [{ asIs: 'x', toBe: 'z', status: 'conflict' as const }] },
+      { asIs: 'u', toBe: 'u', status: 'ok' as const, renamed: false, columns: [{ asIs: 'id', toBe: 'id', status: 'same' as const }] },
+    ];
+    expect(filterFlowTables(tables, 'problem', '').map((t) => t.asIs)).toEqual(['a', 't']);
+  });
+
   it('검색은 테이블·컬럼명 부분 일치(대소문자 무시)이고 필터와 함께 걸린다', () => {
     expect(names('all', 'CND_VAL')).toEqual(['tb_prm_cnd']);
     expect(names('all', ' promotion ')).toEqual(['tb_prm', 'tb_prm_cnd']);

@@ -5,13 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { all, migrate, one, openDb, run, type Db } from '../src/db/connection';
 import { createUser } from '../src/repos/users';
 import { loadVersion } from '../src/repos/versions';
 import { AppCache } from '../src/services/cache';
 import { computeDiff } from '../src/services/diff-service';
-import { backfillEvidence } from '../src/services/evidence-backfill';
+import { backfillEvidence, NO_SOURCE_STALE_REASON } from '../src/services/evidence-backfill';
+import { JUDGE_REV } from '../src/repos/evidence';
 import { ingest } from '../src/services/ingest';
 
 const fixture = (rel: string) => readFileSync(fileURLToPath(new URL(`../../../packages/core/test/fixtures/${rel}`, import.meta.url)), 'utf8');
@@ -87,6 +88,51 @@ describe('예전 파서로 저장된 모델 (stale-model)', () => {
     expect(staleRows(db)).toEqual([[versionId, 1]]);
     expect(backfillEvidence(db)).toBe(0);
     db.close();
+  });
+
+  // 17회차 1: 16회차 앱(판 1)은 원문 없는 버전의 stale 판정을 건너뛰어 complete 판정이 남았다 — 옛 모델 역방향 diff 에 CREATE/DROP
+  it('원문이 없는 버전은 낮은 판의 complete 판정이 남아 있어도 stale(원문 없음)로 다시 판정하고, 그 버전이 낀 diff 는 실행 문장 0', () => {
+    const db0 = openDb(path);
+    const userId = createUser(db0, { username: 'admin', passwordHash: 'h', role: 'admin' }).id;
+    const a = ingest(db0, { databaseName: 'db', schemaName: 'shop', filename: 'shop.sql', text: SHOP_SQL, userId }).versionId;
+    const b = ingest(db0, { databaseName: 'db', schemaName: 'shop', filename: 'shop.sql', text: SHOP_SQL.replace(/\/\* Table : big_paid \*\/\n[^\n]+\n/, ''), userId }).versionId;
+    run(db0, 'DELETE FROM schema_version_sources WHERE version_id = ?', b);
+    run(db0, "UPDATE schema_version_evidence SET judged_by = 'backfill', judge_rev = ?, stale_reason = NULL", JUDGE_REV - 1);
+    db0.close();
+    const db = openDb(path);
+    expect(staleRows(db)).toEqual([[a, 0], [b, 1]]);
+    expect(loadVersion(db, b).staleReason).toBe(NO_SOURCE_STALE_REASON);
+    expect(loadVersion(db, b).model.evidence?.level).toBe('unknown');
+    for (const [base, target] of [[a, b], [b, a]]) {
+      const res = computeDiff(db, new AppCache(), base, target);
+      expect(res.statements.length).toBeGreaterThan(0);
+      expect(res.staleModels.map((m) => [m.versionId, m.reason])).toEqual([[b, NO_SOURCE_STALE_REASON]]);
+      expect(runnable(db, base, target)).toEqual([]);
+    }
+    // 역방향(b → a)의 CREATE VIEW 는 부재 기반이 아니어도 stale 이라 보류한다
+    expect(computeDiff(db, new AppCache(), b, a).statements.map((st) => [st.comment, st.staleHold])).toEqual([[true, true]]);
+    expect(backfillEvidence(db)).toBe(0);
+    db.close();
+  });
+
+  // 17회차 6: 손상된 model_json 하나로 기동이 실패하지 않는다 — 그 버전만 stale(모델을 읽지 못함)로 표시하고 로그를 남긴다
+  it('저장 모델 JSON 이 손상된 버전은 기동을 막지 않고 stale 로 표시한다', () => {
+    const db0 = openDb(path);
+    const userId = createUser(db0, { username: 'admin', passwordHash: 'h', role: 'admin' }).id;
+    const a = ingest(db0, { databaseName: 'db', schemaName: 'shop', filename: 'shop.sql', text: SHOP_SQL, userId }).versionId;
+    run(db0, "UPDATE object_revisions SET model_json = '{broken' WHERE id = (SELECT min(revision_id) FROM version_objects WHERE version_id = ?)", a);
+    run(db0, 'UPDATE schema_version_evidence SET judge_rev = ?', JUDGE_REV - 1);
+    db0.close();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const db = openDb(path);
+      expect(staleRows(db)).toEqual([[a, 1]]);
+      expect(one<{ stale_reason: string }>(db, 'SELECT stale_reason FROM schema_version_evidence WHERE version_id = ?', a)!.stale_reason).toContain('저장된 모델을 읽지 못해');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`버전 ${a}`), expect.anything());
+      db.close();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('지금 앱으로 올린 버전은 stale 이 아니고 다시 판정하지 않는다', () => {

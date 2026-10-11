@@ -1,0 +1,197 @@
+{
+  "judgeRev": 2,
+  "results": {
+    "td-export-0115/sample-app.md": {
+      "hash": "bf8ef8eec187dcb80c82e6df52b15c75f7b95735f1478e7102b1a65e2d366ed1",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0115/sample-app.md#trimmed": {
+      "hash": "bf8ef8eec187dcb80c82e6df52b15c75f7b95735f1478e7102b1a65e2d366ed1",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"MD 끝 표식이 없음 — 편집기가 줄 끝 공백을 지웠다면 원본을 올려 주세요 (마지막 섹션 vocabulary_review_log)\",\"objects\":[]}"
+    },
+    "td-export-0115/sample-app.md#half": {
+      "hash": "d7dc43c711696d363e6fec907fbff711ae6635a9aba55b753f34b08048914ae1",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"Table List 의 객체 섹션이 없습니다 (password_reset_token, prompt_template, quiz_wrong_choice, sentence_answer, user, user_chat_setting, user_exam_setting, user_learning_progress, user_login_log, user_profile, user_push_subscription, user_security, user_sentence_review_log, vocabulary, vocabulary_meaning, vocabulary_quiz, vocabulary_review_log) — 파일이 잘렸을 수 있습니다\",\"objects\":[]}"
+    },
+    "td-export-0115/sample-app.sql": {
+      "hash": "b7f1e5e01d3800265fd8509b2e623045932b2de89be6947e7932958f52f2b558",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"td-export 헤더 SET(@OLD_…)·트레일러가 없습니다 (td-export 0.1.15 형식 등) — 파일 끝을 확인할 수 없어 삭제 문장은 수동 확인입니다\",\"objects\":[]}"
+    },
+    "td-export-0115/sample-app.sql#trimmed": {
+      "hash": "b7f1e5e01d3800265fd8509b2e623045932b2de89be6947e7932958f52f2b558",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"td-export 헤더 SET(@OLD_…)·트레일러가 없습니다 (td-export 0.1.15 형식 등) — 파일 끝을 확인할 수 없어 삭제 문장은 수동 확인입니다\",\"objects\":[]}"
+    },
+    "td-export-0115/sample-app.sql#half": {
+      "hash": "a927152dc1920108528086de6b4a5bcbc7d030934d6edfa7c64e0dcd3cb5dfc2",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"td-export 헤더 SET(@OLD_…)·트레일러가 없습니다 (td-export 0.1.15 형식 등) — 파일 끝을 확인할 수 없어 삭제 문장은 수동 확인입니다\",\"objects\":[]}"
+    },
+    "td-export-0130/sample-app.md": {
+      "hash": "9c50691a82d528ddad1ae27c1cb93ae1e9b4e90532827e223b36b7be4fc0c822",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0130/sample-app.md#trimmed": {
+      "hash": "9c50691a82d528ddad1ae27c1cb93ae1e9b4e90532827e223b36b7be4fc0c822",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"MD 끝 표식이 없음 — 편집기가 줄 끝 공백을 지웠다면 원본을 올려 주세요 (마지막 섹션 vocabulary_review_log)\",\"objects\":[]}"
+    },
+    "td-export-0130/sample-app.md#half": {
+      "hash": "25de1f6c67f20d055ee4930b81cf9230af502bb61d9b8db96dc4e11a315fa06f",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"Table List 의 객체 섹션이 없습니다 (password_reset_token, prompt_template, quiz_wrong_choice, sentence_answer, user, user_chat_setting, user_exam_setting, user_learning_progress, user_login_log, user_profile, user_push_subscription, user_security, user_sentence_review_log, vocabulary, vocabulary_meaning, vocabulary_quiz, vocabulary_review_log) — 파일이 잘렸을 수 있습니다\",\"objects\":[]}"
+    },
+    "td-export-0130/sample-app.sql": {
+      "hash": "b7f1e5e01d3800265fd8509b2e623045932b2de89be6947e7932958f52f2b558",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0130/sample-app.sql#trimmed": {
+      "hash": "b7f1e5e01d3800265fd8509b2e623045932b2de89be6947e7932958f52f2b558",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0130/sample-app.sql#half": {
+      "hash": "a927152dc1920108528086de6b4a5bcbc7d030934d6edfa7c64e0dcd3cb5dfc2",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"td-export 트레일러(@old_foreign_key_checks 복원)가 없습니다 — 파일이 잘렸을 수 있습니다\",\"objects\":[]}"
+    },
+    "td-export-0136/escapes.md": {
+      "hash": "edd6a6d08df42857b0176863ae35bd28959e7179f607f3b407358c960c95e71a",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0136/escapes.md#trimmed": {
+      "hash": "edd6a6d08df42857b0176863ae35bd28959e7179f607f3b407358c960c95e71a",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"MD 끝 표식이 없음 — 편집기가 줄 끝 공백을 지웠다면 원본을 올려 주세요 (마지막 섹션 Order Items)\",\"objects\":[]}"
+    },
+    "td-export-0136/escapes.md#half": {
+      "hash": "9c5cb8954bbb73d7649e42bb693ec9a6047bf62b9f1b0e31932d3eb3b0449e11",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"Table List 의 객체 섹션이 없습니다 (Order Items) — 파일이 잘렸을 수 있습니다\",\"objects\":[]}"
+    },
+    "td-export-0136/escapes.sql": {
+      "hash": "df906b8541c9e780d340976617546f5bfbfa4de677e99bc7fc8d7520bece4338",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0136/escapes.sql#trimmed": {
+      "hash": "df906b8541c9e780d340976617546f5bfbfa4de677e99bc7fc8d7520bece4338",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0136/escapes.sql#half": {
+      "hash": "30203dfe29f2f31ebc41c9fa0843172b78f4a36f8417b1763ee3d3911be89887",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"파일 끝의 문장이 구분자 없이 끊겼습니다 (줄 5) — 파일이 잘렸을 수 있습니다\",\"objects\":[\"esc\"]}"
+    },
+    "td-export-0152/escapes.md": {
+      "hash": "edd6a6d08df42857b0176863ae35bd28959e7179f607f3b407358c960c95e71a",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0152/escapes.md#trimmed": {
+      "hash": "edd6a6d08df42857b0176863ae35bd28959e7179f607f3b407358c960c95e71a",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"MD 끝 표식이 없음 — 편집기가 줄 끝 공백을 지웠다면 원본을 올려 주세요 (마지막 섹션 Order Items)\",\"objects\":[]}"
+    },
+    "td-export-0152/escapes.md#half": {
+      "hash": "9c5cb8954bbb73d7649e42bb693ec9a6047bf62b9f1b0e31932d3eb3b0449e11",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"Table List 의 객체 섹션이 없습니다 (Order Items) — 파일이 잘렸을 수 있습니다\",\"objects\":[]}"
+    },
+    "td-export-0152/escapes.sql": {
+      "hash": "df906b8541c9e780d340976617546f5bfbfa4de677e99bc7fc8d7520bece4338",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0152/escapes.sql#trimmed": {
+      "hash": "df906b8541c9e780d340976617546f5bfbfa4de677e99bc7fc8d7520bece4338",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0152/escapes.sql#half": {
+      "hash": "30203dfe29f2f31ebc41c9fa0843172b78f4a36f8417b1763ee3d3911be89887",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"파일 끝의 문장이 구분자 없이 끊겼습니다 (줄 7) — 파일이 잘렸을 수 있습니다\",\"objects\":[\"esc\"]}"
+    },
+    "td-export-0152/shop.md": {
+      "hash": "47a11902c48f54765871eff3052528bdd9f4d6fde958f0181159a6b45e63ce3c",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0152/shop.md#trimmed": {
+      "hash": "47a11902c48f54765871eff3052528bdd9f4d6fde958f0181159a6b45e63ce3c",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"MD 끝 표식이 없음 — 편집기가 줄 끝 공백을 지웠다면 원본을 올려 주세요 (마지막 섹션 paid_orders)\",\"objects\":[]}"
+    },
+    "td-export-0152/shop.md#half": {
+      "hash": "d8e28c950b867813b99491a765e27cb679e2cc397f51cd52d663892de9ba306a",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"Table List 의 객체 섹션이 없습니다 (orders, paid_orders) — 파일이 잘렸을 수 있습니다\",\"objects\":[]}"
+    },
+    "td-export-0152/shop.sql": {
+      "hash": "90e2c0c54a6615b6bbcea0f8dd4221f1577af94d5b89712330fe77008a2fe480",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0152/shop.sql#trimmed": {
+      "hash": "90e2c0c54a6615b6bbcea0f8dd4221f1577af94d5b89712330fe77008a2fe480",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "td-export-0152/shop.sql#half": {
+      "hash": "bbd7a2b23e76fce2308294127e1488967f57b70a304a38c265068d1df1f13063",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"파일 끝의 문장이 구분자 없이 끊겼습니다 (줄 24) — 파일이 잘렸을 수 있습니다\",\"objects\":[\"order_audit\"]}"
+    },
+    "md/basic.md": {
+      "hash": "2e840f8a770ef6862f5e27b2c00bb50b49a748bbed0d8ef60fb46078fbfb0f48",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"스키마 표(Columns 표 머리글 + 1행 이상)가 없는 섹션이 있습니다 (broken)\",\"objects\":[\"broken\"]}"
+    },
+    "md/basic.md#trimmed": {
+      "hash": "2e840f8a770ef6862f5e27b2c00bb50b49a748bbed0d8ef60fb46078fbfb0f48",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"스키마 표(Columns 표 머리글 + 1행 이상)가 없는 섹션이 있습니다 (broken)\",\"objects\":[\"broken\"]}"
+    },
+    "md/basic.md#half": {
+      "hash": "535cce32de5351f77690cf772ab2df1813ff1b368b354ceea01fa3a733b2b28a",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"Table List 의 객체 섹션이 없습니다 (v_sales) — 파일이 잘렸을 수 있습니다\",\"objects\":[\"Orders\"]}"
+    },
+    "md/v2.md": {
+      "hash": "d47a429c06d98a6cee87164195b2bd2b020d88186480a9fc2403db2c5c6084e6",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"MD 끝 표식이 없음 — 편집기가 줄 끝 공백을 지웠다면 원본을 올려 주세요 (마지막 섹션 items)\",\"objects\":[]}"
+    },
+    "md/v2.md#trimmed": {
+      "hash": "d47a429c06d98a6cee87164195b2bd2b020d88186480a9fc2403db2c5c6084e6",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"MD 끝 표식이 없음 — 편집기가 줄 끝 공백을 지웠다면 원본을 올려 주세요 (마지막 섹션 items)\",\"objects\":[]}"
+    },
+    "md/v2.md#half": {
+      "hash": "36e8a79ef1f57a7c23eb9820dbfba20f05415a5d0b113e4dbdf2c8ccd0cc0392",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"Table List 가 비었거나 스키마 표(Columns 표)가 없습니다 — 스키마 정의서가 아닙니다\",\"objects\":[]}"
+    },
+    "md/v3.md": {
+      "hash": "a10d42db35a197e9fd0e1c63dca129d1c2e8f2d9f94e60bfe53260a0cc627b74",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "md/v3.md#trimmed": {
+      "hash": "a10d42db35a197e9fd0e1c63dca129d1c2e8f2d9f94e60bfe53260a0cc627b74",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"MD 끝 표식이 없음 — 편집기가 줄 끝 공백을 지웠다면 원본을 올려 주세요 (마지막 섹션 items)\",\"objects\":[]}"
+    },
+    "md/v3.md#half": {
+      "hash": "12017283d985a6c5225035898ddb147d4d912ad3d0e9a7ceb97a248cbf48a25e",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"MD 끝 표식이 없음 — 편집기가 줄 끝 공백을 지웠다면 원본을 올려 주세요 (마지막 섹션 items)\",\"objects\":[]}"
+    },
+    "md/v3.sql": {
+      "hash": "6307043718be1d8d19006734e53e9042fd4d3bcc3b4691f49d9c85a0a272e442",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "md/v3.sql#trimmed": {
+      "hash": "6307043718be1d8d19006734e53e9042fd4d3bcc3b4691f49d9c85a0a272e442",
+      "evidence": "{\"level\":\"complete\",\"objects\":[]}"
+    },
+    "md/v3.sql#half": {
+      "hash": "472e893456aa6c087805fe93423f961d3ae19195c7fbd1ebba21a96680b1019c",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"파일 끝의 문장이 구분자 없이 끊겼습니다 (줄 5) — 파일이 잘렸을 수 있습니다\",\"objects\":[\"items\"]}"
+    },
+    "dms/as-is.sql": {
+      "hash": "2045c2c1bd09f491e4c6f9726df0a7990b0751e0b45da15b8f953a7c56e583d5",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"td-export 헤더 SET(@OLD_…)·트레일러가 없습니다 (td-export 0.1.15 형식 등) — 파일 끝을 확인할 수 없어 삭제 문장은 수동 확인입니다\",\"objects\":[]}"
+    },
+    "dms/as-is.sql#trimmed": {
+      "hash": "2045c2c1bd09f491e4c6f9726df0a7990b0751e0b45da15b8f953a7c56e583d5",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"td-export 헤더 SET(@OLD_…)·트레일러가 없습니다 (td-export 0.1.15 형식 등) — 파일 끝을 확인할 수 없어 삭제 문장은 수동 확인입니다\",\"objects\":[]}"
+    },
+    "dms/as-is.sql#half": {
+      "hash": "61b25b986748528309b14230d6ea4cb3fb9dada677aaee0dc1af93b314dbcb54",
+      "evidence": "{\"level\":\"incomplete\",\"reason\":\"파일 끝의 문장이 구분자 없이 끊겼습니다 (줄 11) — 파일이 잘렸을 수 있습니다\",\"objects\":[\"tb_prm\"]}"
+    },
+    "dms/to-be.sql": {
+      "hash": "5fe1473fd12d1b2a78c2d77bc9bfec40ce0b5494a2b5473bb4f1b3ebc0a738f6",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"td-export 헤더 SET(@OLD_…)·트레일러가 없습니다 (td-export 0.1.15 형식 등) — 파일 끝을 확인할 수 없어 삭제 문장은 수동 확인입니다\",\"objects\":[]}"
+    },
+    "dms/to-be.sql#trimmed": {
+      "hash": "5fe1473fd12d1b2a78c2d77bc9bfec40ce0b5494a2b5473bb4f1b3ebc0a738f6",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"td-export 헤더 SET(@OLD_…)·트레일러가 없습니다 (td-export 0.1.15 형식 등) — 파일 끝을 확인할 수 없어 삭제 문장은 수동 확인입니다\",\"objects\":[]}"
+    },
+    "dms/to-be.sql#half": {
+      "hash": "2f8c919dc353da874a4f3c8eb88e2f186d55e0fd235d3c53ad48416e82f151e6",
+      "evidence": "{\"level\":\"unknown\",\"reason\":\"td-export 헤더 SET(@OLD_…)·트레일러가 없습니다 (td-export 0.1.15 형식 등) — 파일 끝을 확인할 수 없어 삭제 문장은 수동 확인입니다\",\"objects\":[]}"
+    }
+  }
+}

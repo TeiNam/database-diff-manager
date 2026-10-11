@@ -1,7 +1,8 @@
 // AWS DMS table-mapping JSON → 전환 매핑. 모든 object-locator 는 As-Is 이름 기준이고, 이름 비교는 대소문자를 무시한다
 export const MAX_DMS_RULES = 20_000;
 
-export type DmsWarningCode = 'unsupported' | 'duplicate' | 'invalid';
+// conflict: 서로 다른 원본이 같은 목적지로 가는 rename (17회차 2 — DMS 에서도 데이터가 한 대상에 합쳐진다)
+export type DmsWarningCode = 'unsupported' | 'duplicate' | 'invalid' | 'conflict';
 
 export interface DmsWarning {
   ruleId: string;
@@ -211,12 +212,15 @@ class MappingBuilder {
   }
 
   build(ruleCount: number): DmsMapping {
+    const columns = [...this.columns.values()].flatMap((c) => ('rename' in c ? [c.rename] : []));
+    this.conflicts([...this.tables.values()], (r) => lower(r.to), (r) => r.from);
+    this.conflicts(columns, (r) => `${lower(r.table)}.${lower(r.to)}`, (r) => `${r.table}.${r.from}`);
     return {
       fromSchema: this.fromSchema,
       ...(this.schema.has('') ? { toSchema: this.schema.get('')!.value } : {}),
       selection: { include: [...this.include], exclude: [...this.exclude] },
       tables: [...this.tables.values()],
-      columns: [...this.columns.values()].flatMap((c) => ('rename' in c ? [c.rename] : [])),
+      columns,
       removedColumns: [...this.columns.values()].flatMap((c) => ('removed' in c ? [c.removed] : [])),
       ruleCount,
     };
@@ -263,6 +267,20 @@ class MappingBuilder {
     const [winner, loser] = takesPrecedence(next.ruleId, prev.ruleId) ? [next, prev] : [prev, next];
     map.set(key, winner);
     this.warnings.push({ ruleId: loser.ruleId, code: 'duplicate', message: `같은 대상의 룰이 겹쳐 rule-id 가 낮은 rule ${winner.ruleId} 만 적용합니다` });
+  }
+
+  // 서로 다른 원본이 같은 목적지(대소문자 무시)로 가는 rename 은 rule-id 로 하나를 고를 수 없다 — DMS 는 두 원본을 모두 그 대상으로
+  // 옮겨 데이터가 합쳐진다. 룰마다 경고를 남기고(전환 표 '충돌'), diff 는 어느 것도 적용하지 않고 관련 문장을 수동 확인으로 돌린다
+  private conflicts<T extends { ruleId: string; to: string }>(renames: T[], targetKey: (r: T) => string, source: (r: T) => string): void {
+    const byTarget = new Map<string, T[]>();
+    for (const r of renames) byTarget.set(targetKey(r), [...(byTarget.get(targetKey(r)) ?? []), r]);
+    for (const group of byTarget.values()) {
+      if (group.length < 2) continue;
+      const sources = group.map((r) => clip(source(r))).join(', ');
+      for (const r of group) {
+        this.warnings.push({ ruleId: r.ruleId, code: 'conflict', message: `서로 다른 원본(${sources})이 같은 이름(${clip(r.to)})으로 갑니다 — 두 원본의 데이터가 한 대상에 합쳐지므로 관련 문장을 수동 확인으로 돌립니다` });
+      }
+    }
   }
 
   private unsupported(rule: Rule, what: string): void {

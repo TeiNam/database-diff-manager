@@ -6,7 +6,7 @@ import { handleRadioKeys } from '../../lib/radio-group';
 import { StatusBadge, statusLabel } from './StatusBadge';
 import s from './migration.module.css';
 
-const SUMMARY_ORDER: ColumnFlowStatus[] = ['renamed', 'removed', 'added', 'dropped', 'missing'];
+const SUMMARY_ORDER: ColumnFlowStatus[] = ['renamed', 'conflict', 'removed', 'added', 'dropped', 'missing'];
 const rowKey = (t: TableFlow) => `${t.status}:${t.asIs ?? ''}>${t.toBe ?? ''}`;
 const tableName = (t: TableFlow) => t.asIs ?? t.toBe ?? '';
 
