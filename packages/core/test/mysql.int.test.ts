@@ -15,9 +15,16 @@ import { commentPart, fixture, scenario, scenarioManual, scenarioManualObjects, 
 import { BOUNDARY_CASES, MD_INJECTIONS, MD_OK, MD_VIEW_INJECTIONS, mdDump, PRECIOUS, SQL_INJECTION } from './injection-fixtures';
 import { tokenize } from '../src/lexer';
 
+// 포트는 MYSQL80_PORT / MYSQL84_PORT 로 바꿀 수 있다 (기본 33080 / 33084 — docker-compose.test.yml)
+function portOf(env: string | undefined, fallback: number): number {
+  if (env === undefined || env === '') return fallback;
+  const port = Number(env);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`잘못된 MySQL 포트: ${env}`);
+  return port;
+}
 const TARGETS = [
-  { name: 'MySQL 8.0', port: 33080 },
-  { name: 'MySQL 8.4', port: 33084 },
+  { name: 'MySQL 8.0', port: portOf(process.env.MYSQL80_PORT, 33080) },
+  { name: 'MySQL 8.4', port: portOf(process.env.MYSQL84_PORT, 33084) },
 ];
 const suite = process.env.MYSQL_IT === '1' ? describe : describe.skip;
 
@@ -180,6 +187,29 @@ suite.each(TARGETS)('$name', ({ port }) => {
     }
     await conn.query(`DROP DATABASE IF EXISTS \`${db}\``);
     expect(failed).toEqual([]);
+  });
+
+  // NBE 세션 값 비교 (13회차 5): 백슬래시 이스케이프 리터럴은 기본 세션에서 TARGET 값, NO_BACKSLASH_ESCAPES 세션에서 다른 값이 된다.
+  // 그래서 그런 문장에는 [NBE 세션 주의] 안내가 붙는다
+  it.skipIf(!hasMysqlClient)('NBE 세션 경계: 백슬래시 리터럴 값은 기본 세션에서만 TARGET 과 같고, 그 문장에 안내가 붙는다', async () => {
+    const db = 'it_nbe_value';
+    const table = (cols: string) => `CREATE TABLE \`t\` (\n  \`id\` int NOT NULL${cols}\n) ENGINE=InnoDB;`;
+    const target = parseSqlDump(table(",\n  `a` varchar(20) DEFAULT 'C:\\\\temp' COMMENT 'x\\ny'")).model;
+    const stmts = generateDdl(diffSchemas(parseSqlDump(table('')).model, target));
+    expect(stmts.every((s) => s.notes?.some((n) => n.startsWith('[NBE 세션 주의]')))).toBe(true);
+    const script = renderDdl(stmts);
+    const values: Record<string, unknown>[] = [];
+    for (const nbe of [false, true]) {
+      await conn.query(`DROP DATABASE IF EXISTS \`${db}\`; CREATE DATABASE \`${db}\`; USE \`${db}\``);
+      execFileSync('mysql', [...CLIENT(port), db], { input: table(''), stdio: ['pipe', 'ignore', 'ignore'] });
+      execFileSync('mysql', [...CLIENT(port), db], { input: (nbe ? NBE_SESSION : '') + script, stdio: ['pipe', 'ignore', 'ignore'] });
+      const [rows] = await conn.query<RowDataPacket[]>('SELECT COLUMN_DEFAULT AS d, COLUMN_COMMENT AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND COLUMN_NAME = ?', [db, 'a']);
+      values.push({ ...rows[0] });
+    }
+    await conn.query(`DROP DATABASE IF EXISTS \`${db}\``);
+    const col = target.tables[0].columns[1];
+    expect(values[0]).toEqual({ d: 'C:\\temp', c: col.comment });
+    expect(values[1]).not.toEqual(values[0]);
   });
 });
 

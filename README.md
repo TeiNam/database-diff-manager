@@ -105,6 +105,7 @@ npm run dev:web      # Vite (http://localhost:5173, proxies /api to 3000)
 npm test             # all tests
 npm run typecheck
 npm run test:mysql -w @tdm/core   # applies generated DDL on MySQL 8.0/8.4 containers (requires Docker)
+                                  #   (override ports with MYSQL80_PORT / MYSQL84_PORT, default 33080 / 33084)
 ```
 
 ## CI

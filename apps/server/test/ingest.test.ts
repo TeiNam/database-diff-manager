@@ -74,8 +74,23 @@ describe('ingest', () => {
 
   it('입력 오류', () => {
     expect(() => upload('a.xlsx', 'x')).toThrow('지원하지 않는 파일 형식');
-    expect(() => upload('empty.sql', '/* Database : x */')).toThrow('테이블이나 뷰를 찾지 못했습니다');
+    expect(() => upload('empty.sql', 'SET NAMES utf8mb4;')).toThrow('테이블이나 뷰를 찾지 못했습니다');
+    expect(() => upload('empty.md', '')).toThrow('테이블이나 뷰를 찾지 못했습니다');
     expect(() => upload('dup.sql', 'CREATE TABLE `a` (\n  `x` int\n);\nCREATE TABLE `a` (\n  `y` int\n);')).toThrow('같은 이름의 객체');
+  });
+
+  it('식별할 수 없는 문장이 있으면 거부한다 (13회차 1)', () => {
+    expect(() => upload('junk.sql', 'This is not a schema dump')).toThrow('식별할 수 없는 문장');
+    // 정상 객체와 섞여 있어도 거부한다 (불완전한 TARGET 으로 기존 객체를 삭제하지 않도록)
+    expect(() => upload('mixed.sql', 'CREATE TABLE `a` (\n  `x` int\n);\nThis is not a schema dump;')).toThrow('줄 4');
+    expect(count(db, 'schema_versions')).toBe(0);
+  });
+
+  it('td-export 헤더만 있는 빈 스키마는 저장하고 객체 0개 경고를 남긴다 (13회차 1)', () => {
+    const r = upload('empty.sql', '/* Database : x */\nSET NAMES utf8mb4;\nSET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;\n');
+    expect(r).toMatchObject({ status: 'ok', versionNo: 1 });
+    expect(r.warnings.map((w) => w.code)).toEqual(['empty-schema']);
+    expect(r.warnings[0].message).toContain('객체가 0개');
   });
 
   it('modelHash는 객체 순서에 무관하다', () => {

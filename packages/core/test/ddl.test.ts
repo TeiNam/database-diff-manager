@@ -491,6 +491,18 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(cardOf('view-order-alias', 'view', 'z').statements.map((s) => s.object)).toEqual(['a', 'z']);
   });
 
+  it('부모 카드는 들어오는 FK 와 충돌하는 문장일 때만 자식 FK 해제를 넣는다: 컬럼 추가는 빼고 참조 컬럼 타입 변경은 넣는다 (13회차 2)', () => {
+    const sqls = (object: string) => cardOf('card-parent-child-drop', 'table', object).statements.map((s) => s.sql.split('\n').join(' '));
+    expect(sqls('p')).toEqual(['ALTER TABLE `p`   ADD COLUMN `memo` varchar(50) DEFAULT NULL']);
+    expect(sqls('q')).toEqual(['ALTER TABLE `d`   DROP FOREIGN KEY `fk_d_q`', 'ALTER TABLE `q`   MODIFY COLUMN `id` bigint NOT NULL']);
+  });
+
+  it('의존 매칭은 문장의 object 와 related 이름 모두를 본다: 맞바꾸기 뒤 coupon 을 읽는 새 뷰 카드는 묶음 RENAME 을 넣는다 (13회차 3)', () => {
+    const { statements, dependencies } = cardOf('card-view-swap-rename', 'view', 'v_coupon');
+    expect(statements.map((s) => s.sql.split('\n')[0])).toEqual([expect.stringMatching(/^RENAME TABLE `coupon` TO `__tdm_tmp_1`/), expect.stringMatching(/VIEW `v_coupon`/)]);
+    expect(dependencies).toEqual(['voucher']);
+  });
+
   it('의존이 없으면 자기 문장만', () => {
     const { base, target } = scenario('columns');
     const stmts = generateDdl(diffSchemas(base, target));
@@ -572,5 +584,24 @@ describe('생성이 막힌 테이블로의 FK (10회차 3)', () => {
     expect(target.tables.find((t) => t.name === 'g')?.parseError).toBeDefined();
     const stmts = generateDdl(diffSchemas(base, target));
     expect(stmts.filter((s) => s.object === 'c').every((s) => s.comment)).toBe(true);
+  });
+});
+
+describe('NO_BACKSLASH_ESCAPES 세션 안내 (13회차 5)', () => {
+  const NOTE = '[NBE 세션 주의]';
+  const tbl = (cols: string) => `CREATE TABLE \`t\` (\n  \`id\` int NOT NULL,\n${cols}\n) ENGINE=InnoDB;`;
+  const view = (body: string) => `CREATE ALGORITHM=UNDEFINED DEFINER=\`root\`@\`%\` SQL SECURITY DEFINER VIEW \`v\` AS ${body};`;
+  const fn = 'SET @OLD_ROUTINE_SQL_MODE = @@SQL_MODE, SQL_MODE = \'STRICT_TRANS_TABLES\';\nDELIMITER ;;\nCREATE DEFINER=`root`@`%` FUNCTION `f`() RETURNS varchar(9)\n    NO SQL\nRETURN \'a\\\\b\';;\nDELIMITER ;';
+  const notesOf = (base: string, target: string) => generateDdl(diffSchemas(parseSqlDump(base).model, parseSqlDump(target).model)).map((s) => [s.object, (s.notes ?? []).some((n) => n.startsWith(NOTE))]);
+
+  it('백슬래시 이스케이프가 든 문자열 리터럴이 있는 테이블·뷰 문장에만 안내를 붙인다', () => {
+    expect(notesOf(tbl('  `a` int'), tbl("  `a` int COMMENT 'C:\\\\temp',\n  `b` varchar(9) DEFAULT 'x'"))).toEqual([['t', true]]);
+    expect(notesOf(tbl('  `a` int'), tbl("  `a` int COMMENT 'it''s'"))).toEqual([['t', false]]);
+    expect(notesOf('', view("select 'a\\nb' AS `x`"))).toEqual([['v', true]]);
+    expect(notesOf('', view("select 'ab' AS `x`"))).toEqual([['v', false]]);
+  });
+
+  it('SQL_MODE 를 고정하는 루틴 문장은 안내하지 않는다', () => {
+    expect(notesOf('', fn)).toEqual([['f', false]]);
   });
 });

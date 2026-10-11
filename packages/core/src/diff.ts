@@ -3,7 +3,7 @@ import { renamedAutoName, renamedFkNames } from './auto-name';
 import { canonicalJson } from './canonical';
 import { withRetypedForeignKeys } from './fk-retype';
 import { quoteIdent } from './lexer';
-import type { Check, Column, ForeignKey, Index, IndexField, Partitioning, Routine, RoutineKind, SchemaModel, Table, View } from './model';
+import { isUnidentified, type Check, type Column, type ForeignKey, type Index, type IndexField, type Partitioning, type Routine, type RoutineKind, type SchemaModel, type Table, type View } from './model';
 import { normalizeBody, routineLexMode } from './normalize';
 import { isOtherKindFamily } from './partial-fill';
 import { subpartitionKey } from './partition-ddl';
@@ -87,6 +87,8 @@ export interface SchemaDiff {
   // BASE·TARGET 스키마 이름 (빈 이름 제외). 뷰 본문의 `스키마`.`객체` 참조가 이 목록 밖이면 다른 스키마 객체라 로컬 의존이 아니다.
   // 비었거나 없으면(옛 JSON) 한정자로 판정하지 않는다 (같은 이름이면 로컬로 보는 안전 쪽)
   schemaNames?: string[];
+  // TARGET 이 불완전하다고 보는 이유 (식별 불가 파싱 실패 문장이 있거나 객체가 0개). 있으면 객체 DROP 을 수동 확인으로 막는다
+  targetIncomplete?: string;
 }
 
 // 뷰 본문의 한정자 중 로컬로 보는 스키마 이름 (schemaNames). 스키마 이름을 모르면 undefined — 한정자를 보지 않는다(로컬로 본다)
@@ -124,7 +126,15 @@ export function diffSchemas(base: SchemaModel, target: SchemaModel, renames: Ren
     objectNames: [...new Set(all.map((o) => o.name))],
     manualTables: findManualTables(base, target, tables),
     schemaNames: [...new Set([base.name, target.name].filter((n) => n !== ''))],
+    ...incompleteTarget(target),
   };
+}
+
+// 식별 불가 문장은 어떤 객체 정의를 잃었는지 알 수 없고, 객체 0개는 잘못된 파일일 수 있어 삭제 근거로 쓰지 않는다
+function incompleteTarget(target: SchemaModel): Pick<SchemaDiff, 'targetIncomplete'> {
+  if ([...target.tables, ...target.views].some(isUnidentified)) return { targetIncomplete: 'TARGET 에 식별할 수 없는 파싱 실패 문장이 있습니다' };
+  if (!target.tables.length && !target.views.length && !(target.routines ?? []).length) return { targetIncomplete: 'TARGET 에 객체가 없습니다' };
+  return {};
 }
 
 // 적용된 rename (BASE 이름 → TARGET 이름). InnoDB 는 RENAME TABLE·RENAME/CHANGE COLUMN 때 다른 테이블 FK 의

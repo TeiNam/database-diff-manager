@@ -5,11 +5,13 @@ import { RETYPED_FIELD, retypeGroups } from './fk-retype';
 import { localSchemas, type Op, type RoutineDiff, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
 import { commentLine } from './comment-text';
 import { alter, alterStatements, inheritCollation, manualBody, manualNote, sqlBody, type StatementBody } from './ddl-alter';
-import { objectReferences, quoteIdent as q, quoteString, type References } from './lexer';
+import { LexError, objectReferences, quoteIdent as q, quoteString, tokenize, type References } from './lexer';
 import type { ForeignKey, Routine, RoutineKind, Table } from './model';
 import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated, indexNote, printable, tableNote } from './partial-fill';
 import { printForeignKey, printRoutine, printTable, printView } from './print';
 import { renameGroups, renameTableSql } from './table-rename';
+
+import { incomingFkSafeTables } from './card-bundle';
 
 export { objectStatements } from './card-bundle';
 
@@ -33,6 +35,8 @@ export interface Statement extends StatementBody {
   // 같은 판정). 객체 카드 복사 묶음 계산에 쓴다. 함수 이름은 대소문자를 무시해 비교한다
   reads?: string[];
   calls?: string[];
+  // keepsIncomingFks: 이 테이블 변경이 이 테이블을 참조하는 다른 테이블 FK 의 컬럼·키를 건드리지 않음 (카드에 자식 FK 해제를 넣지 않는다)
+  keepsIncomingFks?: boolean;
 }
 
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };
@@ -111,15 +115,38 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
       ? manualNote(`${v.name}: 파싱할 수 없는 뷰입니다. 원문을 확인하세요`)
       : { ...sqlBody(printView(v.to!, { orReplace: true }), [DEFINER_NOTE]), reads: reads.get(v)!.relations, calls: reads.get(v)!.routines });
   }
-  return guardStatements(withDepends(out, diff), diff);
+  return guardStatements(withDepends(out, diff), diff).map(withNbeNote);
+}
+
+// 문자열 리터럴의 백슬래시 이스케이프('C:\\temp', '\n')는 NO_BACKSLASH_ESCAPES 세션에서 글자 그대로 읽혀 값이 오류 없이 달라진다.
+// 그런 리터럴이 있는 실행 문장에 안내를 붙인다. SQL_MODE 를 앞에서 고정하는 루틴 문장은 그 모드로 읽히므로 뺀다 (13회차)
+const NBE_NOTE = '[NBE 세션 주의] 문자열 값에 백슬래시 이스케이프가 있어 NO_BACKSLASH_ESCAPES 세션에서 실행하면 값이 달라집니다 — 그 모드가 없는 세션에서 실행하세요';
+const PINNED_MODE = /^SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = /;
+
+function withNbeNote(st: Statement): Statement {
+  if (st.comment || PINNED_MODE.test(st.sql) || !hasBackslashLiteral(st.sql)) return st;
+  return { ...st, notes: [...(st.notes ?? []), NBE_NOTE] };
+}
+
+function hasBackslashLiteral(sql: string): boolean {
+  try {
+    return tokenize(sql).some((t) => t.t === 'string' && sql.slice(t.s, t.e).includes('\\'));
+  } catch (e) {
+    // 읽을 수 없는 문장은 단일 문장 검사(guardStatements)가 이미 수동 확인으로 돌린다
+    if (e instanceof LexError) return false;
+    throw e;
+  }
 }
 
 function withDepends(stmts: Statement[], diff: SchemaDiff): Statement[] {
   const groups = retypeGroups(diff.tables);
-  if (!groups.size) return stmts;
+  const safe = incomingFkSafeTables(diff);
+  if (!groups.size && !safe.size) return stmts;
   return stmts.map((st) => {
-    const g = st.kind === 'table' ? groups.get(st.object) : undefined;
-    return g ? { ...st, depends: g } : st;
+    if (st.kind !== 'table') return st;
+    const g = groups.get(st.object);
+    const keeps = st.op === 'modify' && !st.related && safe.has(st.object);
+    return g || keeps ? { ...st, ...(g ? { depends: g } : {}), ...(keeps ? { keepsIncomingFks: true } : {}) } : st;
   });
 }
 

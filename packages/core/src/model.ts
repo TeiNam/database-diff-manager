@@ -137,6 +137,10 @@ export interface Routine {
   rawDdl?: string; // 파싱 실패 또는 왕복 불일치 시 정규화된 원문
 }
 
+// 이름을 알아낼 수 없는 파싱 실패 문장(스키마 덤프가 아닌 내용 등)에 붙이는 객체 이름
+export const UNIDENTIFIED_NAME = '(unknown)';
+export const isUnidentified = (obj: Pick<Table | View, 'name' | 'parseError'>): boolean => obj.parseError !== undefined && obj.name === UNIDENTIFIED_NAME;
+
 export interface SchemaModel {
   name: string;
   tables: Table[];
