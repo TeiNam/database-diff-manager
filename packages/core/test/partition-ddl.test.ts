@@ -32,10 +32,10 @@ describe('listPartitionStatements', () => {
     ]);
   });
 
-  it('앞쪽 보관기간 정리는 안내 없이 DROP, 뒤쪽·LIST 삭제는 데이터 손실 안내를 붙인 DROP', () => {
-    expect(listPartitionBodies('`t`', [P('p1'), P('p2'), P('p3')], [P('p2'), P('p3')])).toEqual([
-      { sql: 'ALTER TABLE `t` DROP PARTITION `p1`' },
-    ]);
+  it('앞쪽 보관기간 정리·뒤쪽·LIST 삭제는 모두 데이터 확인 안내를 붙인 DROP', () => {
+    const [lead] = listPartitionBodies('`t`', [P('p1'), P('p2'), P('p3')], [P('p2'), P('p3')]);
+    expect(lead.sql).toBe('ALTER TABLE `t` DROP PARTITION `p1`');
+    expect(lead.notes?.[0]).toMatch(/^\[데이터 확인\] p1: 보관 기간/);
     const [tail] = listPartitionBodies('`t`', [P('p1'), P('p2'), P('p3')], [P('p1'), P('p2')]);
     expect(tail.sql).toBe('ALTER TABLE `t` DROP PARTITION `p3`');
     expect(tail.notes?.[0]).toMatch(/^\[데이터 확인\] p3/);
@@ -43,6 +43,33 @@ describe('listPartitionStatements', () => {
     const [list] = listPartitionBodies('`t`', [L('p1'), L('p2'), L('p3')], [L('p1'), L('p3')], false);
     expect(list.sql).toBe('ALTER TABLE `t` DROP PARTITION `p2`');
     expect(list.notes?.[0]).toMatch(/^\[데이터 확인\] p2/);
+  });
+
+  const L = (name: string, values = name.slice(1)) => ({ name, def: `VALUES IN (${values}) ENGINE = InnoDB` });
+
+  it('LIST 병합: 값이 TARGET 에 남으면 DROP 하지 않고 함께 REORGANIZE 한다', () => {
+    expect(listPartitionBodies('`t`', [L('p1'), L('p2'), L('p3')], [L('p2', '1,2'), L('p3')], false)).toEqual([
+      { sql: 'ALTER TABLE `t` REORGANIZE PARTITION `p1`, `p2` INTO (\n PARTITION `p2` VALUES IN (1,2) ENGINE = InnoDB)' },
+    ]);
+  });
+
+  it('LIST 첫 파티션 삭제: 값이 TARGET 어디에도 없으면 데이터 확인 안내를 붙인 DROP', () => {
+    const [st, ...rest] = listPartitionBodies('`t`', [L('p1'), L('p2'), L('p3')], [L('p2'), L('p3')], false);
+    expect(rest).toEqual([]);
+    expect(st.sql).toBe('ALTER TABLE `t` DROP PARTITION `p1`');
+    expect(st.notes?.[0]).toMatch(/^\[데이터 확인\] p1/);
+  });
+
+  it('LIST COLUMNS 튜플 값도 공백 차이 없이 비교한다', () => {
+    const [st] = listPartitionBodies('`t`', [L('p1', "('x',1)"), L('p2', "('y',2)")], [L('p2', "('x', 1),('y',2)")], false);
+    expect(st.sql).toContain('REORGANIZE PARTITION `p1`, `p2`');
+    expect(st.notes).toBeUndefined();
+  });
+
+  it('LIST REORGANIZE 에서 사라지는 값은 그 행이 삭제된다고 안내한다', () => {
+    const [st] = listPartitionBodies('`t`', [L('p1', '1,5'), L('p2')], [L('p2', '1,2')], false);
+    expect(st.sql).toBe('ALTER TABLE `t` REORGANIZE PARTITION `p1`, `p2` INTO (\n PARTITION `p2` VALUES IN (1,2) ENGINE = InnoDB)');
+    expect(st.notes).toEqual(['[데이터 확인] 값 5: TARGET 파티션에 없어 REORGANIZE 하면 그 값의 행이 삭제됩니다']);
   });
 
   it('중간 RANGE 파티션의 경계가 바뀌면 뒤쪽 파티션까지 묶어 REORGANIZE', () => {
@@ -67,6 +94,18 @@ describe('partitionStatements', () => {
   it('HASH 개수 증감', () => {
     expect(partitionStatements(diff(hash(4), hash(6)))).toEqual(['ALTER TABLE `t` ADD PARTITION PARTITIONS 2']);
     expect(partitionStatements(diff(hash(6), hash(4)))).toEqual(['ALTER TABLE `t` COALESCE PARTITION 2']);
+  });
+
+  const named = (...ps: string[]): Partitioning => ({
+    version: '50100', method: 'HASH', expr: '`id`', partitions: ps.map((name) => ({ name, def: 'ENGINE = InnoDB' })),
+    clause: `PARTITION BY HASH (\`id\`)\n(${ps.map((n) => `PARTITION ${n} ENGINE = InnoDB`).join(',\n ')})`,
+  });
+
+  it('이름 있는 HASH 파티션: 뒤쪽 감소는 COALESCE, 뒤쪽 증가는 ADD PARTITION, 그 외는 전체 재정의', () => {
+    expect(partitionStatements(diff(named('a', 'b', 'c'), named('a')))).toEqual(['ALTER TABLE `t` COALESCE PARTITION 2']);
+    expect(partitionStatements(diff(named('a'), named('a', 'b')))).toEqual(['ALTER TABLE `t` ADD PARTITION (\n PARTITION `b` ENGINE = InnoDB)']);
+    expect(partitionStatements(diff(named('a', 'b'), named('x', 'b')))).toEqual(['ALTER TABLE `t` PARTITION BY HASH (`id`)\n(PARTITION x ENGINE = InnoDB,\n PARTITION b ENGINE = InnoDB)']);
+    expect(partitionStatements(diff(hash(2), named('a', 'b')))).toEqual(['ALTER TABLE `t` PARTITION BY HASH (`id`)\n(PARTITION a ENGINE = InnoDB,\n PARTITION b ENGINE = InnoDB)']);
   });
 
   it('방식이 바뀌면 전체 재정의, 없어지면 REMOVE PARTITIONING', () => {

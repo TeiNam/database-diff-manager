@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `log` (`id`, `msg`) VALUES (1, 'old'); INSERT INTO `log_new` (`id`, `msg`, `level`) VALUES (1, 'new', 3); INSERT INTO `entry` (`id`, `log_id`) VALUES (10, 1)",
+  "query": "SELECT `e`.`id`, `l`.`msg`, `l`.`level` FROM `entry` `e` JOIN `log` `l` ON `l`.`id` = `e`.`log_id`",
+  "rows": [{ "id": 10, "msg": "new", "level": 3 }]
+}

@@ -1,0 +1,2 @@
+-- [~] TABLE session
+ALTER TABLE `session` COALESCE PARTITION 2;

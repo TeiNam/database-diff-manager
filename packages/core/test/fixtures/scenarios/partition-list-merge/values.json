@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `shipment` (`id`, `region`) VALUES (1, 1), (2, 2), (3, 3)",
+  "query": "SELECT `id`, `region` FROM `shipment` ORDER BY `id`",
+  "rows": [{ "id": 1, "region": 1 }, { "id": 2, "region": 2 }, { "id": 3, "region": 3 }]
+}

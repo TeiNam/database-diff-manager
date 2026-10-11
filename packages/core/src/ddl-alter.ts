@@ -108,7 +108,8 @@ export function inheritCollation(c: Column, t: Table): Column {
 
 function columnClauses(d: TableDiff, forced: ReadonlySet<string>, out: Collected): void {
   const to = d.to!;
-  const changes = new Map(d.columns.map((c) => [c.name, c]));
+  // 삭제는 앞에서 DROP 으로 처리했다. 같은 이름으로 들어오는 rename(x→y, 기존 y 삭제)을 덮지 않도록 뺀다
+  const changes = new Map(d.columns.filter((c) => c.op !== 'drop').map((c) => [c.name, c]));
   const moved = new Set(d.moved);
   const bases = baseColumns(d);
   to.columns.forEach((raw, idx) => {

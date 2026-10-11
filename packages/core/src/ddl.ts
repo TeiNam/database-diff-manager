@@ -48,7 +48,8 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
     routine(r, r.op === 'modify' && r.to!.parseError ? manualBody(`${name}: 바뀐 루틴을 파싱할 수 없어 삭제·재생성하지 않습니다. 원문을 확인하세요`, drop) : sqlBody(drop));
   }
   // 3. 테이블 rename (이름이 얽힌 rename 은 한 문장으로 묶는다)
-  const taken = new Set(diff.tables.flatMap((d) => [d.name, d.oldName ?? d.name]));
+  // 변경 없는 테이블·뷰 이름도 임시 이름 후보에서 뺀다 (RENAME 실패 1050 방지)
+  const taken = new Set([...diff.objectNames, ...diff.tables.flatMap((d) => [d.name, d.oldName ?? d.name])]);
   for (const g of renameGroups(diff.tables, taken)) {
     const [first] = g.tables;
     if (g.tables.length === 1) table(first, sqlBody(renameTableSql(g.clauses)));
