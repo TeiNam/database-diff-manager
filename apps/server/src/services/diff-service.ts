@@ -1,6 +1,6 @@
 import { canonicalJson, diffSchemas, flowRenameMappings, generateDdl, renderDdl, type RenameMapping, type SchemaDiff, type SchemaModel, type Statement } from '@tdm/core';
 import type { Db } from '../db/connection';
-import { listRenames } from '../repos/renames';
+import { hasSavedRenames, listRenames } from '../repos/renames';
 import { getVersionMeta, loadVersion, type VersionDetail, type VersionMeta } from '../repos/versions';
 import type { AppCache } from './cache';
 import { migrationFlowFor, migrationRefFor, type MigrationRef } from './migration-service';
@@ -32,20 +32,24 @@ export function mergeRenames(dms: RenameMapping[], manual: RenameMapping[], isRe
   ];
 }
 
-// (base, target) 매핑을 (target, base) 방향으로 뒤집는다. column/index 의 table 은 새 TARGET(옛 BASE) 쪽 이름으로 바꾼다
-export function invertRenames(renames: RenameMapping[]): RenameMapping[] {
-  const oldTableName = new Map(renames.filter((r) => r.kind === 'table').map((r) => [r.to, r.from]));
+// (base, target) 매핑을 (target, base) 방향으로 뒤집는다. column/index 의 table 은 새 TARGET(옛 BASE) 쪽 이름으로 바꾼다.
+// 테이블 대응은 뒤집은 수동 테이블 rename 이 우선이고, 없으면 (target, base) 방향 DMS 테이블 rename(옛 TARGET → 옛 BASE)을 쓴다
+export function invertRenames(renames: RenameMapping[], reverseDms: RenameMapping[] = []): RenameMapping[] {
+  const oldTableName = new Map([
+    ...reverseDms.filter((r) => r.kind === 'table').map((r): [string, string] => [r.from, r.to]),
+    ...renames.filter((r) => r.kind === 'table').map((r): [string, string] => [r.to, r.from]),
+  ]);
   return renames.map((r) => (r.kind === 'table'
     ? { kind: r.kind, from: r.to, to: r.from }
     : { kind: r.kind, table: oldTableName.get(r.table ?? '') ?? r.table, from: r.to, to: r.from }));
 }
 
-// 이 쌍의 수동 매핑. 없으면 역쌍에 저장된 매핑을 뒤집어 쓴다 (되돌리기 DDL 에도 rename 이 반영되도록)
-function manualRenamesFor(db: Db, baseId: number, targetId: number): { manual: RenameMapping[]; isReversed: boolean } {
+// 이 쌍의 수동 매핑. 이 쌍에 저장한 적이 없으면(빈 목록 저장도 저장이다) 역쌍에 저장된 매핑을 돌려준다 (뒤집기는 DMS 를 읽은 뒤)
+function manualRenamesFor(db: Db, baseId: number, targetId: number): { manual: RenameMapping[]; reverse?: RenameMapping[] } {
   const forward = listRenames(db, baseId, targetId);
-  if (forward.length || baseId === targetId) return { manual: forward, isReversed: false };
-  const reverse = invertRenames(listRenames(db, targetId, baseId));
-  return { manual: reverse, isReversed: reverse.length > 0 };
+  if (forward.length || baseId === targetId || hasSavedRenames(db, baseId, targetId)) return { manual: forward };
+  const reverse = listRenames(db, targetId, baseId);
+  return reverse.length ? { manual: [], reverse } : { manual: [] };
 }
 
 // 최신 전환 매핑에서 나온 rename (매핑이 없으면 빈 배열). 역쌍 매핑이면 뒤집어 쓴다 (되돌리기 DDL 에 DROP 대신 RENAME)
@@ -74,13 +78,14 @@ export function loadDiffInputs(db: Db, cache: AppCache, baseId: number, targetId
 
 // 버전 내용은 불변이라 캐시 키는 (base, target, 전환 매핑 방향·id, 수동 rename 매핑과 그 출처 방향)뿐이다
 export function computeDiff(db: Db, cache: AppCache, baseId: number, targetId: number, inputs?: DiffInputs): DiffResponse {
-  const { manual, isReversed } = manualRenamesFor(db, baseId, targetId);
+  const { manual: forward, reverse } = manualRenamesFor(db, baseId, targetId);
   const ref = inputs ? inputs.ref : refFor(db, baseId, targetId);
-  const key = `${baseId}:${targetId}:${ref ? `${ref.direction}:${ref.id}` : 'none'}:${isReversed ? 'rev' : 'fwd'}:${canonicalJson(manual)}`;
+  const key = `${baseId}:${targetId}:${ref ? `${ref.direction}:${ref.id}` : 'none'}:${reverse ? `rev:${canonicalJson(reverse)}` : `fwd:${canonicalJson(forward)}`}`;
   const cached = cache.diff.get(key);
   if (cached) return cached;
   const { base, target, dms } = inputs ?? loadDiffInputs(db, cache, baseId, targetId, ref);
-  const renames = mergeRenames(dms, manual, isReversed);
+  const manual = reverse ? invertRenames(reverse, dms) : forward;
+  const renames = mergeRenames(dms, manual, reverse !== undefined);
   const diff = diffSchemas(base.model, target.model, renames);
   const statements = generateDdl(diff);
   const result: DiffResponse = {

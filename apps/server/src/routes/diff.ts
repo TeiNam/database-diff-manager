@@ -20,7 +20,24 @@ function toManualRenames(submitted: RenameMapping[], dms: RenameMapping[]): Rena
   const manual = submitted.filter((r) => !dmsFull.has(`${renameKey(r)}>${r.to}`));
   if (manual.length > MAX_RENAMES) throw new AppError(400, `rename 매핑은 최대 ${MAX_RENAMES}개까지 저장할 수 있습니다`);
   if (new Set(manual.map(renameKey)).size !== manual.length) throw new AppError(400, '같은 대상에 대한 매핑이 중복되었습니다');
+  rejectSharedTargets(manual, dms);
   return manual;
+}
+
+// 같은 이름으로 가는 매핑이 둘 이상이면 diff 는 하나만 적용해, 뒤집은 역방향 매핑과 어긋난다. 수동 매핑이 낀 경우 저장을 거부한다
+function rejectSharedTargets(manual: RenameMapping[], dms: RenameMapping[]): void {
+  const manualKeys = new Set(manual.map(renameKey));
+  const effective = [...dms.filter((r) => !manualKeys.has(renameKey(r))).map((r) => ({ r, isManual: false })), ...manual.map((r) => ({ r, isManual: true }))];
+  const byTarget = new Map<string, typeof effective>();
+  for (const e of effective) {
+    const key = `${e.r.kind}:${e.r.table ?? ''}:${e.r.to}`;
+    byTarget.set(key, [...(byTarget.get(key) ?? []), e]);
+  }
+  const clash = [...byTarget.values()].find((list) => list.length > 1 && list.some((e) => e.isManual));
+  if (clash) {
+    const pairs = clash.map((e) => `${e.r.from}→${e.r.to}`).join(', ');
+    throw new AppError(400, `같은 이름(${clash[0].r.to})으로 가는 매핑이 여러 개입니다: ${pairs}. 하나만 남기세요`);
+  }
 }
 
 export function diffRoutes(app: FastifyInstance, ctx: AppContext): void {

@@ -116,6 +116,54 @@ describe('수동 rename 의 역방향 적용', () => {
   });
 });
 
+describe('수동 rename 역방향 적용 — DMS 테이블 rename·중복 대상·해제', () => {
+  const put = (ctx: App, base: number, target: number, renames: unknown[]) =>
+    ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.dba, payload: { base, target, renames } });
+  const get = async (ctx: App, base: number, target: number) =>
+    (await ctx.app.inject({ method: 'GET', url: `/api/diff?base=${base}&target=${target}`, headers: ctx.viewer })).json();
+
+  it('DMS 테이블 rename(members→member) + 수동 컬럼 rename 의 역방향은 DMS 대응 테이블 이름으로 뒤집는다', async () => {
+    const ctx = await loggedInApp();
+    const v1 = await upload(ctx, 'a.sql', 'CREATE TABLE `members` (\n  `id` int NOT NULL,\n  `nick` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n);', 'legacy');
+    const v2 = await upload(ctx, 'b.sql', 'CREATE TABLE `member` (\n  `id` int NOT NULL,\n  `nickname` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n);', 'newapp');
+    const [from, to] = await Promise.all([get(ctx, v1, v2), get(ctx, v2, v1)]).then(([d]) => [d.base.schemaId, d.target.schemaId]);
+    const rules = [
+      { 'rule-type': 'selection', 'rule-id': '1', 'rule-name': '1', 'object-locator': { 'schema-name': 'legacy', 'table-name': 'members' }, 'rule-action': 'include' },
+      { 'rule-type': 'transformation', 'rule-id': '2', 'rule-name': '2', 'rule-target': 'table', 'object-locator': { 'schema-name': 'legacy', 'table-name': 'members' }, 'rule-action': 'rename', value: 'member' },
+    ];
+    const uploaded = await ctx.app.inject({ method: 'POST', url: '/api/migrations', headers: ctx.admin, payload: { fromSchemaId: from, toSchemaId: to, filename: 'm.json', source: JSON.stringify({ rules }) } });
+    expect(uploaded.statusCode).toBe(201);
+    expect((await put(ctx, v1, v2, [{ kind: 'column', table: 'member', from: 'nick', to: 'nickname' }])).statusCode).toBe(200);
+
+    const rev = await get(ctx, v2, v1);
+    expect(rev.renames).toContainEqual({ kind: 'column', table: 'members', from: 'nickname', to: 'nick', source: 'manual', reversed: true });
+    expect(rev.ddl).toContain('RENAME COLUMN `nickname` TO `nick`');
+    expect(rev.ddl).not.toContain('DROP');
+  });
+
+  it('같은 대상으로 가는 매핑(c→b, a→b)은 저장 단계에서 거부한다', async () => {
+    const ctx = await loggedInApp();
+    const v1 = await upload(ctx, 's.sql', 'CREATE TABLE `a` (\n  `id` int NOT NULL\n);\nCREATE TABLE `c` (\n  `id` int NOT NULL\n);');
+    const v2 = await upload(ctx, 's.sql', 'CREATE TABLE `b` (\n  `id` int NOT NULL\n);');
+    const res = await put(ctx, v1, v2, [{ kind: 'table', from: 'c', to: 'b' }, { kind: 'table', from: 'a', to: 'b' }]);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toContain('같은 이름(b)');
+  });
+
+  it('역쌍 매핑 사본을 이 쌍에 저장했다가 모두 해제하면 역쌍 매핑이 되살아나지 않는다', async () => {
+    const ctx = await loggedInApp();
+    const v1 = await upload(ctx, 's.sql', 'CREATE TABLE `members` (\n  `id` int NOT NULL\n);');
+    const v2 = await upload(ctx, 's.sql', 'CREATE TABLE `member` (\n  `id` int NOT NULL\n);');
+    await put(ctx, v1, v2, [{ kind: 'table', from: 'members', to: 'member' }]);
+    expect((await get(ctx, v2, v1)).renames).toEqual([{ kind: 'table', from: 'member', to: 'members', source: 'manual', reversed: true }]);
+    await put(ctx, v2, v1, [{ kind: 'table', from: 'member', to: 'members' }]); // 후보 처리 때 이 쌍에 사본 저장
+    expect((await put(ctx, v2, v1, [])).statusCode).toBe(200);
+    const rev = await get(ctx, v2, v1);
+    expect(rev.renames).toEqual([]);
+    expect(rev.diff.tables.map((t: { op: string }) => t.op)).toEqual(['drop', 'add']);
+  });
+});
+
 describe('GET /api/objects/:id/history', () => {
   it('리비전과 처음 나온 버전', async () => {
     const ctx = await loggedInApp();
