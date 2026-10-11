@@ -11,6 +11,8 @@ import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated
 import { printForeignKey, printRoutine, printTable, printView } from './print';
 import { renameGroups, renameTableSql } from './table-rename';
 
+import { incomingFkSafeTables } from './card-bundle';
+
 export { objectStatements } from './card-bundle';
 
 export interface Statement extends StatementBody {
@@ -33,6 +35,8 @@ export interface Statement extends StatementBody {
   // 같은 판정). 객체 카드 복사 묶음 계산에 쓴다. 함수 이름은 대소문자를 무시해 비교한다
   reads?: string[];
   calls?: string[];
+  // keepsIncomingFks: 이 테이블 변경이 이 테이블을 참조하는 다른 테이블 FK 의 컬럼·키를 건드리지 않음 (카드에 자식 FK 해제를 넣지 않는다)
+  keepsIncomingFks?: boolean;
 }
 
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };
@@ -116,10 +120,13 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
 
 function withDepends(stmts: Statement[], diff: SchemaDiff): Statement[] {
   const groups = retypeGroups(diff.tables);
-  if (!groups.size) return stmts;
+  const safe = incomingFkSafeTables(diff);
+  if (!groups.size && !safe.size) return stmts;
   return stmts.map((st) => {
-    const g = st.kind === 'table' ? groups.get(st.object) : undefined;
-    return g ? { ...st, depends: g } : st;
+    if (st.kind !== 'table') return st;
+    const g = groups.get(st.object);
+    const keeps = st.op === 'modify' && !st.related && safe.has(st.object);
+    return g || keeps ? { ...st, ...(g ? { depends: g } : {}), ...(keeps ? { keepsIncomingFks: true } : {}) } : st;
   });
 }
 

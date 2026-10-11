@@ -491,6 +491,18 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(cardOf('view-order-alias', 'view', 'z').statements.map((s) => s.object)).toEqual(['a', 'z']);
   });
 
+  it('부모 카드는 들어오는 FK 와 충돌하는 문장일 때만 자식 FK 해제를 넣는다: 컬럼 추가는 빼고 참조 컬럼 타입 변경은 넣는다 (13회차 2)', () => {
+    const sqls = (object: string) => cardOf('card-parent-child-drop', 'table', object).statements.map((s) => s.sql.split('\n').join(' '));
+    expect(sqls('p')).toEqual(['ALTER TABLE `p`   ADD COLUMN `memo` varchar(50) DEFAULT NULL']);
+    expect(sqls('q')).toEqual(['ALTER TABLE `d`   DROP FOREIGN KEY `fk_d_q`', 'ALTER TABLE `q`   MODIFY COLUMN `id` bigint NOT NULL']);
+  });
+
+  it('의존 매칭은 문장의 object 와 related 이름 모두를 본다: 맞바꾸기 뒤 coupon 을 읽는 새 뷰 카드는 묶음 RENAME 을 넣는다 (13회차 3)', () => {
+    const { statements, dependencies } = cardOf('card-view-swap-rename', 'view', 'v_coupon');
+    expect(statements.map((s) => s.sql.split('\n')[0])).toEqual([expect.stringMatching(/^RENAME TABLE `coupon` TO `__tdm_tmp_1`/), expect.stringMatching(/VIEW `v_coupon`/)]);
+    expect(dependencies).toEqual(['voucher']);
+  });
+
   it('의존이 없으면 자기 문장만', () => {
     const { base, target } = scenario('columns');
     const stmts = generateDdl(diffSchemas(base, target));

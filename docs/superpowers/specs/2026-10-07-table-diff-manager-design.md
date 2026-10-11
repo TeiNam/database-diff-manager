@@ -230,15 +230,17 @@ interface Statement {
   frees?: string[];   // 테이블 rename 이 비우는 BASE 이름(묶음 안에서 다시 차지하는 이름 제외). 객체 카드 복사 묶음 계산용 (8회차 개정)
   reads?: string[];   // 뷰 생성 문장의 본문이 FROM/JOIN 으로 읽는 테이블·뷰 이름(`objectReferences().relations`). 9단계 뷰 정렬과 같은 값을 객체 카드 복사 묶음이 쓴다 (9회차 개정)
   calls?: string[];   // 뷰 생성 문장의 본문이 부르는 함수 이름(`objectReferences().routines`). 카드 묶음은 함수 문장과만 대소문자 무시로 비교한다 (10회차 개정)
+  keepsIncomingFks?: boolean; // 이 테이블 변경이 들어오는 FK 의 참조 컬럼·키를 건드리지 않음 — 카드에 자식 FK 해제를 넣지 않는다 (13회차 개정)
 }
 ```
 
 **객체 카드 복사 묶음** (`objectStatements(stmts, kind, name)`, 7회차 개정): 그 객체의 문장(related 포함)에서 시작해 단독 실행에 필요한 다른 객체 문장을 고정점까지 더하고, 전체 DDL 순서의 부분 집합으로 낸다. 함께 들어간 다른 객체는 `dependencies`(이름순)로 카드에 "의존 문장 포함: …" 으로 보인다. 의존이 없으면 자기 문장만이다.
 
 - `depends` 묶음(fk-retype)의 테이블 문장 전부
+- 의존 매칭은 문장이 다루는 모든 이름(`object` 와 `related`)으로 한다(13회차 개정): 맞바꾸기 rename 은 object 하나에 related 로 두 테이블을 묶으므로, 맞바꾼 뒤의 `coupon` 을 읽는 새 뷰 카드는 묶음 `RENAME TABLE` 을 넣는다(빠지면 교환 전 테이블을 읽는다, 골든 `card-view-swap-rename`). 뷰 참조·FK 해제·이름 비우기 모두 같다
 - 포함 관계 닫힘(11회차 개정): 카드에 어떤 테이블 문장이 하나라도 들어가면 그 테이블의 문장 전부(FK 해제·재추가 포함, DROP TABLE 제외)를 넣는다. 새 자식 테이블을 읽는 뷰 카드가 `CREATE c` 만 넣고 FK 추가를 빼면 FK 없는 테이블이 되고, FK 컬럼을 바꾸는 기존 테이블의 본 ALTER 만 넣고 선행 FK 해제를 빼면 `Cannot drop column … needed in a foreign key constraint` 로 실패한다(8.0/8.4 실측, 골든 `card-view-fk-closure`). 넣은 문장의 의존은 아래 규칙으로 다시 넓힌다
 - FK 추가 문장(`fkAdds`): 참조 테이블의 문장 전부(위 닫힘 규칙, DROP TABLE 제외)
-- 테이블을 바꾸거나(rename·변경) 지우는 문장: 그 테이블을 참조하는 다른 테이블의 FK 해제 문장(`fkDrops`) — 삭제되는 자식은 해제 문장만(자식 DROP TABLE 은 넣지 않는다), 남는 자식은 재추가까지 그 테이블 문장 전부 (error 3780·3730; `drop-fk-tables`, `fk-drop-parent-widen`, `fk-rename-widen`)
+- 테이블을 바꾸거나(rename·변경) 지우는 문장: 그 테이블을 참조하는 다른 테이블의 FK 해제 문장(`fkDrops`) — 삭제되는 자식은 해제 문장만(자식 DROP TABLE 은 넣지 않는다), 남는 자식은 재추가까지 그 테이블 문장 전부 (error 3780·3730; `drop-fk-tables`, `fk-drop-parent-widen`, `fk-rename-widen`). 들어오는 FK 와 실제로 충돌하는 변경에만 넣는다(13회차 개정): 테이블 삭제·rename, 파싱 실패, 파티션·옵션(COMMENT 제외) 변경, 참조 컬럼의 변경·삭제·rename·위치 이동, 참조 컬럼을 담은 인덱스의 삭제·변경·rename. 그 밖의 변경(컬럼 추가 등)은 `keepsIncomingFks` 로 표시해 넣지 않는다 — 부모 `p` 에 `memo` 만 추가하고 자식 `c` 를 지우면 `p` 카드에 `c` 의 `DROP FOREIGN KEY` 를 넣지 않는다(카드만 실행하면 `c` 는 남고 FK 만 사라진다, 골든 `card-parent-child-drop`)
 - 뷰 생성·교체: 본문이 참조하는 테이블(생성·변경)·뷰·함수 문장 (예: `routines` 의 `order_net` 은 새 함수 `net`). 참조는 본문 토큰에서 `FROM`/`JOIN` 뒤 테이블과 `` `이름`( `` 형태의 함수 호출만 본다 — 별칭(`AS` 뒤)·컬럼 참조(`` `t`.`c` `` 의 c)·문자열·주석 속 같은 이름은 무관하다(`select 1 AS `chat_log`` 가 `chat_log` 의 `DROP PARTITION` 을 끌어오지 않는다). 토큰으로 나눌 수 없으면 `` `이름` `` 포함 여부로 본다(안전 쪽, 8회차 개정). FROM/JOIN 참조(`reads`)는 테이블·뷰 문장만, 함수 호출(`calls`)은 함수 문장만(이름은 `routineNameKey` 로 대소문자 무시 — SHOW CREATE VIEW 는 호출을 쓴 대소문자 그대로 낸다, 8.4 실측) 묶는다. 함수 `f()` 만 부르는 새 뷰 카드에 테이블 `f` 의 `DROP COLUMN` 을 넣지 않는다(골든 `card-function-table-same-name`, 10회차 개정). 참조의 스키마 한정자는 보존한다: SHOW CREATE VIEW 는 현재 스키마 한정자를 생략하고 다른 스키마만 한정하므로, 한정자가 BASE·TARGET 스키마 이름(`SchemaDiff.schemaNames`) 밖이면(`` `ext`.`t` ``, `` `ext`.`f`() ``) 로컬 객체로 묶지 않는다 — 뷰 정렬·카드 묶음·수동 확인 전파 모두 같다. 스키마 이름을 모르면(덤프에 `/* Database : … */` 없음, 옛 JSON) 한정자를 보지 않는다(안전 쪽, 골든 `view-external-schema`, 11회차 개정). 뷰 정렬(9단계)은 FROM/JOIN 참조로만 하고 같은 판정을 쓴다. 수동 확인 전파도 같은 구분으로 막힌 테이블·뷰는 FROM/JOIN 참조와, 파싱 실패 새 함수는 함수 호출과만 비교한다. 자기 자신(같은 종류·이름)만 뺀다 — 같은 이름의 함수 `v()` 를 부르는 뷰 `v` 카드는 함수 생성을 포함한다(골든 `card-function-view-same-name`, 9회차 개정)
 - 이름 N 을 차지하는 문장(생성·교체·rename into): 같은 이름 N 의 다른 종류 객체 삭제(테이블↔뷰 교체 — `DROP TABLE x` + `CREATE VIEW x`, `DROP VIEW x` + `CREATE TABLE x`·`RENAME TABLE y TO x`)와 N 을 비우는 테이블 rename(`frees`). 빠지면 단독 실행 때 `'db.x' is not VIEW`·`already exists` 로 실패한다(골든 `table-to-view`·`view-to-table`·`view-drop-rename-into`, 8회차 개정). 이름 비우기는 같은 이름 공간끼리만 본다 — 테이블과 뷰는 이름 공간을 공유하고 함수·프로시저는 각자 별개라, 테이블 `p` 삭제 + 프로시저 `p` 추가의 프로시저 카드에 `DROP TABLE p` 를 넣지 않는다(무관한 테이블 삭제 = 데이터 손실, 골든 `card-table-proc-same-name`, 9회차 개정)
 
