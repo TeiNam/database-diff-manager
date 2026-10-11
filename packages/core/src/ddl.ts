@@ -1,5 +1,7 @@
 // SchemaDiff → BASE를 TARGET으로 바꾸는 DDL. 순서는 FK·뷰 의존성 때문에 고정 (스펙 4.6)
-import { renamedAutoName, type Op, type RoutineDiff, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
+import { renamedFkNames } from './auto-name';
+import { guardStatements } from './ddl-guard';
+import { type Op, type RoutineDiff, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
 import { alter, alterStatements, commentBody, inheritCollation, manualBody, sqlBody, type StatementBody } from './ddl-alter';
 import { quoteIdent as q, quoteString } from './lexer';
 import type { Routine, RoutineKind, Table } from './model';
@@ -21,6 +23,7 @@ const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>'
 const DEFINER_NOTE = 'DEFINER 없이 생성합니다 — 실행한 사용자가 DEFINER 가 됩니다';
 const PIN_NOTE = 'RENAME INDEX x TO x: FK 를 다시 추가할 때 FK 가 만든 인덱스 이름이 FK 이름으로 바뀌지 않도록 고정합니다';
 const PARTIAL_NOTE = '-- [MD 기반] 일부 속성(Normal 인덱스 종류, 기본값, 생성 컬럼, 문자셋·콜레이션, CHECK, 파티션)은 비교하지 않았습니다';
+const PARTIAL_CHECK_NOTE = '-- [MD 기반] MD 출처는 CHECK 를 알 수 없어, 실제 DB 에 CHECK 가 있으면 그 컬럼의 RENAME·CHANGE COLUMN 이 오류 3959 로 실패할 수 있습니다';
 
 export function generateDdl(diff: SchemaDiff): Statement[] {
   const out: Statement[] = [];
@@ -83,13 +86,16 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
       ? commentBody(`-- [수동 확인 필요] ${v.name}: 파싱할 수 없는 뷰입니다. 원문을 확인하세요`)
       : sqlBody(printView(v.to!, { orReplace: true }), [DEFINER_NOTE]));
   }
-  return guardConflicts(out, renameConflicts(diff));
+  return guardStatements(out, diff);
 }
 
 // diff 의 FK 이름(rename 된 테이블의 자동 이름은 새 테이블 이름으로 바꾼 것)에 해당하는 BASE FK 이름
 function baseFkName(d: TableDiff, name: string): string {
-  if (!d.oldName) return name;
-  return d.from?.foreignKeys.find((f) => renamedAutoName(f.name, d.oldName!, d.name, 'ibfk') === name)?.name ?? name;
+  if (!d.oldName || !d.from) return name;
+  const fks = d.from.foreignKeys;
+  const renamed = renamedFkNames(fks, d.oldName, d.name);
+  const i = renamed.indexOf(name);
+  return i < 0 ? name : fks[i].name;
 }
 
 // FK 가 자동으로 만든 인덱스는 같은 컬럼에 이름 있는 FK 를 다시 추가하면 그 FK 이름으로 바뀐다 (SHOW CREATE 로는 직접 만든
@@ -109,7 +115,10 @@ export function renderDdl(stmts: Statement[], partial = false): string {
   const blocks = stmts.map((s) =>
     [`-- [${MARK[s.op]}] ${s.kind.toUpperCase()} ${s.object}`, ...(s.notes ?? []).map((n) => `-- ${n}`), statementText(s)].join('\n'),
   );
-  if (partial && blocks.length) blocks.unshift(PARTIAL_NOTE);
+  if (partial && blocks.length) {
+    const renamesColumn = stmts.some((s) => !s.comment && /\b(?:RENAME|CHANGE) COLUMN\b/.test(s.sql));
+    blocks.unshift(renamesColumn ? `${PARTIAL_NOTE}\n${PARTIAL_CHECK_NOTE}` : PARTIAL_NOTE);
+  }
   return blocks.length ? `${blocks.join('\n\n')}\n` : '';
 }
 
@@ -135,73 +144,6 @@ function createTable(t: Table): StatementBody {
   const sql = printTable({ ...t, columns: columns.map((c) => printable(inheritCollation(c, t))), indexes }, { foreignKeys: false });
   const missing = columns.filter(hasUnknownGenerated).map((c) => c.name);
   return missing.length ? manualBody(generatedReason(t.name, missing), sql, notes) : sqlBody(sql, notes);
-}
-
-interface Conflict {
-  reason: string;
-  notes: string[];
-}
-
-// 순서로 풀 수 없는 rename ('이름 충돌'로 적용되지 않은 매핑)을 테이블별로 모은다. 컬럼은 TARGET 테이블,
-// 테이블 매핑은 옛·새 이름 두 테이블 모두 (옛 이름 테이블이 그대로 남거나 새 이름 테이블이 따로 만들어진다)
-function renameConflicts(diff: SchemaDiff): Map<string, Conflict> {
-  const out = new Map<string, Conflict>();
-  const add = (table: string, kind: string, note: string) => {
-    const prev = out.get(table);
-    out.set(table, { reason: prev?.reason ?? `${table}: ${kind} rename 이름 충돌 — 값 대응을 확인해 직접 작성하세요`, notes: [...(prev?.notes ?? []), note] });
-  };
-  for (const { mapping: m, reason } of diff.ignoredRenames) {
-    if (reason !== '이름 충돌') continue;
-    if (m.kind === 'table') {
-      const note = `테이블 rename ${m.from}→${m.to} 이 다른 테이블 이름과 겹쳐 적용하지 못했습니다`;
-      for (const name of new Set([m.from, m.to])) add(name, '테이블', note);
-    } else if (m.kind === 'column' && m.table !== undefined) {
-      add(m.table, '컬럼', `컬럼 rename ${m.from}→${m.to} 이 다른 컬럼 이름과 겹쳐 적용하지 못했습니다`);
-    }
-  }
-  return spreadConflicts(diff, out);
-}
-
-// 충돌 테이블이 얽힌 rename 묶음에 들면 묶음의 모든 테이블로 넓힌다 (묶음 RENAME 이 실행되지 않으면 다른 테이블의 ALTER 가
-// 엉뚱한 테이블의 데이터를 바꾼다). 그 테이블들을 참조하는 FK 를 바꾸는 테이블도 함께 막는다
-function spreadConflicts(diff: SchemaDiff, conflicts: Map<string, Conflict>): Map<string, Conflict> {
-  if (!conflicts.size) return conflicts;
-  const out = new Map(conflicts);
-  const blocked = new Set(conflicts.keys());
-  for (const g of renameGroups(diff.tables, new Set())) {
-    if (!g.tables.some((d) => conflicts.has(d.name) || conflicts.has(d.oldName!))) continue;
-    const pairs = g.tables.map((d) => `${d.oldName}→${d.name}`).join(', ');
-    for (const d of g.tables) {
-      blocked.add(d.name).add(d.oldName!);
-      if (out.has(d.name)) continue;
-      out.set(d.name, { reason: `${d.name}: 함께 묶인 테이블 rename 이 수동 확인이라 실행하지 않습니다 — 값 대응을 확인해 직접 작성하세요`, notes: [`테이블 rename 묶음(${pairs})의 다른 테이블에 이름 충돌이 있습니다`] });
-    }
-  }
-  for (const d of diff.tables) {
-    if (out.has(d.name) || (d.op !== 'modify' && d.op !== 'rename')) continue;
-    const refs = d.foreignKeys.filter((f) => [f.from?.refTable, f.to?.refTable].some((n) => n !== undefined && blocked.has(n)));
-    if (!refs.length) continue;
-    out.set(d.name, { reason: `${d.name}: 참조하는 테이블의 rename 이 수동 확인이라 FK 변경을 실행하지 않습니다 — 직접 작성하세요`, notes: [`FK ${refs.map((f) => f.name).join(', ')} 가 수동 확인 테이블을 참조합니다`] });
-  }
-  return out;
-}
-
-// rename 이 이름 충돌로 빠진 테이블은 값 대응이 어긋나므로 그 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제,
-// ALTER, 파티션)을 실행하지 않는 수동 확인 문장으로 바꾼다. 그 테이블 문장이 하나도 없으면 안내 문장 하나를 만든다
-function guardConflicts(stmts: Statement[], conflicts: Map<string, Conflict>): Statement[] {
-  if (!conflicts.size) return stmts;
-  const objectsOf = (st: Statement) => (st.kind === 'table' ? st.related ?? [st.object] : []);
-  const guarded = stmts.map((st) => {
-    const hits = objectsOf(st).map((n) => conflicts.get(n)).filter((c): c is Conflict => c !== undefined);
-    if (!hits.length || st.comment) return st;
-    const notes = [...new Set(hits.flatMap((c) => c.notes))];
-    return { ...st, ...manualBody(hits[0].reason, st.sql, [...(st.notes ?? []), ...notes]) };
-  });
-  const covered = new Set(stmts.flatMap(objectsOf));
-  const extra = [...conflicts].filter(([name]) => !covered.has(name)).map(([name, c]): Statement => (
-    { object: name, kind: 'table', op: 'modify', ...commentBody(`-- [수동 확인 필요] ${c.reason}`), notes: c.notes }
-  ));
-  return [...guarded, ...extra];
 }
 
 function sortViews(views: ViewDiff[]): ViewDiff[] {
