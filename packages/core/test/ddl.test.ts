@@ -192,6 +192,26 @@ describe('생성 컬럼 저장 방식 변경', () => {
     expect(st.comment).toBe(true);
     expect(st.sql).toContain('-- [수동 확인 필요] t: 생성 컬럼(`g`)의 VIRTUAL↔STORED 변경은 MODIFY 로 할 수 없습니다');
   });
+
+  // MySQL 8.0/8.4 실측: 일반 ↔ VIRTUAL 은 error 3106, 일반 ↔ STORED 는 MODIFY 로 된다 (5회차 3)
+  const g = (def: string) => parseSqlDump(`CREATE TABLE \`t\` (\n  \`a\` int NOT NULL,\n  \`g\` ${def}\n) ENGINE=InnoDB;`).model;
+  const VIRTUAL = 'int GENERATED ALWAYS AS ((`a` * 2)) VIRTUAL';
+  const STORED = 'int GENERATED ALWAYS AS ((`a` * 2)) STORED';
+
+  it('일반 ↔ VIRTUAL 생성 컬럼 전환은 수동 확인 문장으로 낸다', () => {
+    for (const [from, to] of [['int DEFAULT NULL', VIRTUAL], [VIRTUAL, 'int DEFAULT NULL']]) {
+      const [st] = generateDdl(diffSchemas(g(from), g(to)));
+      expect(st.comment).toBe(true);
+      expect(st.sql).toContain('-- [수동 확인 필요] t: 생성 컬럼(`g`)의 일반↔VIRTUAL 변경은 MODIFY 로 할 수 없습니다');
+    }
+  });
+
+  it('일반 ↔ STORED 생성 컬럼 전환은 그대로 MODIFY', () => {
+    for (const [from, to] of [['int DEFAULT NULL', STORED], [STORED, 'int DEFAULT NULL']]) {
+      const [st] = generateDdl(diffSchemas(g(from), g(to)));
+      expect(st).toMatchObject({ comment: false, sql: `ALTER TABLE \`t\`\n  MODIFY COLUMN \`g\` ${to}` });
+    }
+  });
 });
 
 describe('맞바꾸기 묶음의 이름 충돌 전파', () => {

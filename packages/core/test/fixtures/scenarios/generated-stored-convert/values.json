@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `price` (`id`, `amount`, `total`) VALUES (1, 10, 99)",
+  "query": "SELECT `id`, `amount`, `total`, `taxed` FROM `price`",
+  "rows": [{ "id": 1, "amount": 10, "total": 11, "taxed": 20 }]
+}
