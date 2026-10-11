@@ -29,6 +29,7 @@ A team web tool for managing MySQL schema definitions exported with [td-export](
 | Item | Details |
 |---|---|
 | Supported versions | td-export 0.1.15 – 0.1.52, MySQL output (format is detected per file; MySQL output is unchanged from 0.1.30 to 0.1.36) |
+| Completeness | Statements that drop objects, columns, or partitions because they are absent from TARGET are emitted as runnable SQL only when TARGET is a verifiably complete dump: td-export 0.1.30+ SQL (header and trailer) or a structurally complete MD. td-export 0.1.15 SQL has no trailer, so its end cannot be verified — those statements become manual-review comments (re-export with 0.1.30+ to get them as SQL) |
 | Routines | MySQL stored functions and procedures in `.sql` output from td-export 0.1.52 (`DELIMITER ;;` blocks). They are stored and compared like tables and views (DEFINER is ignored; SQL_MODE is compared). `.md` output has no routines, so routines are not compared when either version is `.md` (the UI says so). Triggers and events are out of scope — td-export does not export them yet |
 | Formats | `.sql` (recommended, lossless), `.md` (partially lossy — flagged in the UI) |
 | Name suggestion | `schema(host).sql` → Database `host`; `schema(host_port).sql` (0.1.30) → Database `host:port`. If a Database with the older `host_port` name already exists, that one is selected |
