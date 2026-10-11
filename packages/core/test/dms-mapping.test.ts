@@ -122,6 +122,18 @@ describe('parseDmsMapping: 중복', () => {
     expect(warnings).toEqual(dup('5', '4'));
   });
 
+  it('같은 컬럼의 rename 과 remove-column 은 action 을 가로질러 rule-id 가 낮은 쪽 하나만 (7회차 3)', () => {
+    const renameWins = parse([col(2, 'c', 'x'), rm(9, 'C')]);
+    expect(renameWins.mapping.columns).toEqual([{ ruleId: '2', table: 't', from: 'c', to: 'x' }]);
+    expect(renameWins.mapping.removedColumns).toEqual([]);
+    expect(renameWins.warnings).toEqual(dup('9', '2'));
+
+    const removeWins = parse([col(9, 'c', 'x'), rm(2, 'C')]);
+    expect(removeWins.mapping.columns).toEqual([]);
+    expect(removeWins.mapping.removedColumns).toEqual([{ ruleId: '2', table: 't', column: 'C' }]);
+    expect(removeWins.warnings).toEqual(dup('9', '2'));
+  });
+
   it('schema rename', () => {
     const { mapping, warnings } = parse([schema(1, 'old'), schema(2, 'new')]);
     expect(mapping.toSchema).toBe('old');

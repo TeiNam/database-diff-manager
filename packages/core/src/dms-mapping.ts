@@ -186,13 +186,16 @@ function takesPrecedence(a: string, b: string): boolean {
   return Number.isFinite(x) && Number.isFinite(y) ? x < y : a < b;
 }
 
+// 컬럼 대상 transformation (rename·remove-column). AWS DMS 는 같은 컬럼에 여러 transformation 이 있으면 action 과 상관없이
+// rule-id 가 낮은 하나만 적용하므로 한 맵에서 겨룬다
+type ColumnRule = { ruleId: string; rename: DmsColumnRename } | { ruleId: string; removed: DmsRemovedColumn };
+
 class MappingBuilder {
   private readonly include: string[] = [];
   private readonly exclude: string[] = [];
   private readonly schema = new Map<string, { ruleId: string; value: string }>();
   private readonly tables = new Map<string, DmsTableRename>();
-  private readonly columns = new Map<string, DmsColumnRename>();
-  private readonly removed = new Map<string, DmsRemovedColumn>();
+  private readonly columns = new Map<string, ColumnRule>();
 
   constructor(private readonly fromSchema: string, private readonly warnings: DmsWarning[]) {}
 
@@ -213,8 +216,8 @@ class MappingBuilder {
       ...(this.schema.has('') ? { toSchema: this.schema.get('')!.value } : {}),
       selection: { include: [...this.include], exclude: [...this.exclude] },
       tables: [...this.tables.values()],
-      columns: [...this.columns.values()],
-      removedColumns: [...this.removed.values()],
+      columns: [...this.columns.values()].flatMap((c) => ('rename' in c ? [c.rename] : [])),
+      removedColumns: [...this.columns.values()].flatMap((c) => ('removed' in c ? [c.removed] : [])),
       ruleCount,
     };
   }
@@ -241,13 +244,13 @@ class MappingBuilder {
     if (!rule.table || !rule.column || hasWildcard(rule.table) || hasWildcard(rule.column)) return this.wildcard(rule);
     if (!rule.value) return this.invalid(rule, 'value(새 이름)가 없습니다');
     const key = `${lower(rule.table)}.${lower(rule.column)}`;
-    this.keep(this.columns, key, { ruleId: rule.id, table: rule.table, from: rule.column, to: rule.value });
+    this.keep(this.columns, key, { ruleId: rule.id, rename: { ruleId: rule.id, table: rule.table, from: rule.column, to: rule.value } });
   }
 
   private addRemovedColumn(rule: Rule): void {
     if (!rule.table || !rule.column || hasWildcard(rule.table) || hasWildcard(rule.column)) return this.wildcard(rule);
     const key = `${lower(rule.table)}.${lower(rule.column)}`;
-    this.keep(this.removed, key, { ruleId: rule.id, table: rule.table, column: rule.column });
+    this.keep(this.columns, key, { ruleId: rule.id, removed: { ruleId: rule.id, table: rule.table, column: rule.column } });
   }
 
   // 같은 대상의 룰이 또 나오면 rule-id 가 낮은 쪽을 남기고, 진 쪽을 경고로 남긴다
