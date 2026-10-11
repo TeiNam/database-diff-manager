@@ -1,6 +1,6 @@
-import type { Change, Check, Column, ForeignKey, Index, Table, TableDiff, View } from '@tdm/core';
+import type { Change, Check, Column, ForeignKey, Index, Table, TableDiff } from '@tdm/core';
 import { alignByKey } from '../../lib/align';
-import type { ObjectEntry } from '../../lib/object-diff';
+import type { DiffObject, ObjectEntry } from '../../lib/object-diff';
 import s from './GridDiff.module.css';
 
 type Status = 'same' | 'add' | 'del' | 'mod';
@@ -44,7 +44,7 @@ const SECTIONS: Section[] = [
 // 서술형 열만 줄바꿈하고, 식별자·타입 같은 열은 한 줄로 두어 글자 중간에서 끊기지 않게 한다
 const WRAP_HEADERS = new Set(['Comment', 'Details', 'Expression']);
 
-const asTable = (o?: Table | View) => (o?.kind === 'table' ? o : undefined);
+const asTable = (o?: DiffObject) => (o?.kind === 'table' ? o : undefined);
 
 interface GridRow {
   a?: string[];

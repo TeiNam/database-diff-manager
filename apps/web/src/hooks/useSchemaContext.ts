@@ -1,7 +1,12 @@
 import { useCallback, useLayoutEffect, useRef } from 'react';
 import { useLocation, useMatch, useNavigate, useSearchParams } from 'react-router';
+import type { ObjectKind } from '../api/types';
 
+export type { ObjectKind };
 export type Tab = 'summary' | 'diff' | 'ddl' | 'migration';
+
+const OBJECT_KINDS: readonly string[] = ['table', 'view', 'function', 'procedure'];
+const kindOf = (v: string | null): ObjectKind => (v !== null && OBJECT_KINDS.includes(v) ? v : 'table') as ObjectKind;
 
 const TABS: readonly string[] = ['summary', 'diff', 'ddl', 'migration'];
 
@@ -42,7 +47,7 @@ export function useSchemaContext() {
     target: positive(params.get('target')),
     tab: (tab !== null && TABS.includes(tab) ? tab : 'diff') as Tab,
     obj: params.get('obj') ?? undefined,
-    objKind: (params.get('kind') === 'view' ? 'view' : 'table') as 'table' | 'view',
+    objKind: kindOf(params.get('kind')),
     mode: (params.get('mode') === 'grid' ? 'grid' : 'sql') as 'sql' | 'grid',
     layout: (params.get('layout') === 'unified' ? 'unified' : 'split') as 'split' | 'unified',
     set,

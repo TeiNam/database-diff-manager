@@ -7,8 +7,9 @@ import { Icon } from '../../components/Icon';
 import { Mark } from '../../components/Mark';
 import { copyText } from '../../lib/clipboard';
 import { buildRows, countChanges } from '../../lib/hunks';
-import { objectAnchor, type ObjectEntry } from '../../lib/object-diff';
+import { isRoutineKind, objectAnchor, type ObjectEntry } from '../../lib/object-diff';
 import { GridDiff } from './GridDiff';
+import { RoutineGrid } from './RoutineGrid';
 import s from './ObjectCard.module.css';
 import { SqlDiff } from './SqlDiff';
 
@@ -87,8 +88,8 @@ export function ObjectCard({ entry, mode, layout, defaultOpen, selected = false,
           </button>
         )}
       </header>
-      {open && (mode === 'grid' && entry.kind === 'table'
-        ? <GridDiff entry={entry} />
+      {open && (mode === 'grid' && entry.kind === 'table' ? <GridDiff entry={entry} />
+        : mode === 'grid' && isRoutineKind(entry.kind) ? <RoutineGrid entry={entry} />
         : <SqlDiff key={resetKey} rows={rows} base={entry.baseText} target={entry.targetText} layout={entry.op === 'same' ? 'unified' : layout} expanded={entry.op === 'same'} />)}
     </section>
   );

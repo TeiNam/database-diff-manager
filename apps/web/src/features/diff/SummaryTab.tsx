@@ -1,7 +1,8 @@
-import type { TableDiff } from '@tdm/core';
+import type { RoutineDiff, TableDiff } from '@tdm/core';
 import type { DiffResponse } from '../../api/types';
 import { Mark } from '../../components/Mark';
-import { changedObjects } from '../../lib/object-diff';
+import type { ObjectKind } from '../../hooks/useSchemaContext';
+import { changedObjects, type ObjectEntry } from '../../lib/object-diff';
 import s from './diff.module.css';
 
 function detail(t?: TableDiff): string {
@@ -22,8 +23,28 @@ function detail(t?: TableDiff): string {
   return parts.join(' · ') || '변경';
 }
 
-export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind: 'table' | 'view', name: string) => void }) {
+// 루틴 변경 필드 → 화면 이름 (characteristics.* 는 '특성' 하나로 묶는다)
+const ROUTINE_FIELD: Record<string, string> = { params: '파라미터', returns: 'RETURNS', body: '본문', sqlMode: 'SQL_MODE' };
+
+function routineDetail(r: RoutineDiff): string {
+  if (r.op === 'add') return '신규';
+  if (r.op === 'drop') return '삭제';
+  const labels = r.fields.map((f) => (f.startsWith('characteristics.') ? '특성' : ROUTINE_FIELD[f] ?? f));
+  return [...new Set(labels)].join(' · ') || '변경';
+}
+
+function entryDetail(e: ObjectEntry): string {
+  if (e.kind === 'table') return detail(e.table);
+  if (e.routine) return routineDetail(e.routine);
+  return e.op === 'modify' ? '정의 변경' : e.op === 'add' ? '신규' : '삭제';
+}
+
+export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind: ObjectKind, name: string) => void }) {
   const { tables, views } = data.diff;
+  const routines = data.diff.routines ?? [];
+  const routinesUnknown = Boolean(data.diff.routinesUnknown);
+  const hasRoutines = routines.length > 0 || (data.baseModel.routines ?? []).length > 0 || (data.targetModel.routines ?? []).length > 0;
+  const routineCount = (op: RoutineDiff['op']) => routines.filter((r) => r.op === op).length;
   const count = (op: string) => tables.filter((t) => t.op === op).length;
   const fieldChanges = tables.reduce((n, t) => n + t.columns.length + t.indexes.length + t.foreignKeys.length + t.checks.length, 0);
   const entries = changedObjects(data.diff);
@@ -32,6 +53,9 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
     { value: `−${count('drop')}`, label: '테이블 삭제', tone: s.del },
     { value: `~${count('modify') + count('rename') + views.length}`, label: '테이블/뷰 변경', tone: s.mod },
     { value: String(fieldChanges), label: '컬럼·인덱스·제약 변경', tone: '' },
+    ...(hasRoutines && !routinesUnknown
+      ? [{ value: `+${routineCount('add')} −${routineCount('drop')} ~${routineCount('modify')}`, label: '루틴 추가/삭제/변경', tone: '' }]
+      : []),
   ];
   return (
     <>
@@ -43,6 +67,7 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
           </li>
         ))}
       </ul>
+      {routinesUnknown && <p className={s.notice} role="note">MD 출처라 루틴은 비교하지 않음 — td-export MD 에는 함수·프로시저가 없습니다</p>}
       {entries.length === 0 ? (
         <p className={s.empty}>두 버전 사이에 변경 사항이 없습니다</p>
       ) : (
@@ -53,7 +78,7 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
               <Mark op={e.op} />
               <span className={s.code}>{e.oldName && e.op === 'rename' ? `${e.oldName} → ${e.name}` : e.name}</span>
               <span>{e.kind}</span>
-              <span>{e.kind === 'table' ? detail(e.table) : e.op === 'modify' ? '정의 변경' : e.op === 'add' ? '신규' : '삭제'}</span>
+              <span>{entryDetail(e)}</span>
             </button>
           ))}
         </div>

@@ -1,5 +1,5 @@
 import type { Statement } from '@tdm/core';
-import { renderDdl } from '@tdm/core';
+import { renderDdl, statementText } from '@tdm/core';
 import { useEffect, useRef, useState } from 'react';
 import { useFreshDiff } from '../../api/hooks';
 import type { DiffResponse } from '../../api/types';
@@ -61,7 +61,7 @@ function StatementBlock({ st, refresh }: { st: Statement; refresh: () => Promise
       </div>
       <pre className={s.sql}>
         {st.notes?.map((n, i) => <span key={`${i}-${n}`} className={s.note}>{`-- ${n}`}{'\n'}</span>)}
-        {st.comment ? st.sql : `${st.sql};`}
+        {statementText(st)}
       </pre>
     </section>
   );

@@ -1,12 +1,12 @@
-import type { Op } from '@tdm/core';
+import type { Op, SchemaModel } from '@tdm/core';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { useDiff, useTree } from '../api/hooks';
 import type { DiffResponse, TreeDatabase } from '../api/types';
 import { Icon, type IconName } from '../components/Icon';
 import { Mark } from '../components/Mark';
-import { useSchemaContext } from '../hooks/useSchemaContext';
-import { opOf } from '../lib/object-diff';
+import { useSchemaContext, type ObjectKind } from '../hooks/useSchemaContext';
+import { objectsOf, opOf } from '../lib/object-diff';
 import s from './Sidebar.module.css';
 
 interface Node {
@@ -20,15 +20,31 @@ interface Node {
   selected?: boolean;
   expanded?: boolean;
   parentId?: string;
+  note?: boolean; // 선택할 수 없는 안내 줄
   onSelect: () => void;
 }
 
 type Filter = 'all' | 'changed';
 
-function objectNodes(data: DiffResponse, kind: 'table' | 'view', parentId: string, query: string, filter: Filter, selected: string | undefined, select: (name: string) => void): Node[] {
-  const names = new Set([...(kind === 'table' ? data.targetModel.tables : data.targetModel.views).map((o) => o.name),
-    ...(kind === 'table' ? data.baseModel.tables : data.baseModel.views).map((o) => o.name)]);
-  return [...names].sort().flatMap((name) => {
+// 트리 그룹: Tables, Views, Routines(함수·프로시저)
+const GROUPS: { id: string; label: string; kinds: ObjectKind[] }[] = [
+  { id: 'table', label: 'Tables', kinds: ['table'] },
+  { id: 'view', label: 'Views', kinds: ['view'] },
+  { id: 'routine', label: 'Routines', kinds: ['function', 'procedure'] },
+];
+const ROUTINES_UNKNOWN = 'MD 출처라 루틴은 비교하지 않음';
+
+// 루틴은 이름 대소문자를 구분하지 않으므로 TARGET 표기를 우선해 한 번만 보여 준다
+function objectNames(data: DiffResponse, kind: ObjectKind): string[] {
+  const all = [...objectsOf(data.targetModel, kind), ...objectsOf(data.baseModel, kind)].map((o) => o.name);
+  if (kind === 'table' || kind === 'view') return [...new Set(all)];
+  const byKey = new Map<string, string>();
+  for (const name of all) if (!byKey.has(name.toLowerCase())) byKey.set(name.toLowerCase(), name);
+  return [...byKey.values()];
+}
+
+function objectNodes(data: DiffResponse, kind: ObjectKind, parentId: string, query: string, filter: Filter, selected: string | undefined, select: (name: string) => void): Node[] {
+  return objectNames(data, kind).sort().flatMap((name) => {
     const op = opOf(data.diff, kind, name);
     const renamedAway = kind === 'table' && data.diff.tables.some((t) => t.op === 'rename' && t.oldName === name);
     if (renamedAway) return [];
@@ -54,18 +70,28 @@ function buildNodes(tree: TreeDatabase[], ctx: Pick<ReturnType<typeof useSchemaC
         // 이미 보고 있는 스키마면 base/target 을 유지한 채 객체 선택만 해제한다
         onSelect: () => (current ? ctx.set({ obj: undefined, kind: undefined }) : navigate(`/db/${d.id}/schema/${sc.id}`)) });
       if (!scOpen || !data) continue;
-      for (const kind of ['table', 'view'] as const) {
-        const groupId = `${scId}:${kind}`;
-        const children = objectNodes(data, kind, groupId, ui.query, ui.filter, ctx.objKind === kind ? ctx.obj : undefined, (name) => ctx.set({ tab: 'diff', obj: name, kind }));
-        const changed = (kind === 'table' ? data.diff.tables : data.diff.views).length;
-        const total = (kind === 'table' ? data.targetModel.tables : data.targetModel.views).length;
-        const open = !ui.collapsed.has(groupId);
-        out.push({ id: groupId, label: kind === 'table' ? 'Tables' : 'Views', depth: 2, meta: `${changed} / ${total}`, expanded: open, parentId: scId, onSelect: () => undefined });
-        if (open) out.push(...children);
-      }
+      for (const group of GROUPS) out.push(...groupNodes(data, group, scId, ctx, ui));
     }
   }
   return out;
+}
+
+// 그룹 노드와 그 아래 객체 노드. 루틴이 없는 스키마에는 Routines 그룹을 두지 않는다
+function groupNodes(data: DiffResponse, group: (typeof GROUPS)[number], scId: string, ctx: Pick<ReturnType<typeof useSchemaContext>, 'obj' | 'objKind' | 'set'>, ui: { collapsed: Set<string>; query: string; filter: Filter }): Node[] {
+  const groupId = `${scId}:${group.id}`;
+  const open = !ui.collapsed.has(groupId);
+  const isRoutines = group.id === 'routine';
+  const unknown = isRoutines && Boolean(data.diff.routinesUnknown);
+  const count = (m: SchemaModel) => group.kinds.reduce((n, k) => n + objectsOf(m, k).length, 0);
+  const total = count(data.targetModel);
+  if (isRoutines && !unknown && total + count(data.baseModel) === 0) return [];
+  const changed = isRoutines ? (data.diff.routines ?? []).length : (group.id === 'table' ? data.diff.tables : data.diff.views).length;
+  const head: Node = { id: groupId, label: group.label, depth: 2, meta: unknown ? '비교 안 함' : `${changed} / ${total}`, expanded: open, parentId: scId, onSelect: () => undefined };
+  if (!open) return [head];
+  if (unknown) return [head, { id: `${groupId}:unknown`, label: ROUTINES_UNKNOWN, depth: 3, note: true, parentId: groupId, onSelect: () => undefined }];
+  const children = group.kinds.flatMap((kind) =>
+    objectNodes(data, kind, groupId, ui.query, ui.filter, ctx.objKind === kind ? ctx.obj : undefined, (name) => ctx.set({ tab: 'diff', obj: name, kind })));
+  return [head, ...children];
 }
 
 export function Sidebar() {
@@ -137,7 +163,7 @@ export function Sidebar() {
         <div className={s.seg} role="radiogroup" aria-label="표시 범위">
           {(['all', 'changed'] as const).map((f) => (
             <button key={f} type="button" role="radio" aria-checked={filter === f} className={filter === f ? s.on : undefined} onClick={() => setFilter(f)}>
-              {f === 'all' ? '전체' : `변경 ${diff.data ? diff.data.diff.tables.length + diff.data.diff.views.length : ''}`}
+              {f === 'all' ? '전체' : `변경 ${diff.data ? diff.data.diff.tables.length + diff.data.diff.views.length + (diff.data.diff.routines ?? []).length : ''}`}
             </button>
           ))}
         </div>
@@ -151,9 +177,9 @@ export function Sidebar() {
             onClick={() => { setFocus(i); activate(n); }}
             onKeyDown={(e) => onKeyDown(e, i)}>
             {n.expanded !== undefined ? <span className={s.chev}><Icon name={n.expanded ? 'chevronDown' : 'chevronRight'} /></span> : <span className={s.chev} />}
-            {n.depth === 3 && <Mark op={n.mark ?? 'same'} />}
+            {n.depth === 3 && !n.note && <Mark op={n.mark ?? 'same'} />}
             {n.icon && <Icon name={n.icon} />}
-            <span className={`${s.name} ${n.depth === 3 ? s.mono : ''} ${n.struck ? 'struck' : ''}`}>{n.label}</span>
+            <span className={`${s.name} ${n.depth === 3 && !n.note ? s.mono : ''} ${n.note ? s.note : ''} ${n.struck ? 'struck' : ''}`}>{n.label}</span>
             {n.meta && <span className={s.meta}>{n.meta}</span>}
           </div>
         ))}

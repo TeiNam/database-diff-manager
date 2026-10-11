@@ -54,9 +54,12 @@ export interface VersionSummary extends VersionMeta {
   changedObjects: number;
 }
 
+// objects.kind (루틴: td-export 0.1.52+ SQL)
+export type ObjectKind = 'table' | 'view' | 'function' | 'procedure';
+
 export interface VersionObject {
   objectId: number;
-  kind: 'table' | 'view';
+  kind: ObjectKind;
   name: string;
   revisionNo: number;
 }
@@ -99,7 +102,7 @@ export interface UploadResult {
 }
 
 export interface ObjectHistory {
-  object: { id: number; kind: 'table' | 'view'; name: string; schemaId: number };
+  object: { id: number; kind: ObjectKind; name: string; schemaId: number };
   revisions: { revisionNo: number; fidelity: string; parseError: string | null; firstVersion: { id: number; versionNo: number; uploadedAt: string } }[];
 }
 
