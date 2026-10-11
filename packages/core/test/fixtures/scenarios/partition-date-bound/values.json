@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `event_log` (`id`, `logged_on`, `message`) VALUES (1, '2025-06-01', 'old'), (2, '2026-11-30', 'last')",
+  "query": "SELECT `id`, DATE_FORMAT(`logged_on`, '%Y-%m-%d') AS `logged_on`, `message` FROM `event_log` PARTITION (`p2026`)",
+  "rows": [{ "id": 2, "logged_on": "2026-11-30", "message": "last" }]
+}

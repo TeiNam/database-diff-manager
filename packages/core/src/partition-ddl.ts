@@ -2,6 +2,7 @@
 import type { TableDiff } from './diff';
 import { quoteIdent as q } from './lexer';
 import type { PartitionDef, Partitioning } from './model';
+import { compareBounds, isAllMax, parenValues, upperBound } from './partition-values';
 
 const COMMENT_RE = /\s*COMMENT\s*=?\s*'(?:[^']|'')*'/i;
 const stripComment = (def: string) => def.replace(COMMENT_RE, '');
@@ -28,33 +29,7 @@ const vanishNote = (values: string[]) => `[데이터 확인] 값 ${values.join('
 const HASH_METHOD_RE = /^(LINEAR\s+)?(HASH|KEY)\b/;
 
 // 'VALUES IN (…)' 의 값 목록 (따옴표 밖 공백 제거). 읽을 수 없으면 undefined
-export function listValues(def: string): string[] | undefined {
-  const m = /^\s*VALUES\s+IN\s*\(/i.exec(def);
-  if (!m) return undefined;
-  const out: string[] = [];
-  let depth = 1;
-  let cur = '';
-  let quote: string | undefined;
-  for (let i = m[0].length; i < def.length; i++) {
-    const ch = def[i];
-    if (quote) {
-      cur += ch;
-      if (ch === '\\') cur += def[++i] ?? '';
-      else if (ch === quote) quote = undefined;
-      continue;
-    }
-    if (ch === "'" || ch === '"') quote = ch;
-    else if (ch === '(') depth++;
-    else if (ch === ')' && --depth === 0) return [...out, cur];
-    else if (ch === ',' && depth === 1) {
-      out.push(cur);
-      cur = '';
-      continue;
-    }
-    if (!/\s/.test(ch)) cur += ch;
-  }
-  return undefined;
-}
+export const listValues = (def: string): string[] | undefined => parenValues(def, /^\s*VALUES\s+IN\s*\(/i);
 
 export const partitionStatements = (d: TableDiff): string[] => partitionBodies(d).map((s) => s.sql);
 export const listPartitionStatements = (table: string, a: PartitionDef[], b: PartitionDef[], range = true): string[] =>
@@ -163,23 +138,14 @@ export function listPartitionBodies(table: string, a: PartitionDef[], b: Partiti
   return out;
 }
 
-// RANGE 상한 (MAXVALUE·모든 컬럼이 MAXVALUE 인 튜플은 Infinity). 정수 하나가 아니면(날짜·문자열·다중 컬럼·식) undefined
-function upperBound(p: PartitionDef): number | undefined {
-  const m = /^\s*VALUES\s+LESS\s+THAN\s*(?:\(([^()]*)\)|(MAXVALUE)\b)/i.exec(stripComment(p.def));
-  if (!m) return undefined;
-  if (m[2] !== undefined) return Infinity;
-  const parts = m[1].split(',').map((v) => v.trim());
-  if (parts.every((v) => /^MAXVALUE$/i.test(v))) return Infinity;
-  return parts.length === 1 && /^-?\d+$/.test(parts[0]) ? Number(parts[0]) : undefined;
-}
-
-// 마지막 파티션 상한이 줄거나, 줄지 않는다고 확신할 수 없으면 true (새 상한이 MAXVALUE 면 줄지 않는다)
+// 마지막 파티션 상한이 줄거나, 줄지 않는다고 확신할 수 없으면 true. 새 상한이 MAXVALUE 면 줄지 않고, 같은 종류(정수·날짜·
+// 문자열·단조 함수('리터럴')·튜플)로 비교할 수 있으면 비교한다. 비교할 수 없으면 정의가 그대로일 때만 false
 function shrinksUpperBound(from: PartitionDef, to: PartitionDef): boolean {
-  const a = upperBound(from);
-  const b = upperBound(to);
-  if (b === Infinity) return false;
-  if (a === undefined || b === undefined) return stripComment(from.def) !== stripComment(to.def);
-  return b < a;
+  const a = upperBound(stripComment(from.def));
+  const b = upperBound(stripComment(to.def));
+  if (b && isAllMax(b)) return false;
+  const order = a && b ? compareBounds(b, a) : undefined;
+  return order === undefined ? stripComment(from.def) !== stripComment(to.def) : order < 0;
 }
 
 const shrinkManual = (table: string, sql: string): string => [
