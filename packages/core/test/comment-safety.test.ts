@@ -6,6 +6,9 @@ import { diffSchemas, type RenameMapping } from '../src/diff';
 import { quoteIdent as q, tokenize } from '../src/lexer';
 import { parseSqlDump, splitStatements } from '../src/parse-dump';
 import { commentPart } from './helpers';
+import { cols, ID, info, MD_OK, mdDump, OK_INFO, PRECIOUS } from './injection-fixtures';
+import { parseMdDump } from '../src/parse-md';
+import { isSingleStatement } from '../src/statement-check';
 
 // 개행·CR·블록 주석 끝·문장 끝·백틱·DELIMITER·줄 주석·NUL 을 담은 이름들 (제어 문자는 이스케이프로 만든다)
 const EVIL = [
@@ -103,5 +106,72 @@ describe('주석 주입 방지 (퍼즈)', () => {
 describe('escapeCommentText', () => {
   it('줄바꿈·CR·제어 문자를 이스케이프하고 탭·일반 문자는 둔다', () => {
     expect(escapeCommentText('a\nb\r\nc\u0000d\u007fe\tf */ ;')).toBe('a\\nb\\r\\nc\\x00d\\x7fe\tf */ ;');
+  });
+});
+
+// 값 주입 퍼즈 (11회차 1·4): MD·SQL 덤프의 값 칸마다 문장 끝·주석·DELIMITER·백슬래시 명령·따옴표를 넣어도 실행 문장은 한 문장이다
+const PAYLOADS = [
+  ...EVIL,
+  'x; DROP TABLE precious; -- ',
+  'x \\g DROP TABLE precious',
+  "x'; DROP TABLE precious; -- ",
+  'x -- \nDROP TABLE precious',
+  'x #\n; DROP TABLE precious',
+  'x /* */; DROP TABLE precious',
+  'x --\u0001;DROP TABLE precious;',
+  'x)); DROP TABLE precious; -- (',
+];
+const VIEW_MD = (sql: string) =>
+  `**Information**\n|Table type|Charset|Collation|\n|---|---|---|\n|VIEW|utf8mb4|utf8mb4_0900_ai_ci|\n\n**View Create SQL**\n\`\`\`sql\n${sql}\n\`\`\`\n\n`;
+// 셀 값에 '|' 가 있으면 칸이 밀리므로 MD 는 '|' 없는 값만 쓴다 (모든 페이로드에 '|' 없음)
+const MD_FIELDS: Record<string, (v: string) => string> = {
+  type: (v) => OK_INFO + cols([ID, `|a|${v}|YES||||||`]),
+  engine: (v) => info(v, 'utf8mb4_0900_ai_ci') + cols([ID]),
+  collate: (v) => info('InnoDB', v) + cols([ID]),
+  comment: (v) => `**Information**\n|Table type|Engine|Row format|Collate|Comment|\n|---|---|---|---|---|\n|BASE TABLE|InnoDB|Dynamic|utf8mb4_0900_ai_ci|${v}|\n\n` + cols([ID]),
+  onUpdate: (v) => OK_INFO + cols([ID, `|ts|timestamp|YES|CURRENT_TIMESTAMP||||DEFAULT_GENERATED on update ${v.replace(/\s/g, '')}||`]),
+  defaultExpr: (v) => OK_INFO + cols([ID, `|a|int|YES|${v}||||DEFAULT_GENERATED||`]),
+  defaultLiteral: (v) => OK_INFO + cols([ID, `|a|varchar(99)|YES|${v}||||||`]),
+  indexExpr: (v) => OK_INFO + cols([ID, '|a|int|YES||||||']) + `**Index**\n- [Normal]ix(lower(${v}))\n\n`,
+  fkAction: (v) => OK_INFO + cols([ID, '|pid|int|YES||||MUL||']) + `**Constraint**\n- fk1 FOREIGN KEY (pid) Reference t_ok.id ON DELETE ${v} ON UPDATE CASCADE\n\n`,
+  view: (v) => VIEW_MD(`CREATE VIEW \`t_x\` AS select ${v} AS \`a\``),
+};
+const SQL_FIELDS: Record<string, (v: string) => string> = {
+  columnCharset: (v) => `\`a\` varchar(10) CHARACTER SET ${quoteSql(v)} DEFAULT NULL`,
+  columnCollate: (v) => `\`a\` varchar(10) COLLATE ${quoteSql(v)} DEFAULT NULL`,
+  tableCharset: (v) => `TAIL ENGINE=InnoDB DEFAULT CHARSET=${quoteSql(v)}`,
+  tableCollate: (v) => `TAIL ENGINE=InnoDB COLLATE=${quoteSql(v)}`,
+  tableComment: (v) => `TAIL ENGINE=InnoDB COMMENT=${quoteSql(v)}`,
+  indexUsing: (v) => `\`a\` int DEFAULT NULL,\n  KEY \`ix\` (\`a\`) USING ${quoteSql(v)}`,
+};
+const quoteSql = (v: string) => `'${v.replace(/\\/g, '\\\\').replace(/'/g, "''").replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\u0000/g, '\\0')}'`;
+const sqlDump = (field: string) => {
+  const tail = field.startsWith('TAIL ') ? field.slice(5) : 'ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
+  const col = field.startsWith('TAIL ') ? '`a` int DEFAULT NULL' : field;
+  return `${PRECIOUS}\nCREATE TABLE \`t_x\` (\n  \`id\` int NOT NULL,\n  ${col},\n  PRIMARY KEY (\`id\`)\n) ${tail};`;
+};
+
+function expectSafe(stmts: ReturnType<typeof generateDdl>) {
+  for (const st of stmts) expect(isSingleStatement(st), statementText(st)).toBe(true);
+  const all = splitStatements(renderDdl(stmts));
+  expect(all.filter((p) => /^DROP\s+TABLE\s+`?precious/i.test(p.ddl))).toEqual([]);
+}
+
+describe('값 주입 퍼즈: 실행 문장 단일성 (11회차 1·4)', () => {
+  const precious = parseSqlDump(PRECIOUS).model;
+  it.each(Object.keys(MD_FIELDS))('MD %s', (field) => {
+    for (const v of PAYLOADS.filter((p) => !p.includes('|'))) {
+      const md = parseMdDump(mdDump({ t_ok: MD_OK, t_x: MD_FIELDS[field](v) })).model;
+      expectSafe(generateDdl(diffSchemas(precious, { ...md, tables: [...md.tables, ...precious.tables] })));
+    }
+  });
+
+  it.each(Object.keys(SQL_FIELDS))('SQL %s (새 테이블·변경 모두)', (field) => {
+    const base = parseSqlDump(sqlDump(SQL_FIELDS.columnCharset('latin1'))).model;
+    for (const v of PAYLOADS) {
+      const target = parseSqlDump(sqlDump(SQL_FIELDS[field](v))).model;
+      expectSafe(generateDdl(diffSchemas(precious, target)));
+      expectSafe(generateDdl(diffSchemas(base, target)));
+    }
   });
 });

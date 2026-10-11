@@ -72,6 +72,17 @@ describe('DiffTab', () => {
     await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('ALTER TABLE `orders`')));
   });
 
+  it('MD 출처(partial) diff 의 카드 DDL 복사에도 [MD 기반] 안내를 붙인다 (11회차 2)', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    const data = { ...(DATA as object), diff: { ...diff, partial: true } } as never;
+    mockApi({ '/api/versions/12': { version: {}, model: target, objects: [] }, '/api/diff?base=11&target=12': data });
+    renderWithProviders(<DiffTab data={data} />, { route: ROUTE, path: PATH });
+    await user.click(within(screen.getByRole('region', { name: 'table orders' })).getByRole('button', { name: 'DDL 복사' }));
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringMatching(/^-- \[MD 기반\][\s\S]*ALTER TABLE `orders`/)));
+  });
+
   it('카드의 DDL 복사는 최신 diff 를 다시 받아 그 객체의 최신 문장을 복사한다', async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);

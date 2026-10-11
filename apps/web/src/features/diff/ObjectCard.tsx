@@ -60,7 +60,8 @@ export function ObjectCard({ entry, mode, layout, defaultOpen, selected = false,
     const text = refresh().then((fresh) => {
       const latest = cardStatements(fresh.statements, entry).statements;
       if (!latest.length) throw new StaleObjectError();
-      return renderDdl(latest);
+      // MD 출처 diff 면 전체 DDL 처럼 [MD 기반] 안내를 붙인다
+      return renderDdl(latest, fresh.diff.partial);
     });
     copyText(text).then(() => setCopy('done'), (e: unknown) => setCopy(e instanceof StaleObjectError ? 'stale' : 'failed'));
   };
