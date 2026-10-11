@@ -105,6 +105,7 @@ npm run dev:web      # Vite (http://localhost:5173, /api 는 3000으로 프록�
 npm test             # 전체 테스트
 npm run typecheck
 npm run test:mysql -w @tdm/core   # 생성 DDL을 MySQL 8.0/8.4 컨테이너에서 실제로 적용해 검증 (Docker 필요)
+                                  #   (포트는 MYSQL80_PORT / MYSQL84_PORT 로 변경, 기본 33080 / 33084)
 ```
 
 ## CI

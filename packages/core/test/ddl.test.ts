@@ -586,3 +586,22 @@ describe('생성이 막힌 테이블로의 FK (10회차 3)', () => {
     expect(stmts.filter((s) => s.object === 'c').every((s) => s.comment)).toBe(true);
   });
 });
+
+describe('NO_BACKSLASH_ESCAPES 세션 안내 (13회차 5)', () => {
+  const NOTE = '[NBE 세션 주의]';
+  const tbl = (cols: string) => `CREATE TABLE \`t\` (\n  \`id\` int NOT NULL,\n${cols}\n) ENGINE=InnoDB;`;
+  const view = (body: string) => `CREATE ALGORITHM=UNDEFINED DEFINER=\`root\`@\`%\` SQL SECURITY DEFINER VIEW \`v\` AS ${body};`;
+  const fn = 'SET @OLD_ROUTINE_SQL_MODE = @@SQL_MODE, SQL_MODE = \'STRICT_TRANS_TABLES\';\nDELIMITER ;;\nCREATE DEFINER=`root`@`%` FUNCTION `f`() RETURNS varchar(9)\n    NO SQL\nRETURN \'a\\\\b\';;\nDELIMITER ;';
+  const notesOf = (base: string, target: string) => generateDdl(diffSchemas(parseSqlDump(base).model, parseSqlDump(target).model)).map((s) => [s.object, (s.notes ?? []).some((n) => n.startsWith(NOTE))]);
+
+  it('백슬래시 이스케이프가 든 문자열 리터럴이 있는 테이블·뷰 문장에만 안내를 붙인다', () => {
+    expect(notesOf(tbl('  `a` int'), tbl("  `a` int COMMENT 'C:\\\\temp',\n  `b` varchar(9) DEFAULT 'x'"))).toEqual([['t', true]]);
+    expect(notesOf(tbl('  `a` int'), tbl("  `a` int COMMENT 'it''s'"))).toEqual([['t', false]]);
+    expect(notesOf('', view("select 'a\\nb' AS `x`"))).toEqual([['v', true]]);
+    expect(notesOf('', view("select 'ab' AS `x`"))).toEqual([['v', false]]);
+  });
+
+  it('SQL_MODE 를 고정하는 루틴 문장은 안내하지 않는다', () => {
+    expect(notesOf('', fn)).toEqual([['f', false]]);
+  });
+});
