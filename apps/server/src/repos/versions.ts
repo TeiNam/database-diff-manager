@@ -2,7 +2,7 @@ import type { Routine, SchemaModel, SourceFormat, Table, View } from '@tdm/core'
 import { all, one, run, tx, type Db } from '../db/connection';
 import { AppError } from '../errors';
 import { getSchema } from './catalog';
-import { loadEvidence } from './evidence';
+import { loadEvidence, loadStaleReason } from './evidence';
 
 export interface VersionMeta {
   id: number;
@@ -36,6 +36,7 @@ export interface VersionDetail {
   version: VersionMeta;
   model: SchemaModel;
   objects: VersionObject[];
+  staleReason?: string; // 예전 파서로 저장된 모델 (원문 재파싱 모델과 다름, 16회차 2) — 이 버전이 낀 diff 의 실행 문장은 모두 수동 확인
 }
 
 interface MetaRecord {
@@ -117,7 +118,8 @@ export function loadVersion(db: Db, id: number): VersionDetail {
     else model.routines.push(obj);
   }
   const objects = rows.map((r) => ({ objectId: Number(r.object_id), kind: r.kind, name: r.name, revisionNo: Number(r.revision_no) }));
-  return { version, model, objects };
+  const staleReason = loadStaleReason(db, id);
+  return { version, model, objects, ...(staleReason ? { staleReason } : {}) };
 }
 
 export function getSource(db: Db, id: number): { filename: string; text: string } {

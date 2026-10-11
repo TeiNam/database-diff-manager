@@ -1,4 +1,4 @@
-import { diffSchemas, generateDdl, parseSqlDump, type SchemaModel } from '@tdm/core';
+import { diffSchemas, generateDdl, holdAllStatements, parseSqlDump, type SchemaModel } from '@tdm/core';
 import { screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { SummaryTab } from '../src/features/diff/SummaryTab';
@@ -46,5 +46,25 @@ describe('SummaryTab: TARGET 완전성 증거', () => {
   it('BASE 가 불완전하면 CREATE 가 이미 존재 오류로 실패할 수 있다고 안내한다', () => {
     renderWithProviders(<SummaryTab data={response(cut, full) as never} onOpen={() => undefined} />);
     expect(screen.getByRole('note')).toHaveTextContent('BASE 가 불완전');
+  });
+});
+
+// 예전 파서로 저장된 모델 (16회차 2): stale 버전이 낀 diff 는 실행 문장을 모두 수동 확인으로 돌리고 요약 탭이 경고한다
+describe('SummaryTab: 예전 파서로 저장된 버전', () => {
+  it('stale 버전과 수동 확인으로 돌린 문장 수, 다시 올리라는 안내를 보인다', () => {
+    const data = response(full, onlyA);
+    const held = holdAllStatements(data.statements, '예전 파서로 저장된 모델입니다', '안내');
+    const reason = '예전 파서로 저장된 모델입니다 — 같은 원문을 다시 올려 새 버전으로 비교하세요';
+    renderWithProviders(<SummaryTab data={{ ...data, statements: held, staleModels: [{ side: 'target', versionId: 2, versionNo: 2, reason }] } as never} onOpen={() => undefined} />);
+    const note = screen.getByRole('note');
+    expect(note).toHaveTextContent('TARGET v2');
+    expect(note).toHaveTextContent('문장 1개');
+    expect(note).toHaveTextContent('같은 원문을 다시 올려');
+    expect(stat('저장 모델')).toHaveTextContent('예전 파서');
+  });
+
+  it('stale 버전이 없으면 안내가 없다 (옛 응답처럼 staleModels 가 없어도)', () => {
+    renderWithProviders(<SummaryTab data={response(full, onlyA) as never} onOpen={() => undefined} />);
+    expect(screen.queryByText('저장 모델')).not.toBeInTheDocument();
   });
 });

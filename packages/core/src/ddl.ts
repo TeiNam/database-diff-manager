@@ -39,6 +39,8 @@ export interface Statement extends StatementBody {
   keepsIncomingFks?: boolean;
   // evidenceHold: TARGET 이 완전한 덤프라는 증거가 없어 수동 확인으로 돌린 부재 기반 파괴 문장 (요약 탭이 수를 센다, 15회차)
   evidenceHold?: boolean;
+  // staleHold: 예전 파서로 저장된 모델(stale-model)이 낀 diff 라 수동 확인으로 돌린 실행 문장 (holdAllStatements, 16회차 2)
+  staleHold?: boolean;
 }
 
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };
@@ -87,11 +89,12 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
   for (const g of renameGroups(diff.tables, taken)) {
     const [first] = g.tables;
     const frees = g.tables.map((d) => d.oldName!).filter((n) => !g.tables.some((d) => d.name === n));
-    // 순수 테이블 rename 은 MySQL 이 들어오는 FK 의 참조를 새 이름으로 옮긴다 — 카드에 자식 FK 해제가 필요 없다 (15회차 2, 8.4 실측)
+    // 순수 테이블 rename 은 MySQL 이 들어오는 FK 의 참조를 새 이름으로 옮긴다 — 카드에 자식 FK 해제가 필요 없다 (15회차 2, 8.4 실측).
+    // 얽힌 rename 묶음(맞바꾸기·연쇄·임시 이름 경유)도 절마다 같은 규칙이라 FK 는 물리 테이블을 따라간다 (16회차 3, 8.4 실측)
     if (g.tables.length === 1) out.push({ object: first.name, kind: 'table', op: first.op, ...sqlBody(renameTableSql(g.clauses)), frees, keepsIncomingFks: true });
     else {
       const note = `얽힌 테이블 rename 을 한 문장으로 함께 적용합니다: ${g.tables.map((d) => `${d.oldName}→${d.name}`).join(', ')}`;
-      out.push({ object: first.name, kind: 'table', op: 'rename', ...sqlBody(renameTableSql(g.clauses), [note]), related: g.tables.map((d) => d.name), frees });
+      out.push({ object: first.name, kind: 'table', op: 'rename', ...sqlBody(renameTableSql(g.clauses), [note]), related: g.tables.map((d) => d.name), frees, keepsIncomingFks: true });
     }
   }
   // 4. 테이블 생성 (FK는 8단계에서)

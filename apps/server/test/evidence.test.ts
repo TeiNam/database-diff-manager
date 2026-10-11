@@ -51,7 +51,7 @@ describe('기동 시 재판정 (006 이전 버전)', () => {
       { schema: 'shop', text: SHOP_0152 }, { schema: 'shop', text: SHOP_NO_VIEW },
     ]);
     const db = openDb(path);
-    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')!.user_version).toBe(7);
+    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')!.user_version).toBe(8);
     expect(evidenceRows(db)).toEqual([
       { version_id: full0130, level: 'complete', judged_by: 'backfill' },
       { version_id: cut0130, level: 'incomplete', judged_by: 'backfill' },

@@ -1,4 +1,4 @@
-import { canonicalJson, diffSchemas, flowRenameMappings, generateDdl, renderDdl, type RenameMapping, type SchemaDiff, type SchemaModel, type Statement } from '@tdm/core';
+import { canonicalJson, diffSchemas, flowRenameMappings, generateDdl, holdAllStatements, renderDdl, type RenameMapping, type SchemaDiff, type SchemaModel, type Statement } from '@tdm/core';
 import type { Db } from '../db/connection';
 import { hasSavedRenames, listRenames } from '../repos/renames';
 import { getVersionMeta, loadVersion, type VersionDetail, type VersionMeta } from '../repos/versions';
@@ -18,6 +18,23 @@ export interface DiffResponse {
   statements: Statement[];
   ddl: string;
   renames: SourcedRename[];
+  // 예전 파서로 저장된 모델(stale-model)인 BASE·TARGET 버전 (16회차 2). 있으면 실행 문장을 모두 수동 확인으로 돌린다
+  staleModels: StaleModel[];
+}
+
+export interface StaleModel {
+  side: 'base' | 'target';
+  versionId: number;
+  versionNo: number;
+  reason: string;
+}
+
+const STALE_NOTE = '예전 파서로 저장된 버전이 낀 비교라 어느 문장도 실행하지 않습니다 — 같은 원문을 다시 올려 새 버전끼리 비교하세요';
+
+// stale 버전이 낀 diff 의 실행 문장을 모두 수동 확인으로 돌린다 (저장 모델이 원문과 달라 어떤 문장이 원문과 다른 모델에서 나왔는지 모른다)
+function staleModelsOf(base: VersionDetail, target: VersionDetail): StaleModel[] {
+  return ([['base', base], ['target', target]] as const).flatMap(([side, v]) =>
+    (v.staleReason ? [{ side, versionId: v.version.id, versionNo: v.version.versionNo, reason: v.staleReason }] : []));
 }
 
 // rename 대상 식별 키 (kind, table, from). 라우트와 공유한다
@@ -143,10 +160,14 @@ export function computeDiff(db: Db, cache: AppCache, baseId: number, targetId: n
   const { base, target, dms } = inputs ?? loadDiffInputs(db, cache, baseId, targetId, ref);
   const renames = reverse ? reversedRenames(dms, reverse, forwardApplied(db, cache, targetId, baseId)) : mergeRenames(dms, forward);
   const diff = diffSchemas(base.model, target.model, renames);
-  const statements = generateDdl(diff);
+  const staleModels = staleModelsOf(base, target);
+  const generated = generateDdl(diff);
+  const statements = staleModels.length
+    ? holdAllStatements(generated, `${staleModels[0].reason} (v${staleModels.map((m) => m.versionNo).join('·v')})`, STALE_NOTE)
+    : generated;
   const result: DiffResponse = {
     base: base.version, target: target.version, baseModel: base.model, targetModel: target.model,
-    diff, statements, ddl: renderDdl(statements, diff.partial), renames,
+    diff, statements, ddl: renderDdl(statements, diff.partial), renames, staleModels,
   };
   cache.diff.set(key, result);
   return result;

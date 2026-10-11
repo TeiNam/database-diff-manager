@@ -53,6 +53,8 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
   const entries = changedObjects(data.diff);
   const evidence = data.diff.targetEvidence ?? { level: 'unknown' as const, objects: [] };
   const held = data.statements.filter((st) => st.evidenceHold).length;
+  const stale = data.staleModels ?? [];
+  const staleHeld = data.statements.filter((st) => st.staleHold).length;
   const stats = [
     { value: `+${count('add')}`, label: '테이블 추가', tone: s.add },
     { value: `−${count('drop')}`, label: '테이블 삭제', tone: s.del },
@@ -62,6 +64,7 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
       ? [{ value: `+${routineCount('add')} −${routineCount('drop')} ~${routineCount('modify')}`, label: '루틴 추가/삭제/변경', tone: '' }]
       : []),
     { value: EVIDENCE_LABEL[evidence.level], label: 'TARGET 완전성', tone: evidence.level === 'complete' ? '' : s.del },
+    ...(stale.length ? [{ value: '예전 파서', label: '저장 모델', tone: s.del }] : []),
   ];
   return (
     <>
@@ -74,6 +77,12 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
         ))}
       </ul>
       {routinesUnknown && <p className={s.notice} role="note">MD 출처라 루틴은 비교하지 않음 — td-export MD 에는 함수·프로시저가 없습니다</p>}
+      {stale.length > 0 && (
+        <p className={s.notice} role="note">
+          예전 파서로 저장된 버전({stale.map((m) => `${m.side === 'base' ? 'BASE' : 'TARGET'} v${m.versionNo}`).join(', ')})이 낀 비교입니다 — 문장 {staleHeld}개를
+          실행하지 않고 수동 확인으로 돌렸습니다. {stale[0].reason}
+        </p>
+      )}
       {evidence.level !== 'complete' && (
         <p className={s.notice} role="note">
           {UNVERIFIED_PREFIX}: {EVIDENCE_LABEL[evidence.level]} ({evidence.reason ?? '판정 정보가 없습니다'}) — 삭제 문장 {held}개(객체·컬럼·파티션 삭제와

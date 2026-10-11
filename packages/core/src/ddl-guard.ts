@@ -77,6 +77,12 @@ function toManual(st: Statement, reason: string, notes: string[] = []): Statemen
   return { ...rest, ...manualBody(reason, st.sql, [...(st.notes ?? []), ...notes]) };
 }
 
+// 모든 실행 문장을 수동 확인으로 돌린다 (16회차 2): 저장 모델이 원문을 지금 파서로 다시 읽은 모델과 다른 버전(stale-model)이 낀
+// diff 는 어느 문장이 원문과 다른 모델에서 나왔는지 가릴 수 없다. 돌린 문장에 staleHold 를 단다 (요약 탭이 센다)
+export function holdAllStatements(stmts: Statement[], reason: string, note: string): Statement[] {
+  return stmts.map((st) => (st.comment ? st : { ...toManual(st, `${st.object}: ${reason}`, [note]), staleHold: true }));
+}
+
 // 한 문장이 아니면 그 사유를, 한 문장이어도 이름이 보수적 이름 규칙을 어기면 그 사유를 단다 (statement-check)
 function singleOrManual(st: Statement): Statement {
   if (!isSingleStatement(st)) return toManual(st, `${st.object}: ${UNSAFE_STATEMENT_REASON}`);

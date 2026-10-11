@@ -79,6 +79,15 @@ export interface DiffResponse {
   statements: Statement[];
   ddl: string;
   renames: SourcedRename[];
+  staleModels?: StaleModel[]; // 예전 파서로 저장된 BASE·TARGET 버전 (16회차 2). 옛 응답에는 없다
+}
+
+// 저장 모델이 원문을 지금 파서로 다시 읽은 모델과 다른 버전 — 이 버전이 낀 diff 는 실행 문장이 없다
+export interface StaleModel {
+  side: 'base' | 'target';
+  versionId: number;
+  versionNo: number;
+  reason: string;
 }
 
 // diff 에 적용된 rename 의 출처: DMS 전환 매핑 또는 화면에서 넣은 수동 매핑. 출처가 없으면 수동으로 본다

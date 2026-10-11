@@ -14,6 +14,7 @@ export { holdsAbsenceDrops, targetEvidence, UNVERIFIED_PREFIX } from './complete
 export * from './rename-check';
 export * from './manual-review';
 export * from './ddl';
+export { holdAllStatements } from './ddl-guard';
 export * from './partition-ddl';
 export * from './parse-md';
 export * from './suggest';
