@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `chat_log` (`id`, `create_at`) VALUES (1, '2025-10-05 00:00:00'), (2, '2025-11-05 00:00:00'), (3, '2025-12-05 00:00:00')",
+  "query": "SELECT `id` FROM `chat_log` ORDER BY `id`",
+  "rows": [{ "id": 1 }, { "id": 2 }, { "id": 3 }]
+}

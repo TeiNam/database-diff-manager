@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `coupon` (`id`, `code`) VALUES (1, 'WELCOME'); INSERT INTO `voucher` (`id`, `amount`) VALUES (7, 5000)",
+  "query": "SELECT 'coupon' AS `t`, `id`, CAST(`amount` AS CHAR) AS `v` FROM `coupon` UNION ALL SELECT 'voucher', `id`, `code` FROM `voucher`",
+  "rows": [{ "t": "coupon", "id": 7, "v": "5000" }, { "t": "voucher", "id": 1, "v": "WELCOME" }]
+}

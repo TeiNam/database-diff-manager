@@ -174,21 +174,18 @@ function overlapOf(renames: RenameMapping[], table: string): Set<string> {
 }
 
 // 이름으로 짝을 맞춘다. rename 매핑을 먼저 짝짓고 나머지를 같은 이름끼리 맞춘다.
-// rename 은 BASE에 새 이름이 없고 TARGET에 옛 이름이 없으며(겹침 허용 매핑은 예외) 같은 대상이 아직 짝지어지지 않았을 때만 적용한다
+// rename 은 같은 대상이 아직 짝지어지지 않았을 때만 적용한다
 function matchByName<T extends { name: string }>(
   base: T[], target: T[], renames: Map<string, string>, fields: (a: T, b: T) => string[], overlap: ReadonlySet<string> = new Set(),
 ): { changes: Change<T>[]; pairs: [T, T][] } {
-  const baseNames = new Set(base.map((x) => x.name));
   const targetByName = new Map(target.map((x) => [x.name, x]));
-  const consumed = new Set<string>();
+  const accepted = acceptRenames(base.map((x) => x.name), new Set(targetByName.keys()), renames, overlap);
   const renamedTo = new Map<T, string>();
   for (const b of base) {
-    const renamed = renames.get(b.name);
-    if (renamed === undefined || !targetByName.has(renamed) || consumed.has(renamed)) continue;
-    if (!overlap.has(b.name) && (baseNames.has(renamed) || targetByName.has(b.name))) continue;
-    consumed.add(renamed);
-    renamedTo.set(b, renamed);
+    const renamed = accepted.get(b.name);
+    if (renamed !== undefined) renamedTo.set(b, renamed);
   }
+  const consumed = new Set(accepted.values());
   const renameTargets = new Set(consumed);
   const changes: Change<T>[] = [];
   const pairs: [T, T][] = [];
@@ -208,6 +205,27 @@ function matchByName<T extends { name: string }>(
   }
   for (const t of target) if (!consumed.has(t.name)) changes.push({ op: 'add', name: t.name, to: t, fields: [] });
   return { changes, pairs };
+}
+
+// 적용할 rename(BASE 이름 → TARGET 이름)을 고른다. 새 이름이 BASE 에 있으면 그 BASE 객체도 다른 이름으로 옮겨지고,
+// 옛 이름이 TARGET 에 있으면 그 TARGET 객체도 다른 rename 으로 채워질 때만 적용한다 (맞바꾸기·연쇄·교체).
+// 겹침 허용 매핑은 이 검사를 건너뛴다. 조건을 못 맞춘 매핑을 빼면 다른 매핑이 무너질 수 있어 안정될 때까지 반복한다
+function acceptRenames(baseNames: string[], targetNames: ReadonlySet<string>, renames: Map<string, string>, overlap: ReadonlySet<string>): Map<string, string> {
+  const inBase = new Set(baseNames);
+  const banned = new Set<string>();
+  for (;;) {
+    const picked = new Map<string, string>();
+    const used = new Set<string>();
+    for (const b of baseNames) {
+      const t = renames.get(b);
+      if (t === undefined || t === b || banned.has(b) || !targetNames.has(t) || used.has(t)) continue;
+      used.add(t);
+      picked.set(b, t);
+    }
+    const bad = [...picked].filter(([b, t]) => !overlap.has(b) && ((inBase.has(t) && !picked.has(t)) || (targetNames.has(b) && !used.has(b))));
+    if (!bad.length) return picked;
+    for (const [b] of bad) banned.add(b);
+  }
 }
 
 // SHOW CREATE 는 같은 컬럼을 `COLLATE x` 또는 `CHARACTER SET y COLLATE x` 로 찍는다(생성 방식에 따라 다름).

@@ -241,12 +241,20 @@ describe('컬럼 삭제와 rename 이 같은 이름에서 겹칠 때', () => {
     expect(rev.tables[0].columns.map((c) => [c.op, c.oldName, c.name])).toEqual([['rename', 'c', 'b'], ['drop', undefined, 'b']]);
   });
 
-  it('순서로 풀 수 없는 충돌(맞바꾸기)은 실행 SQL 대신 수동 확인 문장으로 낸다', () => {
+  it('DMS 교차 매핑(맞바꾸기)은 한 ALTER 안의 RENAME COLUMN 으로 낸다', () => {
     const swapTo = parseSqlDump(table('t', ['id', 'a', 'b', 'x'])).model;
     const swapFrom = parseSqlDump(table('t', ['id', 'a', 'b'])).model;
     const m: DmsMapping = { ...noRules(), columns: [{ ruleId: '1', table: 't', from: 'a', to: 'b' }, { ruleId: '2', table: 't', from: 'b', to: 'a' }], ruleCount: 2 };
     const d = diffSchemas(swapFrom, swapTo, toRenameMappings(m, swapFrom, swapTo));
-    expect(d.ignoredRenames.map((r) => r.reason)).toEqual(['이름 충돌', '이름 충돌']);
+    expect(d.ignoredRenames).toEqual([]);
+    expect(ddlOf(d)).toBe('-- [~] TABLE t\nALTER TABLE `t`\n  RENAME COLUMN `b` TO `a`,\n  CHANGE COLUMN `a` `b` int NOT NULL AFTER `a`,\n  ADD COLUMN `x` int NOT NULL;\n');
+  });
+
+  it('순서로 풀 수 없는 충돌(남는 컬럼으로의 rename)은 실행 SQL 대신 수동 확인 문장으로 낸다', () => {
+    const before = parseSqlDump(table('t', ['id', 'a', 'b'])).model;
+    const after = parseSqlDump(table('t', ['id', 'b'])).model;
+    const d = diffSchemas(before, after, [{ kind: 'column', table: 't', from: 'a', to: 'b' }]);
+    expect(d.ignoredRenames.map((r) => r.reason)).toEqual(['이름 충돌']);
     const stmts = generateDdl(d);
     expect(stmts.map((s) => s.comment)).toEqual([true]);
     expect(stmts[0].notes?.join('\n')).toContain('a→b');
@@ -259,12 +267,12 @@ describe('컬럼 삭제와 rename 이 같은 이름에서 겹칠 때', () => {
       `  PRIMARY KEY (\`id\`),\n  KEY \`fk\` (\`${fkCol}\`),\n  CONSTRAINT \`fk\` FOREIGN KEY (\`${fkCol}\`) REFERENCES \`p\` (\`id\`)\n) ENGINE=InnoDB;\n`;
     const before = parseSqlDump(parent + child('t', ['a', 'b'], 'a') + table('u', ['id', 'x'])).model;
     const after = parseSqlDump(parent + child('t2', ['b', 'c'], 'c') + table('u', ['id', 'y'])).model;
-    // 연쇄 rename a→b, b→c 는 순서로 풀 수 없어 이름 충돌이 된다
+    // a→b 는 BASE 의 b 가 그대로 남아 순서로 풀 수 없는 이름 충돌이다
     const d = diffSchemas(before, after, [
       { kind: 'table', from: 't', to: 't2' },
-      { kind: 'column', table: 't2', from: 'a', to: 'b' }, { kind: 'column', table: 't2', from: 'b', to: 'c' },
+      { kind: 'column', table: 't2', from: 'a', to: 'b' },
     ]);
-    expect(d.ignoredRenames.map((r) => r.reason)).toEqual(['이름 충돌', '이름 충돌']);
+    expect(d.ignoredRenames.map((r) => r.reason)).toEqual(['이름 충돌']);
     const stmts = generateDdl(d);
     const forT = stmts.filter((x) => x.object === 't2');
     expect(forT.length).toBeGreaterThan(2); // FK 삭제·rename·ALTER·FK 추가

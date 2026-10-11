@@ -142,3 +142,33 @@ describe('generateDdl', () => {
     );
   });
 });
+
+describe('테이블 rename 이름 충돌', () => {
+  const { base, target } = scenario('table-replace');
+
+  it('교체의 한쪽 매핑만 있으면(log→log_2025, TARGET 에 새 log) 관련 테이블 문장을 모두 수동 확인으로 낸다', () => {
+    const d = diffSchemas(base, target, [{ kind: 'table', from: 'log', to: 'log_2025' }]);
+    expect(d.ignoredRenames.map((r) => r.reason)).toEqual(['이름 충돌']);
+    const stmts = generateDdl(d);
+    const related = stmts.filter((s) => s.object === 'log' || s.object === 'log_2025');
+    expect(related.length).toBeGreaterThan(0);
+    expect(related.filter((s) => !s.comment)).toEqual([]);
+    expect(related.every((s) => s.notes?.some((n) => n.includes('log→log_2025')))).toBe(true);
+    // 상관없는 log_new 삭제는 그대로 실행 SQL 이다
+    expect(stmts.filter((s) => s.object === 'log_new').map((s) => s.comment)).toEqual([false]);
+  });
+
+  it('얽힌 rename 묶음 문장은 related 에 모든 테이블을 담는다', () => {
+    const stmts = generateDdl(diffSchemas(base, target, scenario('table-replace').renames));
+    expect(stmts.map((s) => [s.object, s.related])).toEqual([['log_2025', ['log_2025', 'log']]]);
+  });
+});
+
+describe('뷰 DEFINER 안내', () => {
+  it('뷰 CREATE 에도 루틴과 같은 DEFINER 안내를 붙인다', () => {
+    const { base, target } = scenario('order-view');
+    const views = generateDdl(diffSchemas(base, target)).filter((s) => s.kind === 'view' && !s.sql.startsWith('DROP'));
+    expect(views.length).toBeGreaterThan(0);
+    for (const v of views) expect(v.notes).toEqual(['DEFINER 없이 생성합니다 — 실행한 사용자가 DEFINER 가 됩니다']);
+  });
+});

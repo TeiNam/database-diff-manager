@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `orders` (`id`, `addr`, `addr2`) VALUES (1, 'Seoul', 'Busan')",
+  "query": "SELECT `id`, `addr2`, `addr3` FROM `orders`",
+  "rows": [{ "id": 1, "addr2": "Seoul", "addr3": "Busan" }]
+}

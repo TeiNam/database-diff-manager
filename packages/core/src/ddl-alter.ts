@@ -4,7 +4,7 @@ import type { Change, OptionChange, TableDiff } from './diff';
 import { quoteIdent as q, quoteString } from './lexer';
 import type { Column, Index, IndexKind, Table } from './model';
 import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated, indexNote, printable } from './partial-fill';
-import { partitionStatements } from './partition-ddl';
+import { partitionBodies } from './partition-ddl';
 import { printCheck, printColumn, printIndexParts } from './print';
 
 // 문장 본문: sql은 ';' 없음(delimited 제외). comment=true면 '-- ' 주석 줄로만 이루어진다
@@ -60,7 +60,7 @@ export function alterStatements(d: TableDiff): StatementBody[] {
     out.push(main.missing.length ? manualBody(generatedReason(d.name, main.missing), sql, notes) : sqlBody(sql, notes));
   }
   out.push(...optionNotes(options).map(commentBody));
-  for (const sql of partitionStatements(d)) out.push(sql.startsWith('--') ? commentBody(sql) : sqlBody(sql));
+  for (const p of partitionBodies(d)) out.push(p.sql.startsWith('--') ? commentBody(p.sql) : sqlBody(p.sql, p.notes));
   return out;
 }
 

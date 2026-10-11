@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `log` (`id`, `msg`) VALUES (1, 'old'); INSERT INTO `log_new` (`id`, `msg`, `level`) VALUES (2, 'new', 3)",
+  "query": "SELECT 'log' AS `t`, `id`, `msg` FROM `log` UNION ALL SELECT 'log_2025', `id`, `msg` FROM `log_2025`",
+  "rows": [{ "t": "log", "id": 2, "msg": "new" }, { "t": "log_2025", "id": 1, "msg": "old" }]
+}
