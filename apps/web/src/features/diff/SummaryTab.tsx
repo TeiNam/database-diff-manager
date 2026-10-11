@@ -1,4 +1,4 @@
-import type { RoutineDiff, TableDiff } from '@tdm/core';
+import { UNVERIFIED_PREFIX, type EvidenceLevel, type RoutineDiff, type TableDiff } from '@tdm/core';
 import type { DiffResponse } from '../../api/types';
 import { Mark } from '../../components/Mark';
 import type { ObjectKind } from '../../hooks/useSchemaContext';
@@ -33,6 +33,9 @@ function routineDetail(r: RoutineDiff): string {
   return [...new Set(labels)].join(' · ') || '변경';
 }
 
+// TARGET 완전성 증거 (15회차 4). 판정이 없는 diff(옛 응답)는 확인 불가로 본다
+const EVIDENCE_LABEL: Record<EvidenceLevel, string> = { complete: '완전', incomplete: '불완전', unknown: '확인 불가' };
+
 function entryDetail(e: ObjectEntry): string {
   if (e.kind === 'table') return detail(e.table);
   if (e.routine) return routineDetail(e.routine);
@@ -48,6 +51,8 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
   const count = (op: string) => tables.filter((t) => t.op === op).length;
   const fieldChanges = tables.reduce((n, t) => n + t.columns.length + t.indexes.length + t.foreignKeys.length + t.checks.length, 0);
   const entries = changedObjects(data.diff);
+  const evidence = data.diff.targetEvidence ?? { level: 'unknown' as const, objects: [] };
+  const held = data.statements.filter((st) => st.evidenceHold).length;
   const stats = [
     { value: `+${count('add')}`, label: '테이블 추가', tone: s.add },
     { value: `−${count('drop')}`, label: '테이블 삭제', tone: s.del },
@@ -56,6 +61,7 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
     ...(hasRoutines && !routinesUnknown
       ? [{ value: `+${routineCount('add')} −${routineCount('drop')} ~${routineCount('modify')}`, label: '루틴 추가/삭제/변경', tone: '' }]
       : []),
+    { value: EVIDENCE_LABEL[evidence.level], label: 'TARGET 완전성', tone: evidence.level === 'complete' ? '' : s.del },
   ];
   return (
     <>
@@ -68,14 +74,15 @@ export function SummaryTab({ data, onOpen }: { data: DiffResponse; onOpen: (kind
         ))}
       </ul>
       {routinesUnknown && <p className={s.notice} role="note">MD 출처라 루틴은 비교하지 않음 — td-export MD 에는 함수·프로시저가 없습니다</p>}
-      {data.diff.targetIncomplete && (
+      {evidence.level !== 'complete' && (
         <p className={s.notice} role="note">
-          TARGET 이 불완전합니다 ({data.diff.targetIncomplete}) — 객체·컬럼 삭제와 끊긴 객체의 문장은 실행하지 않고 수동 확인으로 돌렸습니다
+          {UNVERIFIED_PREFIX}: {EVIDENCE_LABEL[evidence.level]} ({evidence.reason ?? '판정 정보가 없습니다'}) — 삭제 문장 {held}개(객체·컬럼·파티션 삭제와
+          끊긴 객체의 문장)를 실행하지 않고 수동 확인으로 돌렸습니다
         </p>
       )}
-      {data.baseModel.incomplete && (
+      {data.baseModel.evidence?.level === 'incomplete' && (
         <p className={s.notice} role="note">
-          BASE 가 불완전합니다 ({data.baseModel.incomplete.reason}) — BASE 에 빠진 객체의 CREATE 가 실제 DB 에서 '이미 존재' 오류로 실패할 수 있습니다
+          BASE 가 불완전합니다 ({data.baseModel.evidence.reason}) — BASE 에 빠진 객체의 CREATE 가 실제 DB 에서 '이미 존재' 오류로 실패할 수 있습니다
         </p>
       )}
       {entries.length === 0 ? (
