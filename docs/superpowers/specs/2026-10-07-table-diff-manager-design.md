@@ -8,7 +8,7 @@
 
 `bin/td-export`(../table-define-exporter 빌드)가 출력한 `.sql` / `.md` 정의서를 업로드한다. 업로드할 때마다 스키마 단위 버전이 생성되고, 임의의 두 버전을 비교한다. 비교 결과는 다음 세 가지다.
 
-1. **변경 내역**: 테이블·뷰 추가/삭제, 컬럼 추가/삭제/변경(타입·NULL·기본값·코멘트·순서), 인덱스·FK·CHECK·테이블 옵션·파티션 변경
+1. **변경 내역**: 테이블·뷰·루틴(함수·프로시저) 추가/삭제, 컬럼 추가/삭제/변경(타입·NULL·기본값·코멘트·순서), 인덱스·FK·CHECK·테이블 옵션·파티션 변경
 2. **GitHub 스타일 diff 화면**: SQL 모드(기본)와 표 모드 모두 좌측 BASE, 우측 TARGET
 3. **차이를 만드는 DDL**: BASE를 TARGET으로 바꾸는 MySQL 8.0 문법 DDL. 화면에 보여주고 복사·다운로드만 지원하며, 앱이 직접 실행하지 않는다.
 
@@ -18,7 +18,7 @@
 
 - DDL을 DB에 직접 실행하거나 DB에 접속해 스키마를 수집하는 기능 (수집은 td-export가 담당)
 - PostgreSQL. `core`의 dialect 경계만 열어 두고 구현하지 않는다.
-- 트리거·프로시저·이벤트. td-export 출력에 없다.
+- 트리거·이벤트. td-export 출력에 없다. (2026-10-11 개정: 함수·프로시저는 td-export 0.1.52 SQL 출력부터 지원한다 — 4.1·4.2·4.5·4.6 참고)
 - Excel(.xlsx) 업로드
 - SSO/OIDC
 
@@ -91,7 +91,12 @@ interface View  { kind: 'view'; name: string; algorithm?: string; security?: str
 interface Partitioning { type: 'RANGE' | 'RANGE COLUMNS' | 'LIST' | 'LIST COLUMNS' | 'HASH' | 'LINEAR HASH' | 'KEY' | 'LINEAR KEY';
   expr: string; count?: number /* HASH/KEY PARTITIONS n */; subpartition?: string /* 서브파티션 절은 문자열 보존 */;
   partitions: { name: string; values?: string /* LESS THAN (…) | IN (…) */; comment?: string; engine?: string }[] }
-interface SchemaModel { name: string; tables: Table[]; views: View[] }
+interface Routine { kind: 'function' | 'procedure'; name: string; params: string /* 괄호 안 원문 */; returns?: string /* function */;
+  characteristics: { deterministic?: boolean; dataAccess?: 'CONTAINS SQL' | 'NO SQL' | 'READS SQL DATA' | 'MODIFIES SQL DATA';
+    security?: 'DEFINER' | 'INVOKER'; comment?: string; language?: 'SQL' } /* undefined = 기본값 */;
+  body: string /* 줄 끝 공백 제거 */; sqlMode?: string; parseError?: string; rawDdl?: string }   // DEFINER는 버린다
+interface SchemaModel { name: string; tables: Table[]; views: View[]; routines: Routine[];
+  routinesUnknown?: boolean /* MD 출처: 루틴 정보 없음 */ }
 ```
 
 ### 4.2 SQL 파서 (`parseSqlDump`)
@@ -106,6 +111,7 @@ interface SchemaModel { name: string; tables: Table[]; views: View[] }
   - `CONSTRAINT … FOREIGN KEY … REFERENCES …`, `CONSTRAINT … CHECK (…) [/*!80016 NOT ENFORCED */]`
   - 테이블 옵션: 나머지 `KEY=VALUE`는 `other`에 보존
   - `/*!50100 PARTITION BY … */`: 타입·표현식·파티션 목록(이름, VALUES, COMMENT, ENGINE)을 구조화해 파싱. 서브파티션 절만 문자열 보존
+- **루틴 (td-export 0.1.52+)**: `/* Routines */` 구간에 루틴마다 `SET @OLD_ROUTINE_SQL_MODE = @@SQL_MODE, SQL_MODE = '…';` → `DELIMITER ;;` → `CREATE [DEFINER=…] FUNCTION|PROCEDURE …;;` → `DELIMITER ;` → `SET SQL_MODE = @OLD_ROUTINE_SQL_MODE;` 가 온다. 문장 분리기는 줄 맨 앞의 `DELIMITER x` 를 인식해 이후 문장 끝을 `x` 로 바꾸고(문자열·주석 안의 구분자는 무시), DELIMITER 줄 자체는 문장으로 내보내지 않는다. 직전 `SET @OLD_ROUTINE_SQL_MODE` 의 SQL_MODE 값을 다음 루틴의 `sqlMode` 로 붙인다. `parseRoutine` 은 이름·파라미터·RETURNS 타입(문자셋·콜레이션 포함)·특성(순서 무관)·본문을 나누고 DEFINER 는 버린다. 실패하면 `parse-error`(kind `routine`) 경고와 `rawDdl` 로 남긴다.
 - **CREATE VIEW 해석**: `CREATE ALGORITHM=… DEFINER=… SQL SECURITY … VIEW \`v\` AS … [WITH … CHECK OPTION]`. DEFINER는 버린다.
 - **파싱 실패**: 파일 전체를 거부하지 않는다. 해당 객체만 `parseError` + `rawDdl`로 저장하고 업로드 결과에 경고로 표시한다(5.2 참고).
 - **정규화** (diff 노이즈 제거)
@@ -154,12 +160,13 @@ td-export MD 형식을 따른다.
   - 실데이터 샘플(td-export 0.1.30 `sample-app`)에서는 위 예외가 없어 SQL과 MD의 diff가 비어 있다.
 - **fidelity**: `partial`로 표시한다.
 
-### 4.4 프린터 (`printTable`, `printView`)
+### 4.4 프린터 (`printTable`, `printView`, `printRoutine`)
 
 - 모델을 MySQL `SHOW CREATE TABLE`과 **같은 형식**으로 출력한다. 2칸 들여쓰기, 한 줄에 요소 하나, 컬럼 → 키 → FK → CHECK 순서, 닫는 괄호 뒤에 옵션.
 - SQL 모드 diff 화면은 원문 대신 **프린터 출력끼리** 비교한다. 이유는 두 가지다.
   - MD 출처 버전과 SQL 출처 버전을 같은 형식으로 비교할 수 있다.
   - 정규화가 화면에도 일관되게 적용된다.
+- `printRoutine` 은 `SHOW CREATE FUNCTION/PROCEDURE` 형식(DEFINER 없이)으로 찍는다. 특성은 MySQL 과 같은 순서(데이터 접근 → DETERMINISTIC → SQL SECURITY INVOKER → COMMENT)로, 기본값(CONTAINS SQL, NOT DETERMINISTIC, SQL SECURITY DEFINER, LANGUAGE SQL)은 찍지 않는다(MySQL 8.0/8.4 출력으로 확인).
 - **왕복 보장**: `print(parse(ddl)) === normalize(ddl)`를 테스트 불변식으로 둔다. 업로드할 때 왕복이 깨진 객체는 경고를 띄우고, 화면에는 원문을 함께 볼 수 있게 한다.
 
 ### 4.5 diff 엔진 (`diffSchemas(base, target, renames) → SchemaDiff`)
@@ -179,7 +186,10 @@ interface RenameMapping { kind: 'table' | 'column' | 'index'; table?: string /* 
 interface SchemaDiff { tables: TableDiff[]; views: ViewDiff[];
   renameCandidates: RenameMapping[];
   ignoredRenames: { mapping: RenameMapping; reason: string }[] /* 대상 없음·원본 없음·이름 충돌·중복 매핑·테이블 없음 */;
-  partial: boolean /* 한쪽이라도 partial 출처 */ }
+  partial: boolean /* 한쪽이라도 partial 출처 */;
+  routines: RoutineDiff[]; routinesUnknown: boolean /* 한쪽이라도 MD 출처라 루틴을 비교하지 않음 */ }
+interface RoutineDiff { op: 'add' | 'drop' | 'modify'; kind: 'function' | 'procedure'; name: string; from?: Routine; to?: Routine;
+  fields: string[] /* 'params', 'returns', 'characteristics.deterministic' …, 'body', 'sqlMode' */ }
 ```
 
 - **매칭 기준**
@@ -194,14 +204,16 @@ interface SchemaDiff { tables: TableDiff[]; views: ViewDiff[];
   - 매핑은 BASE에 새 이름이 없고, TARGET에 옛 이름이 없고, 같은 대상이 아직 짝지어지지 않았을 때만 적용한다. 적용하지 못한 매핑은 이유와 함께 `ignoredRenames`에 담는다.
   - 파싱 실패 테이블은 테이블 rename 후보에서 뺀다.
 - **파티션**: 방식·표현식·개수·파티션 목록과 `SUBPARTITION BY …` 절을 비교한다.
-- **비교 제외**: 뷰 DEFINER, `AUTO_INCREMENT=N`. 4.2 정규화 단계에서 제거한다.
+- **루틴**: (종류, 이름)으로 짝짓고 이름은 대소문자를 구분하지 않는다(MySQL 루틴 이름 규칙). 기본값과 같은 명시 특성은 생략과 같다. 본문은 줄 끝 공백·줄바꿈(CRLF) 차이만 무시한다. `sqlMode` 는 양쪽 다 알 때만 비교한다. rename 후보는 만들지 않는다. 한쪽이라도 `routinesUnknown`(MD)이면 루틴은 비교하지 않고 `routines: []`, `routinesUnknown: true` 를 돌려준다(모두 drop/add 로 보이지 않게).
+- **비교 제외**: 뷰·루틴 DEFINER, `AUTO_INCREMENT=N`. 4.2 정규화 단계에서 제거한다.
 
 ### 4.6 DDL 생성기 (`generateDdl(diff) → Statement[]`)
 
 ```ts
 interface Statement {
-  object: string; kind: 'table' | 'view'; op: Op;
-  sql: string;        // ';' 없음. comment=true면 '-- ' 주석 줄로만 이루어진다
+  object: string; kind: 'table' | 'view' | 'function' | 'procedure'; op: Op;
+  sql: string;        // ';' 없음(delimited 제외). comment=true면 '-- ' 주석 줄로만 이루어진다
+  delimited?: boolean; // 루틴 CREATE: sql 이 `DELIMITER ;;` … `;;` `DELIMITER ;` 로 스스로 끝난다 (';' 를 덧붙이지 않음)
   comment: boolean;   // 실행할 SQL이 없는 안내 문장 (수동 확인, 파티션 COMMENT 변경 등)
   notes?: string[];   // 문장 위에 '-- '로 붙는 안내 (MD 기반 미확인 속성 등)
 }
@@ -210,7 +222,7 @@ interface Statement {
 **문장 순서** (FK·뷰 의존성 때문에 이 순서를 고정한다)
 
 1. 삭제·변경되는 FK를 `ALTER TABLE … DROP FOREIGN KEY`
-2. 삭제되는 뷰를 `DROP VIEW`
+2. 삭제되는 뷰를 `DROP VIEW`, 삭제·변경되는 루틴을 `DROP FUNCTION|PROCEDURE IF EXISTS`
 3. `RENAME TABLE a TO b` (매핑된 것만)
 4. 새 테이블을 `CREATE TABLE`. **FK를 뺀 정의**로 만들고 FK는 8단계에서 추가한다(테이블 간 생성 순서 문제 회피).
 5. 변경 테이블마다 `ALTER TABLE` 문 **하나**. 절 순서는 다음과 같다.
@@ -237,6 +249,7 @@ interface Statement {
    - 파티셔닝 제거: `REMOVE PARTITIONING`
 7. 삭제되는 테이블을 `DROP TABLE`
 8. 추가·변경되는 FK를 `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`
+8-b. 추가·변경되는 루틴을 `CREATE FUNCTION|PROCEDURE`(DEFINER 없이 — 실행한 사용자가 DEFINER 가 된다는 notes). 뷰가 함수를 부를 수 있어 뷰 생성보다 앞에 둔다. 문장 하나에 `DELIMITER ;;` / `CREATE …;;` / `DELIMITER ;` 를 넣어 mysql 클라이언트에 그대로 붙여 넣을 수 있게 하고, `sqlMode` 를 알면 앞뒤에 `SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = '…';` / `SET SQL_MODE = @OLD_SQL_MODE;` 를 같은 문장에 넣는다(`delimited: true`). 파싱 실패 루틴은 수동 확인 주석.
 9. 추가·변경되는 뷰를 `CREATE OR REPLACE [ALGORITHM=…] [SQL SECURITY …] VIEW … AS …`. 뷰 본문에서 다른 뷰 이름 참조를 찾아 위상 정렬한다.
 
 **특수 처리**
@@ -248,13 +261,13 @@ interface Statement {
   - 채우지 못한 속성은 그 문장의 `notes`에 `[MD 기반 미확인] 컬럼 \`c\`: default, charset, collation` 형식으로 적는다. 타입에 해당하지 않는 속성(정수 컬럼의 charset 등)은 적지 않는다.
   - 생성 컬럼 표현식을 채울 수 없으면(새 테이블·새 컬럼, BASE가 생성 컬럼이 아님) 잘못된 SQL 대신, 표현식 자리에 `/* 표현식 미상 */`을 넣은 SQL을 주석 처리한 수동 확인 문장(`comment: true`)을 만든다.
 - 식별자는 모두 백틱으로 인용하고 내부 백틱은 이중화한다.
-- 출력 형식(`renderDdl`): 문장마다 `-- [+|-|~|>] TABLE name` 머리 주석, `notes` 줄, SQL(`comment`가 아니면 끝에 `;`) 순서로 쓰고 문장 사이에 빈 줄 하나를 둔다.
+- 출력 형식(`renderDdl`): 문장마다 `-- [+|-|~|>] TABLE name` 머리 주석, `notes` 줄, SQL(`comment`·`delimited`가 아니면 끝에 `;`) 순서로 쓰고 문장 사이에 빈 줄 하나를 둔다.
 
 ## 5. 서버 (`apps/server`)
 
 ### 5.1 SQLite 스키마
 
-현재 스키마는 마이그레이션 003(스키마 v3, `apps/server/src/db/migrations/003_schema_v3.sql`)이 만든다. 001(초기)·002(DMS 매핑)는 이력으로 남아 있고, 003 이 테이블을 다시 만든다. 요점만 적는다(전체 DDL 은 003 파일 참고).
+현재 스키마는 마이그레이션 003(스키마 v3, `apps/server/src/db/migrations/003_schema_v3.sql`)이 만들고 004 가 `objects.kind` 를 넓힌다. 001(초기)·002(DMS 매핑)는 이력으로 남아 있고, 003 이 테이블을 다시 만든다. 요점만 적는다(전체 DDL 은 003 파일 참고).
 
 | 테이블 | 핵심 컬럼·제약 |
 |---|---|
@@ -264,7 +277,7 @@ interface Statement {
 | `schemas` | `UNIQUE (database_id, name)`, `next_version_no` (다음 버전 번호 카운터) |
 | `schema_versions` | 메타만. `UNIQUE (schema_id, version_no)`, `UNIQUE (id, schema_id)` (복합 FK 대상) |
 | `schema_version_sources` | `version_id` PK·FK CASCADE, `source_text` (원문 분리) |
-| `objects` | `UNIQUE (schema_id, kind, name)`, `UNIQUE (id, schema_id)`, `next_revision_no` (다음 리비전 번호 카운터) |
+| `objects` | `kind CHECK IN ('table','view','function','procedure')`(004), `UNIQUE (schema_id, kind, name)`, `UNIQUE (id, schema_id)`, `next_revision_no` (다음 리비전 번호 카운터) |
 | `object_revisions` | 메타 컬럼 뒤 마지막에 `model_json`. `UNIQUE (object_id, revision_no)`, `UNIQUE (id, object_id)`, 커버링 인덱스 `ix_revisions_history (object_id, revision_no, fidelity, parse_error)` |
 | `version_objects` | `(version_id, schema_id, object_id, revision_id)`, PK `(version_id, object_id)`. FK `(version_id, schema_id)` → `schema_versions(id, schema_id)` CASCADE, `(object_id, schema_id)` → `objects(id, schema_id)`, `(revision_id, object_id)` → `object_revisions(id, object_id)` |
 | `rename_mappings` | `CHECK ((kind='table') = (table_name IS NULL))`, `CHECK (base_version_id <> target_version_id)`, `ux_renames (base, target, kind, coalesce(table_name,''), old_name)`, `ix_renames_target` |
@@ -278,6 +291,8 @@ interface Statement {
 - 업로드 1건(버전 + 리비전 + 매핑)은 트랜잭션 하나로 처리한다.
 - 마이그레이션은 `PRAGMA user_version` 기반 순차 SQL 파일로 관리한다. 첫 줄이 `-- foreign_keys: off` 인 파일은 트랜잭션 밖에서 외래 키를 끄고 실행한 뒤 `PRAGMA foreign_key_check` 로 검증하고, 끝나면 `VACUUM` 한다. DB 의 `user_version` 이 앱이 아는 최신보다 크면 기동을 거부한다.
 - 003 은 사용자 계정을 보존하고(대소문자만 다른 이름은 먼저 만든 것만), 세션과 업로드 데이터를 비운다.
+- 004 는 `objects` 만 다시 만들어(`-- foreign_keys: off`, id 보존) kind 에 `function`·`procedure` 를 더한다. 데이터·FK·UNIQUE·STRICT 는 그대로다.
+- 루틴은 테이블·뷰와 같은 객체·리비전으로 저장한다(같은 해시는 리비전 재사용). 루틴 객체는 이름 대소문자를 무시하고 찾는다. 루틴이 없는 모델의 `model_hash` 는 루틴 지원 전과 같다. MD 버전을 불러오면 `routinesUnknown: true` 를 붙이고, 버전 목록의 변경 객체 수는 MD 가 낀 쌍에서 루틴을 세지 않는다.
 - 백업은 `VACUUM INTO` 로 하는 `npm run backup -w @tdm/server -- <경로>` 를 쓴다. 실행 중에 `.db` 만 복사하면 `-wal` 의 최근 커밋이 빠질 수 있다.
 
 ### 5.2 API
@@ -356,6 +371,7 @@ interface Statement {
 └────────────────────┴───────────────────────────────────────────────────────────────────────────┘
 ```
 
+- **루틴**: 트리는 Tables / Views 다음에 Routines 그룹(함수·프로시저 아이콘, 루틴이 있을 때만)을 둔다. 요약에 루틴 추가/삭제/변경 수 카드와 변경 행(바뀐 항목)을, 객체 diff 의 SQL 보기는 CREATE 문 diff, 표 보기는 파라미터·RETURNS·특성·SQL_MODE·본문 표를 보여 준다. MD 가 끼면 트리·요약에 'MD 출처라 루틴은 비교하지 않음' 안내를 띄운다.
 - **트리 동작**: 트리에서 객체를 클릭하면 diff 탭의 해당 객체로 스크롤한다. 변경이 없는 객체를 클릭하면 단일 버전 정의(SQL/표)를 보여준다.
 - **URL 상태**: `/db/:dbId/schema/:schemaId?base=3&target=5&tab=diff&obj=orders&mode=sql&layout=split`. 이 링크를 공유하면 같은 화면이 열린다.
 - **버전 선택기**: 같은 스키마의 버전 목록(번호·날짜·업로더·메모)을 보여주고, 맨 아래 "다른 Database/Schema와 비교…" 항목을 둔다. 기본값은 직전 버전 → 최신 버전.

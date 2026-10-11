@@ -19,7 +19,7 @@
 
 - **버전 관리**: Database(물리 엔진 인스턴스) → Schema 단위로 정의서를 업로드해 버전을 쌓습니다. 내용이 직전 버전과 같으면 새 버전을 만들지 않습니다.
 - **비교**: 요약, 객체별 diff(SQL Split/Unified, Excel 같은 표 보기), 변경 객체만 거르는 트리.
-- **DDL 생성**: 테이블·컬럼·인덱스·FK·뷰·파티션 변경을 ALTER/CREATE/DROP으로 만들고, 반대 방향(되돌리기) DDL도 함께 제공합니다. rename은 화면에서 매핑합니다.
+- **DDL 생성**: 테이블·컬럼·인덱스·FK·뷰·파티션·저장 함수/프로시저 변경을 ALTER/CREATE/DROP으로 만들고, 반대 방향(되돌리기) DDL도 함께 제공합니다. rename은 화면에서 매핑합니다.
 - **DB 전환 매핑**: As-Is → To-Be Schema 쌍에 AWS DMS table-mapping JSON 을 올리면, 전환 탭에 테이블·컬럼 대응과 상태를 보여 주고 같은 매핑을 rename 으로 객체 diff·DDL 에 반영합니다. 같은 대상에 대한 수동 rename 매핑이 우선합니다.
 - **이력**: 버전 이력, 객체별 변경 이력, 원본 파일 다운로드.
 - **계정**: admin / dba / viewer 세 역할. 다크·라이트 테마.
@@ -28,7 +28,8 @@
 
 | 항목 | 내용 |
 |---|---|
-| 지원 버전 | td-export 0.1.15 ~ 0.1.36의 MySQL 출력 (파일마다 형식을 판별, 0.1.30 ~ 0.1.36 사이 MySQL 출력은 같음) |
+| 지원 버전 | td-export 0.1.15 ~ 0.1.52의 MySQL 출력 (파일마다 형식을 판별, 0.1.30 ~ 0.1.36 사이 MySQL 출력은 같음) |
+| 루틴 | td-export 0.1.52+ `.sql` 출력의 MySQL 함수·프로시저(`DELIMITER ;;` 구간). 테이블·뷰처럼 저장·비교합니다(DEFINER 는 비교하지 않고 SQL_MODE 는 비교). `.md` 출력에는 루틴이 없어 한쪽이라도 `.md` 버전이면 루틴은 비교하지 않습니다(화면에 안내). 트리거·이벤트는 td-export 가 아직 내보내지 않아 범위 밖입니다 |
 | 형식 | `.sql`(권장, 손실 없음), `.md`(일부 정보 손실 — 화면에 표시) |
 | 이름 제안 | `schema(host).sql` → Database `host`, `schema(host_port).sql`(0.1.30) → Database `host:port`. 예전 방식 이름(`host_port`)의 Database가 이미 있으면 그쪽을 고릅니다 |
 | DMS 매핑 | AWS DMS table-mapping JSON: `selection` include/exclude(`%` 와일드카드), `transformation` 의 schema·table·column rename, `remove-column`. 그 밖의 action 은 경고로만 보여 주고 반영하지 않습니다. 룰 20,000개·20MB 까지 |
