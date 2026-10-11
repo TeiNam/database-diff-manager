@@ -1,5 +1,6 @@
 // 파티션 변경 → 최소 DDL. 월별 RANGE 파티션 운영(앞쪽 DROP, MAXVALUE 앞 추가)을 우선 처리한다
 import type { TableDiff } from './diff';
+import { commentLine, commentLines } from './comment-text';
 import { quoteIdent as q } from './lexer';
 import type { PartitionDef, Partitioning } from './model';
 import { compareBounds, isAllMax, parenValues, upperBound } from './partition-values';
@@ -16,7 +17,7 @@ export function subpartitionKey(p: Partitioning): string | undefined {
   return SUBPARTITION_RE.exec(p.clause)?.[0].replace(/\s+/g, ' ').trim();
 }
 
-// sql 이 '--' 로 시작하면 실행할 SQL 이 없는 안내 문장이다. notes 는 문장 위에 붙는 안내
+// sql 이 '--' 로 시작하면 실행할 SQL 이 없는 안내 문장이다 (commentLine 으로 만든다). notes 는 문장 위에 붙는 안내
 export interface PartitionStatement {
   sql: string;
   notes?: string[];
@@ -80,7 +81,7 @@ function commentNote(a: PartitionDef[], b: PartitionDef[]): string | undefined {
     return x !== undefined && x.def !== y.def && stripComment(x.def) === stripComment(y.def);
   });
   if (!commentOnly.length) return undefined;
-  return `-- 파티션 COMMENT 변경(${commentOnly.map((p) => p.name).join(', ')}): MySQL은 COMMENT만 바꾸는 DDL이 없습니다. 필요하면 REORGANIZE PARTITION으로 재정의하세요`;
+  return commentLine(`파티션 COMMENT 변경(${commentOnly.map((p) => p.name).join(', ')}): MySQL은 COMMENT만 바꾸는 DDL이 없습니다. 필요하면 REORGANIZE PARTITION으로 재정의하세요`);
 }
 
 export function listPartitionBodies(table: string, a: PartitionDef[], b: PartitionDef[], range = true): PartitionStatement[] {
@@ -149,8 +150,8 @@ function shrinksUpperBound(from: PartitionDef, to: PartitionDef): boolean {
 }
 
 const shrinkManual = (table: string, sql: string): string => [
-  `-- [수동 확인 필요] ${table}: RANGE 마지막 파티션 상한이 줄거나 비교할 수 없어 REORGANIZE 할 수 없습니다 (error 1520). 새 상한을 넘는 행을 옮기거나 지운 뒤 직접 작성하세요`,
-  ...sql.split('\n').map((l) => `-- ${l}`),
+  commentLine(`[수동 확인 필요] ${table}: RANGE 마지막 파티션 상한이 줄거나 비교할 수 없어 REORGANIZE 할 수 없습니다 (error 1520). 새 상한을 넘는 행을 옮기거나 지운 뒤 직접 작성하세요`),
+  commentLines(sql),
 ].join('\n');
 
 function leadingGone(a: PartitionDef[], b: PartitionDef[], bNames: ReadonlySet<string>): PartitionDef[] {

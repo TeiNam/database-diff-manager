@@ -7,6 +7,7 @@ export * from './parse-dump';
 export * from './parse-view';
 export * from './parse-routine';
 export * from './print';
+export * from './comment-text';
 export * from './canonical';
 export * from './diff';
 export * from './rename-check';

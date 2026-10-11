@@ -1,7 +1,7 @@
 // 그대로 실행하면 데이터가 어긋나거나 DDL 이 실패하는 테이블·뷰의 문장을 수동 확인 문장으로 바꾼다 (스펙 4.6)
 // 원칙: MySQL 로 검증한 패턴만 실행 SQL 로 내고, 얽힌 조합은 관련 객체 전체를 막는다
 import type { Statement } from './ddl';
-import { commentBody, isAlterBlocked, manualBody } from './ddl-alter';
+import { isAlterBlocked, manualBody, manualNote } from './ddl-alter';
 import { retypeGroups } from './fk-retype';
 import type { SchemaDiff, TableDiff, ViewDiff } from './diff';
 import { quoteIdent as q, viewReferences } from './lexer';
@@ -155,7 +155,7 @@ function guard(stmts: Statement[], tables: Conflicts, views: Conflicts): Stateme
   });
   const covered = new Set(stmts.flatMap((st) => (st.kind === 'table' ? st.related ?? [st.object] : [])));
   const extra = [...tables].filter(([name]) => !covered.has(name)).map(([name, c]): Statement => (
-    { object: name, kind: 'table', op: 'modify', ...commentBody(`-- [수동 확인 필요] ${c.reason}`), notes: c.notes }
+    { object: name, kind: 'table', op: 'modify', ...manualNote(c.reason), notes: c.notes }
   ));
   return [...guarded, ...extra];
 }

@@ -3,7 +3,8 @@ import { renamedFkNames } from './auto-name';
 import { guardStatements } from './ddl-guard';
 import { RETYPED_FIELD, retypeGroups } from './fk-retype';
 import { type Op, type RoutineDiff, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
-import { alter, alterStatements, commentBody, inheritCollation, manualBody, sqlBody, type StatementBody } from './ddl-alter';
+import { commentLine } from './comment-text';
+import { alter, alterStatements, inheritCollation, manualBody, manualNote, sqlBody, type StatementBody } from './ddl-alter';
 import { objectReferences, quoteIdent as q, quoteString } from './lexer';
 import type { ForeignKey, Routine, RoutineKind, Table } from './model';
 import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated, indexNote, printable, tableNote } from './partial-fill';
@@ -17,7 +18,7 @@ export interface Statement extends StatementBody {
   kind: 'table' | 'view' | RoutineKind;
   op: Op;
   // sql: ';' 없음(delimited=true 인 루틴 CREATE 는 DELIMITER 로 감싼 완결된 문장). comment=true(실행할 SQL 없는 안내 문장)면 '-- ' 주석 줄로만 이루어진다
-  // notes: 문장 위에 '-- '로 붙는 안내 (MD 기반 미확인 속성 등)
+  // notes: 문장 위에 '-- '로 붙는 안내 (MD 기반 미확인 속성 등). 한 줄짜리 문장으로, 렌더할 때 commentLine 으로 줄바꿈을 이스케이프한다
   // related: 한 문장이 여러 테이블을 함께 다룰 때(얽힌 테이블 rename) 그 테이블들의 TARGET 이름. object 도 포함한다
   related?: string[];
   // depends: 이 문장을 다른 테이블 문장과 함께 실행해야 할 때 그 묶음의 테이블들 (TARGET 이름, object 포함). 예: FK 로 묶인
@@ -104,7 +105,7 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
   const reads = new Map(diff.views.filter((x) => x.op !== 'drop').map((v) => [v, objectReferences(v.to!.body, names)]));
   for (const v of sortViews(reads)) {
     view(v, v.to!.parseError
-      ? commentBody(`-- [수동 확인 필요] ${v.name}: 파싱할 수 없는 뷰입니다. 원문을 확인하세요`)
+      ? manualNote(`${v.name}: 파싱할 수 없는 뷰입니다. 원문을 확인하세요`)
       : { ...sqlBody(printView(v.to!, { orReplace: true }), [DEFINER_NOTE]), reads: reads.get(v) });
   }
   return guardStatements(withDepends(out, diff), diff);
@@ -141,10 +142,11 @@ function pinnedIndexes(d: TableDiff, drops: TableDiff['foreignKeys']): string[] 
     .map((i) => i.name);
 }
 
+// 문장 머리 주석: '-- [~] TABLE 이름'. 이름의 줄바꿈은 이스케이프된다 (comment-text)
+export const statementHeader = (s: Pick<Statement, 'op' | 'kind' | 'object'>): string => commentLine(`[${MARK[s.op]}] ${s.kind.toUpperCase()} ${s.object}`);
+
 export function renderDdl(stmts: Statement[], partial = false): string {
-  const blocks = stmts.map((s) =>
-    [`-- [${MARK[s.op]}] ${s.kind.toUpperCase()} ${s.object}`, ...(s.notes ?? []).map((n) => `-- ${n}`), statementText(s)].join('\n'),
-  );
+  const blocks = stmts.map((s) => [statementHeader(s), ...(s.notes ?? []).map(commentLine), statementText(s)].join('\n'));
   if (partial && blocks.length) {
     const renamesColumn = stmts.some((s) => !s.comment && /\b(?:RENAME|CHANGE) COLUMN\b/.test(s.sql));
     blocks.unshift(renamesColumn ? `${PARTIAL_NOTE}\n${PARTIAL_CHECK_NOTE}` : PARTIAL_NOTE);
@@ -157,7 +159,7 @@ export const statementText = (s: StatementBody): string => (s.comment || s.delim
 
 // DELIMITER ;; 로 감싸 mysql 클라이언트에 그대로 붙여 넣을 수 있게 한다. SQL_MODE 를 알면 앞뒤로 설정·복원한다
 function createRoutine(r: Routine): StatementBody {
-  if (r.parseError) return commentBody(`-- [수동 확인 필요] ${r.name}: 파싱할 수 없는 루틴입니다. 원문을 확인하세요`);
+  if (r.parseError) return manualNote(`${r.name}: 파싱할 수 없는 루틴입니다. 원문을 확인하세요`);
   const lines = ['DELIMITER ;;', `${printRoutine(r, { executable: true })};;`, 'DELIMITER ;'];
   const sql = r.sqlMode === undefined
     ? lines
@@ -168,7 +170,7 @@ function createRoutine(r: Routine): StatementBody {
 // partial 출처 테이블은 알 수 없는 속성을 안내하고, 생성 컬럼 표현식을 모르면 수동 확인으로 돌린다
 // 파싱 실패 테이블은 출처와 무관하게 실행하지 않는다 (SQL 출처는 원문을 주석으로 보여 준다). 의존 문장 전파는 ddl-guard 가 한다
 function createTable(t: Table): StatementBody {
-  if (t.parseError && t.fidelity === 'partial') return commentBody(`-- [수동 확인 필요] ${t.name}: 파싱할 수 없는 MD 정의입니다. 원문을 확인하세요`);
+  if (t.parseError && t.fidelity === 'partial') return manualNote(`${t.name}: 파싱할 수 없는 MD 정의입니다. 원문을 확인하세요`);
   if (t.parseError) return manualBody(`${t.name}: 파싱할 수 없는 테이블 정의입니다 — 원문을 확인해 직접 실행하세요`, printTable(t));
   const columns = t.columns.map((c) => fillColumn(c));
   const indexes = t.indexes.map((i) => fillIndex(i));

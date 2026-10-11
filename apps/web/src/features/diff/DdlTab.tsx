@@ -1,5 +1,5 @@
 import type { Statement } from '@tdm/core';
-import { renderDdl, statementText } from '@tdm/core';
+import { commentLine, renderDdl, statementHeader, statementText } from '@tdm/core';
 import { useEffect, useRef, useState } from 'react';
 import { useFreshDiff } from '../../api/hooks';
 import type { DiffResponse } from '../../api/types';
@@ -56,11 +56,12 @@ function StatementBlock({ st, refresh }: { st: Statement; refresh: () => Promise
   return (
     <section className={s.block} aria-label={header}>
       <div className={s.blockHead}>
-        <code>-- [{MARK[st.op]}] {st.kind.toUpperCase()} {st.object}</code>
+        <code>{statementHeader(st)}</code>
         <CopyButton getText={getText} />
       </div>
       <pre className={s.sql}>
-        {st.notes?.map((n, i) => <span key={`${i}-${n}`} className={s.note}>{`-- ${n}`}{'\n'}</span>)}
+        {/* 화면도 복사 텍스트와 같게 이름의 줄바꿈을 이스케이프해 보여 준다 */}
+        {st.notes?.map((n, i) => <span key={`${i}-${n}`} className={s.note}>{commentLine(n)}{'\n'}</span>)}
         {statementText(st)}
       </pre>
     </section>

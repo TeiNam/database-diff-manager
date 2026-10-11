@@ -287,6 +287,7 @@ interface Statement {
   - 채우지 못한 속성은 그 문장의 `notes`에 `[MD 기반 미확인] 컬럼 \`c\`: default, charset, collation` 형식으로 적는다. 타입에 해당하지 않는 속성(정수 컬럼의 charset 등)은 적지 않는다.
   - 생성 컬럼 표현식을 채울 수 없으면(새 테이블·새 컬럼, BASE가 생성 컬럼이 아님) 잘못된 SQL 대신, 표현식 자리에 `/* 표현식 미상 */`을 넣은 SQL을 주석 처리한 수동 확인 문장(`comment: true`)을 만든다.
 - 식별자는 모두 백틱으로 인용하고 내부 백틱은 이중화한다.
+- 주석 줄 안전화(10회차 개정): 백틱 식별자는 줄바꿈을 담을 수 있어(`` `a\nDROP TABLE x;` ``) 이름을 주석 줄에 그대로 넣으면 주석이 끝나고 다음 줄이 실행문이 된다(주입, 8.4 실측). 주석 줄에 들어가는 모든 문자열(머리 주석의 객체 이름, `notes`, 수동 확인 사유, 주석 처리한 SQL)은 `comment-text` 의 `commentLine`/`commentLines` 하나로 만들고, 줄바꿈·CR·그 밖의 제어 문자(탭 제외)를 `\n`·`\r`·`\xHH` 로 이스케이프한다. 주석 처리한 SQL 은 줄마다 `-- ` 를 붙이고 줄 안의 제어 문자만 이스케이프한다. 블록 주석(`/* */`)은 쓰지 않으므로 이름 속 `*/` 는 무해하다. 웹 화면도 같은 함수(`statementHeader`·`commentLine`)로 머리·notes 를 보여 준다. 퍼즈 테스트(`comment-safety`: 개행·CR·`*/`·`;`·백틱·`DELIMITER`·`--`·`#`·NUL 을 담은 이름)가 주석 부분의 토큰 0개·모든 줄 `-- ` 시작·실행 문장의 단일 문장 유지를 확인하고, `test:mysql` 은 시나리오마다 주석 부분 뒤에 `SELECT 1` 을 붙여 서버가 결과 하나만 내는지 본다(골든 `comment-injection-names` — 그런 이름의 테이블·컬럼·인덱스·뷰·함수를 8.4 에서 만들어 SHOW CREATE 한 덤프, mysql 클라이언트로 전체 DDL 적용 뒤 `precious` 유지 확인).
 - 출력 형식(`renderDdl`): 문장마다 `-- [+|-|~|>] TABLE name` 머리 주석, `notes` 줄, SQL(`comment`·`delimited`가 아니면 끝에 `;`) 순서로 쓰고 문장 사이에 빈 줄 하나를 둔다.
 
 ## 5. 서버 (`apps/server`)

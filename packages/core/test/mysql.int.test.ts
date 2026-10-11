@@ -9,7 +9,7 @@ import { parseCreateTable } from '../src/parse-table';
 import { parseCreateView } from '../src/parse-view';
 import { parseRoutine } from '../src/parse-routine';
 import { routineLexMode } from '../src/normalize';
-import { fixture, scenario, scenarioManual, SCENARIOS, scenarioValues } from './helpers';
+import { commentPart, fixture, scenario, scenarioManual, SCENARIOS, scenarioValues } from './helpers';
 
 const TARGETS = [
   { name: 'MySQL 8.0', port: 33080 },
@@ -50,7 +50,13 @@ suite.each(TARGETS)('$name', ({ port }) => {
     if (values) await conn.query(values.seed);
 
     const { base, target, renames } = scenario(name);
-    await apply(generateDdl(diffSchemas(base, target, renames)));
+    const stmts = generateDdl(diffSchemas(base, target, renames));
+    // 주석 부분(머리·notes·주석 문장)은 서버에서도 실행할 문장이 0개다: 뒤에 붙인 SELECT 하나만 결과를 낸다
+    for (const s of stmts) {
+      const [res] = await conn.query(`${commentPart(s)}\nSELECT 1 AS ok`);
+      expect(res, commentPart(s)).toEqual([{ ok: 1 }]);
+    }
+    await apply(stmts);
 
     const dumped = await dumpSchema(conn, db);
     const after = diffSchemas(dumped, target);
