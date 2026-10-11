@@ -19,7 +19,7 @@
 
 - **버전 관리**: Database(물리 엔진 인스턴스) → Schema 단위로 정의서를 업로드해 버전을 쌓습니다. 내용이 직전 버전과 같으면 새 버전을 만들지 않습니다.
 - **비교**: 요약, 객체별 diff(SQL Split/Unified, Excel 같은 표 보기), 변경 객체만 거르는 트리.
-- **DDL 생성**: 테이블·컬럼·인덱스·FK·뷰·파티션·저장 함수/프로시저 변경을 ALTER/CREATE/DROP으로 만들고, 반대 방향(되돌리기) DDL도 함께 제공합니다. rename은 화면에서 매핑합니다.
+- **DDL 생성**: 테이블·컬럼·인덱스·FK·뷰·파티션·저장 함수/프로시저 변경을 ALTER/CREATE/DROP으로 만들고, 반대 방향(되돌리기) DDL도 함께 제공합니다. rename은 화면에서 매핑합니다. 맞바꾸기·연쇄(a↔b, a→b→c, 테이블 교체)는 한 `RENAME TABLE` 문장이나 한 ALTER 의 `RENAME COLUMN` 절로 만들고, 한 방향에 저장한 수동 rename 은 반대 방향 비교에 뒤집어 반영합니다.
 - **DB 전환 매핑**: As-Is → To-Be Schema 쌍에 AWS DMS table-mapping JSON 을 올리면, 전환 탭에 테이블·컬럼 대응과 상태를 보여 주고 같은 매핑을 rename 으로 객체 diff·DDL 에 반영합니다. 같은 대상에 대한 수동 rename 매핑이 우선합니다.
 - **이력**: 버전 이력, 객체별 변경 이력, 원본 파일 다운로드.
 - **계정**: admin / dba / viewer 세 역할. 다크·라이트 테마.

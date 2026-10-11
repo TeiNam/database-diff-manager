@@ -19,7 +19,7 @@ A team web tool for managing MySQL schema definitions exported with [td-export](
 
 - **Versioning**: upload definitions per Database (a physical engine instance) → Schema. An upload identical to the latest version does not create a new version.
 - **Comparison**: summary, per-object diff (SQL split/unified and a spreadsheet-like grid), and a tree that can filter to changed objects only.
-- **DDL generation**: ALTER/CREATE/DROP for tables, columns, indexes, foreign keys, views, partitions, and stored functions/procedures, plus the reverse (rollback) direction. Renames are mapped in the UI.
+- **DDL generation**: ALTER/CREATE/DROP for tables, columns, indexes, foreign keys, views, partitions, and stored functions/procedures, plus the reverse (rollback) direction. Renames are mapped in the UI; swaps and chains (a↔b, a→b→c, replacing a table with another) become one `RENAME TABLE` statement or `RENAME COLUMN` clauses in one ALTER, and manual renames saved for one direction are inverted for the reverse diff.
 - **DB migration mapping**: upload an AWS DMS table-mapping JSON for an As-Is → To-Be Schema pair. The Migration (전환) tab shows table and column correspondence with a status for each, and the same mapping is applied as renames to the object diff and DDL. Manual rename mappings still win for the same object.
 - **History**: version history, per-object change history, original file download.
 - **Accounts**: admin / dba / viewer roles. Dark and light themes.
