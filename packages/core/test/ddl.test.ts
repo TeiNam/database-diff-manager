@@ -498,6 +498,13 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(sqls('q')).toEqual(['ALTER TABLE `d`   DROP FOREIGN KEY `fk_d_q`', 'ALTER TABLE `q`   MODIFY COLUMN `id` bigint NOT NULL']);
   });
 
+  it('FK 를 유지하는 부모 변경(참조 컬럼 rename·COMMENT·DEFAULT·위치)은 자식 FK 해제를 넣지 않고, 타입 변경만 넣는다 (14회차 2, 8.4 실측)', () => {
+    const sqls = (object: string) => cardOf('card-parent-rename-keep-fk', 'table', object).statements.map((s) => s.sql.split('\n').join(' '));
+    expect(sqls('p')).toEqual(['ALTER TABLE `p`   RENAME COLUMN `id` TO `new_id`']);
+    expect(sqls('q')).toEqual(["ALTER TABLE `q`   MODIFY COLUMN `id` int NOT NULL DEFAULT '0' COMMENT '키' AFTER `name`"]);
+    expect(sqls('r')).toEqual(['ALTER TABLE `e`   DROP FOREIGN KEY `fk_e_r`', 'ALTER TABLE `r`   MODIFY COLUMN `id` bigint NOT NULL']);
+  });
+
   it('의존 매칭은 문장의 object 와 related 이름 모두를 본다: 맞바꾸기 뒤 coupon 을 읽는 새 뷰 카드는 묶음 RENAME 을 넣는다 (13회차 3)', () => {
     const { statements, dependencies } = cardOf('card-view-swap-rename', 'view', 'v_coupon');
     expect(statements.map((s) => s.sql.split('\n')[0])).toEqual([expect.stringMatching(/^RENAME TABLE `coupon` TO `__tdm_tmp_1`/), expect.stringMatching(/VIEW `v_coupon`/)]);

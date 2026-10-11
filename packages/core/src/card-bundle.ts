@@ -1,6 +1,7 @@
 // 객체 카드 복사 묶음: 그 객체의 문장과, 그 문장들이 새 BASE DB 에서 단독으로 성공하는 데 필요한 다른 객체 문장 (전체 DDL 순서의 부분 집합)
 import type { Statement } from './ddl';
-import { routineNameKey, type SchemaDiff, type TableDiff } from './diff';
+import { routineNameKey, type Change, type SchemaDiff, type TableDiff } from './diff';
+import type { Column } from './model';
 
 type Kind = Statement['kind'];
 
@@ -15,8 +16,9 @@ const namesOf = (st: Statement): string[] => st.related ?? [st.object];
 const blocksIncomingFks = (st: Statement) => st.kind === 'table' && st.op !== 'add' && !st.fkDrops && !st.fkAdds && !st.keepsIncomingFks;
 
 // 들어오는 FK(카드에 해제 문장이 생기는 FK: 삭제되는 테이블의 FK 전부, 바뀌는 테이블의 삭제·변경 FK)와 충돌하지 않는 변경 테이블 (TARGET 이름).
-// 충돌: 테이블 rename·삭제, 파싱 실패, 파티션·옵션(COMMENT 제외 — 엔진·문자셋 변환 등) 변경, 참조 컬럼의 변경·삭제·rename·위치 이동,
-// 참조 컬럼을 담은 인덱스의 삭제·변경·rename. fk-retype 묶음은 depends 로 따로 묶인다
+// 충돌: 테이블 rename·삭제, 파싱 실패, 파티션·옵션(COMMENT 제외 — 엔진·문자셋 변환 등) 변경, 참조 컬럼의 삭제와 FK 를 유지할 수 없는
+// 변경(타입·문자셋·콜레이션·NULL 성 등 FK_KEEPING_FIELDS 밖), 참조 컬럼을 담은 인덱스의 삭제·변경·rename. 참조 컬럼의 단순 rename·
+// COMMENT·DEFAULT 변경·위치 이동은 InnoDB 가 자식 FK 를 유지·따라 옮긴다 (8.4 실측, 14회차 2). fk-retype 묶음은 depends 로 따로 묶인다
 export function incomingFkSafeTables(diff: SchemaDiff): Set<string> {
   const referenced = new Map<string, Set<string>>(); // BASE 테이블 → 들어오는 FK 의 참조 컬럼
   for (const d of diff.tables) {
@@ -31,12 +33,16 @@ export function incomingFkSafeTables(diff: SchemaDiff): Set<string> {
   return new Set(diff.tables.filter((d) => d.op === 'modify' && !conflictsWithIncoming(d, referenced.get(d.name))).map((d) => d.name));
 }
 
+// 참조 컬럼에서 바뀌어도 자식 FK 가 유지되는 속성 (rename 은 op 로 따로 본다)
+const FK_KEEPING_FIELDS: ReadonlySet<string> = new Set(['comment', 'default']);
+const keepsFk = (c: Change<Column>): boolean => (c.op === 'modify' || c.op === 'rename') && c.fields.every((f) => FK_KEEPING_FIELDS.has(f));
+
 function conflictsWithIncoming(d: TableDiff, cols: ReadonlySet<string> | undefined): boolean {
   if (!cols) return false;
   if (d.unparsed || d.from?.parseError || d.to?.parseError || d.partition) return true;
   if (d.options.some((o) => o.key !== 'COMMENT')) return true;
   const hits = (name: string | undefined) => name !== undefined && cols.has(name);
-  if (d.columns.some((c) => c.op !== 'add' && hits(c.from?.name)) || d.moved.some(hits)) return true;
+  if (d.columns.some((c) => c.op !== 'add' && hits(c.from?.name) && !keepsFk(c))) return true;
   return d.indexes.some((i) => i.op !== 'add' && (i.from?.parts ?? []).some((p) => hits(p.column)));
 }
 
