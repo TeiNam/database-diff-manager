@@ -63,6 +63,19 @@ export function alterStatements(d: TableDiff): StatementBody[] {
   const plan = charsetPlan(d);
   const options = charsetOptions(d.options, plan);
   const main = alterClauses(d, options, plan?.columns ?? new Set());
+  return alterBodies(d, plan, options, main);
+}
+
+// 본 ALTER 가 수동 확인 문장이 되는지 (파싱 실패, 생성식 미상, VIRTUAL↔STORED·일반↔VIRTUAL). 그 ALTER 가 만들 컬럼·인덱스를
+// 다른 테이블의 FK·뷰가 쓸 수 있으므로 ddl-guard 가 전파 시드로 쓴다
+export function isAlterBlocked(d: TableDiff): boolean {
+  if (d.unparsed) return true;
+  const plan = charsetPlan(d);
+  const main = alterClauses(d, charsetOptions(d.options, plan), plan?.columns ?? new Set());
+  return main.clauses.length > 0 && main.missing.length + main.storage.length + main.virtual.length > 0;
+}
+
+function alterBodies(d: TableDiff, plan: CharsetPlan | undefined, options: OptionChange[], main: Collected): StatementBody[] {
   const blocked = [...main.missing, ...main.storage, ...main.virtual];
   const out: StatementBody[] = plan?.convert ? [convertBody(d.name, plan.convert, plan.notes, blocked)] : [];
   // 파티션 함수가 쓰는 컬럼을 rename·삭제하면 파티션 재정의를 같은 ALTER 에 넣어야 한다 (따로 실행하면 error 3855)

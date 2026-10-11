@@ -300,3 +300,41 @@ describe('FK 재생성 시 FK 가 만든 인덱스 이름 고정', () => {
     expect(generateDdl(diffSchemas(c(''), noFk))[0].sql).toBe('ALTER TABLE `c`\n  DROP FOREIGN KEY `c_ibfk_1`');
   });
 });
+
+describe('ALTER 단위 수동 확인의 전파 (6회차 4)', () => {
+  const parent = (g: string, extra = '') => `CREATE TABLE \`t\` (\n  \`id\` int NOT NULL,\n  \`a\` int NOT NULL,\n  \`g\` int GENERATED ALWAYS AS ((\`a\` * 2)) ${g},\n${extra}  PRIMARY KEY (\`id\`)\n) ENGINE=InnoDB;`;
+  const OLD_CHILD = 'CREATE TABLE `old_child` (\n  `id` int NOT NULL,\n  `t_id` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `fk_old_t` (`t_id`),\n  CONSTRAINT `fk_old_t` FOREIGN KEY (`t_id`) REFERENCES `t` (`id`)\n) ENGINE=InnoDB;';
+  const OTHER = (n: string) => `CREATE TABLE \`other\` (\n  \`id\` int NOT NULL,\n  \`n\` varchar(${n}) NOT NULL,\n  PRIMARY KEY (\`id\`)\n) ENGINE=InnoDB;`;
+  const NEW_CHILD = 'CREATE TABLE `child` (\n  `id` int NOT NULL,\n  `t_k` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `fk_child_t` (`t_k`),\n  CONSTRAINT `fk_child_t` FOREIGN KEY (`t_k`) REFERENCES `t` (`k`)\n) ENGINE=InnoDB;';
+  const VIEW = (table: string, col: string) => `CREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW \`v_${table}\` AS select \`${table}\`.\`${col}\` AS \`${col}\` from \`${table}\`;`;
+  const base = parseSqlDump([parent('VIRTUAL'), OLD_CHILD, OTHER('10')].join('\n')).model;
+  const target = parseSqlDump([parent('STORED', '  `k` int NOT NULL,\n  UNIQUE KEY `uq_k` (`k`),\n'), OLD_CHILD, OTHER('20'), NEW_CHILD, VIEW('t', 'k'), VIEW('other', 'n')].join('\n')).model;
+  const stmts = generateDdl(diffSchemas(base, target));
+  const of = (object: string) => stmts.filter((s) => s.object === object);
+
+  it('막힌 ALTER 의 테이블을 참조하는 새 FK·읽는 뷰는 수동 확인으로 돌린다', () => {
+    const fk = of('child').find((s) => s.sql.includes('ADD CONSTRAINT'));
+    expect(fk?.comment).toBe(true);
+    expect(fk?.sql).toMatch(/^-- \[수동 확인 필요\] child: 참조하는 테이블의 문장이 수동 확인이라 FK 변경을 실행하지 않습니다/);
+    const [view] = of('v_t');
+    expect(view.comment).toBe(true);
+    expect(view.sql).toMatch(/^-- \[수동 확인 필요\] v_t: 읽는 객체\(t\)의 문장이 수동 확인이라/);
+  });
+
+  it('막힌 테이블 자신의 다른 문장·무관한 테이블·뷰·변경 없는 FK 는 그대로 실행', () => {
+    expect(of('other').every((s) => !s.comment)).toBe(true);
+    expect(of('v_other').every((s) => !s.comment)).toBe(true);
+    expect(of('old_child')).toEqual([]);
+    expect(of('t').filter((s) => s.comment)).toHaveLength(1);
+  });
+
+  it('실데이터 일상 변경(컬럼 확대·추가, 인덱스 추가, 새 뷰)에는 수동 확인이 없다', () => {
+    const v1 = sample('sql');
+    const v2 = `${v1
+      .replace('`feature` varchar(50) NOT NULL', '`feature` varchar(80) NOT NULL')
+      .replace('  `create_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (`log_id`),', '  `create_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `memo` varchar(20) DEFAULT NULL,\n  PRIMARY KEY (`log_id`),\n  KEY `ix_memo` (`memo`),')}\n${VIEW('ai_usage_log', 'memo')}`;
+    const stmts = generateDdl(diffSchemas(parseSqlDump(v1).model, parseSqlDump(v2).model));
+    expect(stmts.length).toBeGreaterThanOrEqual(2);
+    expect(renderDdl(stmts)).not.toContain('수동 확인');
+  });
+});
