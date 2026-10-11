@@ -445,6 +445,21 @@ describe('objectStatements: 객체 카드 복사 묶음 (6회차 2)', () => {
     expect(statements.map((s) => s.kind)).toEqual(['function', 'view']);
   });
 
+  it('함수 호출은 함수 문장만, FROM/JOIN 참조는 테이블·뷰 문장만 묶는다 — 함수 f() 만 부르는 뷰에 테이블 f 의 변경을 넣지 않고, 함수 이름은 대소문자 무시 (10회차 2)', () => {
+    const { statements, dependencies } = cardOf('card-function-table-same-name', 'view', 'v');
+    expect(statements.map((s) => `${s.kind} ${s.object}`)).toEqual(['function Gx', 'view v']);
+    expect(dependencies).toEqual(['Gx']);
+  });
+
+  it('막힌 테이블과 같은 이름의 함수만 부르는 뷰는 막지 않는다 (10회차 2)', () => {
+    const fn = 'DELIMITER ;;\nCREATE DEFINER=`root`@`%` FUNCTION `pe`() RETURNS int\n    NO SQL\nRETURN 1;;\nDELIMITER ;';
+    const view = 'CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `v` AS select `pe`() AS `n`;';
+    const pe = "CREATE TABLE `pe` (\n  `id` int NOT NULL,\n  `a` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix` (`a`) /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"y\": 2}' */\n) ENGINE=InnoDB;";
+    const stmts = generateDdl(diffSchemas(parseSqlDump(fn).model, parseSqlDump(`${pe}\n${view}\n${fn}`).model));
+    expect(stmts.find((s) => s.kind === 'table')?.comment).toBe(true);
+    expect(stmts.find((s) => s.kind === 'view')?.comment).toBe(false);
+  });
+
   it('뷰 카드와 뷰 생성 순서는 같은 토큰 기반 참조를 쓴다: 별칭 `z` 는 뷰 z 참조가 아니다 (9회차 3)', () => {
     const { stmts, statements } = cardOf('view-order-alias', 'view', 'a');
     expect(stmts.map((s) => s.object)).toEqual(['a', 'z']);

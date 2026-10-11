@@ -3,8 +3,8 @@
 import type { Statement } from './ddl';
 import { isAlterBlocked, manualBody, manualNote } from './ddl-alter';
 import { retypeGroups } from './fk-retype';
-import type { SchemaDiff, TableDiff, ViewDiff } from './diff';
-import { quoteIdent as q, viewReferences } from './lexer';
+import { routineNameKey, type SchemaDiff, type TableDiff, type ViewDiff } from './diff';
+import { objectReferences } from './lexer';
 import { renameGroups } from './table-rename';
 
 interface Conflict {
@@ -17,7 +17,8 @@ type Conflicts = Map<string, Conflict>;
 export function guardStatements(stmts: Statement[], diff: SchemaDiff): Statement[] {
   const alterBlocked = alterBlockedNames(diff);
   const tables = spreadConflicts(diff, seedConflicts(diff), alterBlocked);
-  const views = viewConflicts(diff.views, new Set([...blockedNames(diff, tables), ...alterBlocked, ...unparsedObjects(diff)]));
+  const unparsed = unparsedObjects(diff);
+  const views = viewConflicts(diff.views, new Set([...blockedNames(diff, tables), ...alterBlocked, ...unparsed.views]), unparsed.functions);
   if (!tables.size && !views.size) return stmts;
   return guard(stmts, tables, views);
 }
@@ -60,13 +61,13 @@ function seedConflicts(diff: SchemaDiff): Conflicts {
   return out;
 }
 
-// 생성 문장을 실행하지 않는 파싱 실패 객체 이름: 새 함수·프로시저, TARGET 뷰 (그 객체를 읽거나 부르는 뷰를 막는다).
-// 바뀌는 루틴은 옛 정의를 지우지 않으므로(2단계 수동 확인) 남는다
-function unparsedObjects(diff: SchemaDiff): string[] {
-  return [
-    ...diff.routines.filter((r) => r.op === 'add' && r.to?.parseError).map((r) => r.name),
-    ...diff.views.filter((v) => v.op !== 'drop' && v.to?.parseError).map((v) => v.name),
-  ];
+// 생성 문장을 실행하지 않는 파싱 실패 객체 이름: 새 함수, TARGET 뷰 (그 함수를 부르거나 그 뷰를 읽는 뷰를 막는다. 뷰는 프로시저를
+// 부를 수 없다). 바뀌는 루틴은 옛 정의를 지우지 않으므로(2단계 수동 확인) 남는다
+function unparsedObjects(diff: SchemaDiff): { functions: string[]; views: string[] } {
+  return {
+    functions: diff.routines.filter((r) => r.kind === 'function' && r.op === 'add' && r.to?.parseError).map((r) => r.name),
+    views: diff.views.filter((v) => v.op !== 'drop' && v.to?.parseError).map((v) => v.name),
+  };
 }
 
 // 막힌 테이블의 옛·새 이름
@@ -122,14 +123,19 @@ const referencingFks = (d: TableDiff, blocked: ReadonlySet<string>): { name: str
   return d.foreignKeys.filter((f) => [f.from?.refTable, f.to?.refTable].some((n) => n !== undefined && blocked.has(n)));
 };
 
-// 본문이 쓰는 객체 이름: FROM/JOIN 뒤 테이블·뷰와 함수 호출 (viewReferences). 토큰으로 나눌 수 없으면 `이름` 이 나오기만 해도 쓰는 것으로 본다
-const readsName = (body: string, name: string): boolean => viewReferences(body)?.includes(name) ?? body.includes(q(name));
+// 본문이 쓰는 막힌 객체: FROM/JOIN 참조는 막힌 테이블·뷰와, 함수 호출은 막힌 함수와(대소문자 무시) 비교한다 (objectReferences —
+// 토큰으로 나눌 수 없으면 `이름` 이 나오기만 해도 쓰는 것으로 본다). 막힌 테이블 f 와 같은 이름의 함수 f() 만 부르는 뷰는 막지 않는다
+const blockedUses = (body: string, relations: ReadonlySet<string>, functions: readonly string[]): string[] => {
+  const refs = objectReferences(body, [...relations, ...functions]);
+  const calls = new Set(refs.routines.map(routineNameKey));
+  return [...refs.relations.filter((n) => relations.has(n)), ...functions.filter((n) => calls.has(routineNameKey(n)))];
+};
 
-// 막힌 테이블(또는 막힌 뷰)을 읽는 뷰의 생성·삭제도 막는다
-function viewConflicts(views: ViewDiff[], blocked: ReadonlySet<string>): Conflicts {
+// 막힌 테이블·뷰를 읽거나 막힌 함수를 부르는 뷰의 생성·삭제도 막는다
+function viewConflicts(views: ViewDiff[], blocked: ReadonlySet<string>, functions: readonly string[]): Conflicts {
   const out: Conflicts = new Map();
   const names = new Set(blocked);
-  const reads = (v: ViewDiff) => [...names].filter((n) => [v.from?.body, v.to?.body].some((b) => b !== undefined && readsName(b, n)));
+  const reads = (v: ViewDiff) => [...new Set([v.from?.body, v.to?.body].flatMap((b) => (b === undefined ? [] : blockedUses(b, names, functions))))];
   for (;;) {
     const before = out.size;
     for (const v of views) {
