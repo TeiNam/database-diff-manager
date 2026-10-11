@@ -10,6 +10,7 @@ export * from './print';
 export * from './canonical';
 export * from './diff';
 export * from './rename-check';
+export * from './manual-review';
 export * from './ddl';
 export * from './partition-ddl';
 export * from './parse-md';

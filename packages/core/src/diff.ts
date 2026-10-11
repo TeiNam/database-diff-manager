@@ -1,4 +1,5 @@
 // 두 스키마 모델의 차이 계산. unknown 목록의 속성은 비교하지 않고 skipped에 기록한다
+import { renamedAutoName, renamedFkNames } from './auto-name';
 import { canonicalJson } from './canonical';
 import { quoteIdent } from './lexer';
 import type { Check, Column, ForeignKey, Index, IndexField, Partitioning, Routine, RoutineKind, SchemaModel, Table, View } from './model';
@@ -6,7 +7,10 @@ import { normalizeBody, routineLexMode } from './normalize';
 import { isOtherKindFamily } from './partial-fill';
 import { subpartitionKey } from './partition-ddl';
 import { printColumn, printRoutine, printTable, printView } from './print';
+import { findManualTables, type ManualTable } from './manual-review';
 import { findIgnoredRenames, type IgnoredRename } from './rename-check';
+
+export { renamedAutoName } from './auto-name';
 
 export type Op = 'add' | 'drop' | 'modify' | 'rename';
 
@@ -78,6 +82,7 @@ export interface SchemaDiff {
   routines: RoutineDiff[];
   routinesUnknown: boolean; // 한쪽이라도 MD 출처라 루틴을 비교하지 않음 (routines 는 빈 배열)
   objectNames: string[]; // BASE·TARGET 의 모든 테이블·뷰 이름 (맞바꾸기 임시 이름이 겹치지 않게 예약)
+  manualTables: ManualTable[]; // 생성 DDL 을 그대로 실행할 수 없어 문장을 수동 확인으로 돌릴 테이블과 이유
 }
 
 // 비교용 표식: 삭제되는 BASE 컬럼 이름 앞에 붙여 TARGET 의 같은 이름 컬럼과 다르게 만든다 (식별자에 나올 수 없는 문자)
@@ -108,6 +113,7 @@ export function diffSchemas(base: SchemaModel, target: SchemaModel, renames: Ren
     routines: routinesUnknown ? [] : diffRoutines(base.routines ?? [], target.routines ?? []),
     routinesUnknown,
     objectNames: [...new Set(all.map((o) => o.name))],
+    manualTables: findManualTables(base, tables),
   };
 }
 
@@ -174,7 +180,8 @@ export function diffTable(b: Table, t: Table, renames: RenameMapping[] = [], con
   const indexes = matchByName(b.indexes, t.indexes, mappingOf(renames, 'index', t.name), (x, y) =>
     indexFields({ ...x, parts: x.parts.map((p) => (p.column === undefined ? p : { ...p, column: renameCol(p.column) })) }, y, skipped),
   );
-  const baseFks = b.foreignKeys.map((f) => ({ ...f, name: renamedAutoName(f.name, b.name, t.name, 'ibfk') }));
+  const fkNames = renamedFkNames(b.foreignKeys, b.name, t.name);
+  const baseFks = b.foreignKeys.map((f, i) => ({ ...f, name: fkNames[i] }));
   const foreignKeys = matchByName(baseFks, t.foreignKeys, new Map(), (x, y) =>
     fieldDiff({ ...renamedReference(x, refs), columns: x.columns.map(renameCol) }, y, FK_FIELDS, skipped, 'fk.', fkEqual),
   );
@@ -324,15 +331,6 @@ function checkChanges(a: Table, b: Table, skipped: Set<string>, dropped: Readonl
     const fields = fieldDiff(x, y, CHECK_FIELDS, skipped, 'check.');
     return usesDropped(x) && !fields.includes('expr') ? ['expr', ...fields] : fields;
   }).changes;
-}
-
-// RENAME TABLE 은 자동 제약명 '<옛 테이블>_chk_N'·'<옛 테이블>_ibfk_N' 을 '<새 테이블>_…_N' 으로 바꾼다 (맞바꾸기·연쇄의
-// 임시 이름을 거쳐도 마지막 이름이 남는다). CHECK·FK 추가는 rename 뒤에 실행되므로 새 이름으로 비교·출력한다
-export function renamedAutoName(name: string, from: string, to: string, kind: 'chk' | 'ibfk'): string {
-  if (from === to) return name;
-  const prefix = `${from}_${kind}_`;
-  const n = name.startsWith(prefix) ? name.slice(prefix.length) : '';
-  return /^\d+$/.test(n) ? `${to}_${kind}_${n}` : name;
 }
 
 function optionChanges(a: Table, b: Table, skipped: Set<string>): OptionChange[] {

@@ -212,6 +212,41 @@ describe('rename 3회차 — 역방향은 적용된 매핑만, 수동 테이블 
   });
 });
 
+describe('rename 4회차 — 역방향은 정방향에서 최종 적용된 rename 만 뒤집는다', () => {
+  const put = (ctx: App, base: number, target: number, renames: unknown[]) =>
+    ctx.app.inject({ method: 'PUT', url: '/api/diff/renames', headers: ctx.dba, payload: { base, target, renames } });
+  const get = async (ctx: App, base: number, target: number) =>
+    (await ctx.app.inject({ method: 'GET', url: `/api/diff?base=${base}&target=${target}`, headers: ctx.viewer })).json();
+
+  it('DMS members→member 를 수동 members→zcustomer 로 덮으면 역방향은 DMS member→members 를 뒤집지 않는다', async () => {
+    const ctx = await loggedInApp();
+    const v1 = await upload(ctx, 'a.sql', 'CREATE TABLE `members` (\n  `id` int NOT NULL,\n  `nick` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n);', 'legacy');
+    const v2 = await upload(ctx, 'b.sql', [
+      'CREATE TABLE `member` (\n  `id` int NOT NULL,\n  `nickname` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n);',
+      'CREATE TABLE `zcustomer` (\n  `id` int NOT NULL,\n  `nickname` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n);',
+    ].join('\n'), 'newapp');
+    const d0 = await get(ctx, v1, v2);
+    const locator = { 'schema-name': 'legacy', 'table-name': 'members' };
+    const rules = [
+      { 'rule-type': 'selection', 'rule-id': '1', 'rule-name': '1', 'object-locator': locator, 'rule-action': 'include' },
+      { 'rule-type': 'transformation', 'rule-id': '2', 'rule-name': '2', 'rule-target': 'table', 'object-locator': locator, 'rule-action': 'rename', value: 'member' },
+      { 'rule-type': 'transformation', 'rule-id': '3', 'rule-name': '3', 'rule-target': 'column', 'object-locator': { ...locator, 'column-name': 'nick' }, 'rule-action': 'rename', value: 'nickname' },
+    ];
+    const uploaded = await ctx.app.inject({ method: 'POST', url: '/api/migrations', headers: ctx.admin, payload: { fromSchemaId: d0.base.schemaId, toSchemaId: d0.target.schemaId, filename: 'm.json', source: JSON.stringify({ rules }) } });
+    expect(uploaded.statusCode).toBe(201);
+    expect((await put(ctx, v1, v2, [{ kind: 'table', from: 'members', to: 'zcustomer' }])).statusCode).toBe(200);
+    const fwd = await get(ctx, v1, v2);
+    expect(fwd.ddl).toContain('RENAME TABLE `members` TO `zcustomer`');
+
+    const rev = await get(ctx, v2, v1);
+    expect(rev.ddl).toContain('RENAME TABLE `zcustomer` TO `members`');
+    expect(rev.ddl).toContain('RENAME COLUMN `nickname` TO `nick`');
+    expect(rev.ddl).toContain('DROP TABLE `member`');
+    expect(rev.ddl).not.toContain('DROP TABLE `zcustomer`');
+    expect(rev.ddl).not.toContain('RENAME TABLE `member` TO');
+  });
+});
+
 describe('GET /api/objects/:id/history', () => {
   it('리비전과 처음 나온 버전', async () => {
     const ctx = await loggedInApp();

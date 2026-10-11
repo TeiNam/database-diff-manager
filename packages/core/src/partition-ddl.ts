@@ -156,22 +156,27 @@ export function listPartitionBodies(table: string, a: PartitionDef[], b: Partiti
   return out;
 }
 
-// RANGE 상한 (MAXVALUE 는 Infinity). 정수 하나가 아니면(RANGE COLUMNS·식) undefined
+// RANGE 상한 (MAXVALUE·모든 컬럼이 MAXVALUE 인 튜플은 Infinity). 정수 하나가 아니면(날짜·문자열·다중 컬럼·식) undefined
 function upperBound(p: PartitionDef): number | undefined {
-  const def = stripComment(p.def);
-  if (/^\s*VALUES\s+LESS\s+THAN\s+(?:\(\s*MAXVALUE\s*\)|MAXVALUE)\b/i.test(def)) return Infinity;
-  const m = /^\s*VALUES\s+LESS\s+THAN\s*\(\s*(-?\d+)\s*\)/i.exec(def);
-  return m ? Number(m[1]) : undefined;
+  const m = /^\s*VALUES\s+LESS\s+THAN\s*(?:\(([^()]*)\)|(MAXVALUE)\b)/i.exec(stripComment(p.def));
+  if (!m) return undefined;
+  if (m[2] !== undefined) return Infinity;
+  const parts = m[1].split(',').map((v) => v.trim());
+  if (parts.every((v) => /^MAXVALUE$/i.test(v))) return Infinity;
+  return parts.length === 1 && /^-?\d+$/.test(parts[0]) ? Number(parts[0]) : undefined;
 }
 
+// 마지막 파티션 상한이 줄거나, 줄지 않는다고 확신할 수 없으면 true (새 상한이 MAXVALUE 면 줄지 않는다)
 function shrinksUpperBound(from: PartitionDef, to: PartitionDef): boolean {
   const a = upperBound(from);
   const b = upperBound(to);
-  return a !== undefined && b !== undefined && b < a;
+  if (b === Infinity) return false;
+  if (a === undefined || b === undefined) return stripComment(from.def) !== stripComment(to.def);
+  return b < a;
 }
 
 const shrinkManual = (table: string, sql: string): string => [
-  `-- [수동 확인 필요] ${table}: RANGE 마지막 파티션 상한이 줄어 REORGANIZE 할 수 없습니다 (error 1520). 새 상한을 넘는 행을 옮기거나 지운 뒤 직접 작성하세요`,
+  `-- [수동 확인 필요] ${table}: RANGE 마지막 파티션 상한이 줄거나 비교할 수 없어 REORGANIZE 할 수 없습니다 (error 1520). 새 상한을 넘는 행을 옮기거나 지운 뒤 직접 작성하세요`,
   ...sql.split('\n').map((l) => `-- ${l}`),
 ].join('\n');
 
