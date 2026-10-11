@@ -2,7 +2,7 @@ import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-
 import { renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DIFF_REFETCH_MS, DIFF_STALE_MS, queryKeys, useDeleteDatabase, useDeleteMigration, useDeleteSchema, useDeleteVersion, useDiff, useMigrationFlow, useUploadMigration } from '../src/api/hooks';
+import { DIFF_REFETCH_MS, DIFF_STALE_MS, queryKeys, useDeleteDatabase, useDeleteMigration, useDeleteSchema, useDeleteVersion, useDiff, useMigrationFlow, useUpload, useUploadMigration } from '../src/api/hooks';
 import { mockApi } from './render';
 
 // 삭제된 id 를 SQLite 가 다시 쓸 수 있어, 지운 버전·스키마·객체 이력 캐시가 남으면 새 데이터 대신 옛 내용이 보인다
@@ -30,6 +30,21 @@ describe('삭제 훅의 캐시 정리', () => {
     expect(cached(client)).toEqual([undefined, undefined]);
     // 버전 삭제는 스키마가 그대로 남는다
     expect(client.getQueryData(queryKeys.schema(7))).toEqual(isSchemaRemoved ? undefined : { id: 7 });
+  });
+});
+
+// 새 버전이 올라가면 객체 이력(리비전 목록)이 늘어난다
+describe('업로드 훅의 캐시 정리', () => {
+  it('업로드 성공 후 tree·versions·object-history 를 무효화한다', async () => {
+    mockApi({ 'POST /api/uploads': { results: [] } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const keys = [queryKeys.tree, queryKeys.versions(7), queryKeys.objectHistory(5)];
+    for (const key of keys) client.setQueryData(key, { cached: true });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useUpload(), { wrapper });
+    result.current.mutate({ meta: [], files: [] });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(keys.map((k) => client.getQueryState(k)?.isInvalidated)).toEqual([true, true, true]);
   });
 });
 
