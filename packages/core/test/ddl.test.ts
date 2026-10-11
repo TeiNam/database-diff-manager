@@ -192,6 +192,66 @@ describe('생성 컬럼 저장 방식 변경', () => {
     expect(st.comment).toBe(true);
     expect(st.sql).toContain('-- [수동 확인 필요] t: 생성 컬럼(`g`)의 VIRTUAL↔STORED 변경은 MODIFY 로 할 수 없습니다');
   });
+
+  // MySQL 8.0/8.4 실측: 일반 ↔ VIRTUAL 은 error 3106, 일반 ↔ STORED 는 MODIFY 로 된다 (5회차 3)
+  const g = (def: string) => parseSqlDump(`CREATE TABLE \`t\` (\n  \`a\` int NOT NULL,\n  \`g\` ${def}\n) ENGINE=InnoDB;`).model;
+  const VIRTUAL = 'int GENERATED ALWAYS AS ((`a` * 2)) VIRTUAL';
+  const STORED = 'int GENERATED ALWAYS AS ((`a` * 2)) STORED';
+
+  it('일반 ↔ VIRTUAL 생성 컬럼 전환은 수동 확인 문장으로 낸다', () => {
+    for (const [from, to] of [['int DEFAULT NULL', VIRTUAL], [VIRTUAL, 'int DEFAULT NULL']]) {
+      const [st] = generateDdl(diffSchemas(g(from), g(to)));
+      expect(st.comment).toBe(true);
+      expect(st.sql).toContain('-- [수동 확인 필요] t: 생성 컬럼(`g`)의 일반↔VIRTUAL 변경은 MODIFY 로 할 수 없습니다');
+    }
+  });
+
+  it('일반 ↔ STORED 생성 컬럼 전환은 그대로 MODIFY', () => {
+    for (const [from, to] of [['int DEFAULT NULL', STORED], [STORED, 'int DEFAULT NULL']]) {
+      const [st] = generateDdl(diffSchemas(g(from), g(to)));
+      expect(st).toMatchObject({ comment: false, sql: `ALTER TABLE \`t\`\n  MODIFY COLUMN \`g\` ${to}` });
+    }
+  });
+});
+
+describe('FK 로 묶인 컬럼 타입·문자셋 변경 (5회차 1)', () => {
+  const dump = (coll: string, childColl: string) => parseSqlDump([
+    `CREATE TABLE \`p\` (\n  \`code\` varchar(10) COLLATE ${coll} NOT NULL,\n  PRIMARY KEY (\`code\`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`,
+    `CREATE TABLE \`c\` (\n  \`id\` int NOT NULL,\n  \`code\` varchar(10) COLLATE ${childColl} NOT NULL,\n  PRIMARY KEY (\`id\`),\n  KEY \`fk_c\` (\`code\`),\n  CONSTRAINT \`fk_c\` FOREIGN KEY (\`code\`) REFERENCES \`p\` (\`code\`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`,
+  ].join('\n')).model;
+
+  it('참조 컬럼의 콜레이션만 바뀌어도 자식 FK 를 1단계 DROP, 마지막 ADD', () => {
+    const d = diffSchemas(dump('utf8mb4_0900_ai_ci', 'utf8mb4_bin'), dump('utf8mb4_bin', 'utf8mb4_bin'));
+    expect(d.tables.find((t) => t.name === 'c')?.foreignKeys.map((f) => [f.op, f.name, f.fields])).toEqual([['modify', 'fk_c', ['columnType']]]);
+    const sql = generateDdl(d).map((s) => s.sql);
+    expect(sql[0]).toBe('ALTER TABLE `c`\n  DROP FOREIGN KEY `fk_c`');
+    expect(sql[sql.length - 1]).toBe('ALTER TABLE `c`\n  ADD CONSTRAINT `fk_c` FOREIGN KEY (`code`) REFERENCES `p` (`code`)');
+  });
+
+  it('묶인 컬럼의 타입이 그대로면 FK 를 건드리지 않는다', () => {
+    const d = diffSchemas(dump('utf8mb4_bin', 'utf8mb4_bin'), dump('utf8mb4_bin', 'utf8mb4_bin'));
+    expect(d.tables).toEqual([]);
+  });
+});
+
+describe('파티션 키 컬럼 rename·삭제 (5회차 2)', () => {
+  const t = (cols: string, key: string, part: string) => parseSqlDump(`CREATE TABLE \`t\` (\n  \`id\` int NOT NULL,\n${cols},\n  PRIMARY KEY (\`id\`,${key})\n) ENGINE=InnoDB\n/*!50100 ${part} */;`).model;
+
+  it('삭제·REMOVE PARTITIONING 도 같은 ALTER 에 넣는다 (MySQL 8.0/8.4 실측)', () => {
+    const base = t('  `a` int NOT NULL,\n  `b` int NOT NULL', '`a`,`b`', 'PARTITION BY HASH ((`id` + `a`))\nPARTITIONS 2');
+    const [drop] = generateDdl(diffSchemas(base, t('  `b` int NOT NULL', '`b`', 'PARTITION BY HASH (`id`)\nPARTITIONS 2')));
+    expect(drop.sql).toBe('ALTER TABLE `t`\n  DROP PRIMARY KEY,\n  DROP COLUMN `a`,\n  ADD PRIMARY KEY (`id`,`b`)\n  PARTITION BY HASH (`id`)\nPARTITIONS 2');
+    const target = parseSqlDump('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `a2` int NOT NULL,\n  `b` int NOT NULL,\n  PRIMARY KEY (`id`,`a2`,`b`)\n) ENGINE=InnoDB;').model;
+    const stmts = generateDdl(diffSchemas(base, target, [{ kind: 'column', table: 't', from: 'a', to: 'a2' }]));
+    expect(stmts.map((s) => s.sql)).toEqual(['ALTER TABLE `t`\n  RENAME COLUMN `a` TO `a2`\n  REMOVE PARTITIONING']);
+  });
+
+  it('RANGE COLUMNS 의 따옴표 없는 컬럼 이름도 파티션 키로 본다', () => {
+    const part = (c: string) => `PARTITION BY RANGE  COLUMNS(${c})\n(PARTITION p1 VALUES LESS THAN ('2026-01-01') ENGINE = InnoDB,\n PARTITION p2 VALUES LESS THAN (MAXVALUE) ENGINE = InnoDB)`;
+    const stmts = generateDdl(diffSchemas(t('  `d` date NOT NULL', '`d`', part('d')), t('  `d2` date NOT NULL', '`d2`', part('d2')), [{ kind: 'column', table: 't', from: 'd', to: 'd2' }]));
+    expect(stmts).toHaveLength(1);
+    expect(stmts[0].sql).toMatch(/^ALTER TABLE `t`\n {2}RENAME COLUMN `d` TO `d2`\n {2}PARTITION BY RANGE {2}COLUMNS\(d2\)/);
+  });
 });
 
 describe('맞바꾸기 묶음의 이름 충돌 전파', () => {

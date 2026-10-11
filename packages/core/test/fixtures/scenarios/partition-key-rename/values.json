@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `chat_history` (`chat_history_id`, `user_id`, `user_message`, `create_at`, `update_at`) VALUES (1, 7, '안녕', '2025-10-05 10:00:00', '2025-10-05 10:00:00'), (2, 7, '다음 달', '2025-11-20 09:30:00', '2025-11-21 08:00:00')",
+  "query": "SELECT `chat_history_id`, `user_id`, `user_message`, DATE_FORMAT(`created_at`, '%Y-%m-%d %H:%i:%s') AS `created_at`, DATE_FORMAT(`updated_at`, '%Y-%m-%d %H:%i:%s') AS `updated_at` FROM `chat_history` PARTITION (`p202511`)",
+  "rows": [{ "chat_history_id": 2, "user_id": 7, "user_message": "다음 달", "created_at": "2025-11-20 09:30:00", "updated_at": "2025-11-21 08:00:00" }]
+}

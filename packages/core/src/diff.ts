@@ -1,6 +1,7 @@
 // 두 스키마 모델의 차이 계산. unknown 목록의 속성은 비교하지 않고 skipped에 기록한다
 import { renamedAutoName, renamedFkNames } from './auto-name';
 import { canonicalJson } from './canonical';
+import { withRetypedForeignKeys } from './fk-retype';
 import { quoteIdent } from './lexer';
 import type { Check, Column, ForeignKey, Index, IndexField, Partitioning, Routine, RoutineKind, SchemaModel, Table, View } from './model';
 import { normalizeBody, routineLexMode } from './normalize';
@@ -125,18 +126,15 @@ export interface AppliedRenames {
 }
 
 function diffTables(base: Table[], target: Table[], renames: RenameMapping[]): TableDiff[] {
-  const details = new Map<string, TableDiff>();
   const tableMap = mappingOf(renames, 'table');
   const { pairs } = matchByName(base, target, tableMap, () => []);
   const applied: AppliedRenames = {
     tables: new Map(pairs.filter(([b, t]) => b.name !== t.name).map(([b, t]) => [b.name, t.name])),
     columns: new Map(pairs.map(([b, t]) => [b.name, appliedColumnRenames(b, t, renames)])),
   };
-  const { changes } = matchByName(base, target, tableMap, (b, t) => {
-    const d = diffTable(b, t, renames, applied);
-    details.set(t.name, d);
-    return hasChanges(d) ? ['definition'] : [];
-  });
+  // 묶인 컬럼 타입이 바뀌는 FK 는 다른 테이블의 컬럼 변경을 봐야 알 수 있어, 짝지은 테이블 diff 를 모두 만든 뒤 더한다
+  const details = withRetypedForeignKeys(new Map(pairs.map(([b, t]) => [t.name, diffTable(b, t, renames, applied)])));
+  const { changes } = matchByName(base, target, tableMap, (_, t) => (hasChanges(details.get(t.name)!) ? ['definition'] : []));
   return changes.map((c) => {
     if (c.op === 'drop') return emptyDiff('drop', c.name, c.from, undefined);
     if (c.op === 'add') return emptyDiff('add', c.name, undefined, c.to);

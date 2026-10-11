@@ -1,7 +1,7 @@
 // 생성 DDL 을 그대로 실행하면 실패하거나 의미가 바뀌는 테이블을 찾는다 (generateDdl 이 그 테이블 문장을 수동 확인으로 바꾼다)
 import { fkAutoNameCollides } from './auto-name';
 import type { TableDiff } from './diff';
-import { quoteIdent as q } from './lexer';
+import { quoteIdent as q, quotedIdentifiers } from './lexer';
 import type { SchemaModel, Table } from './model';
 
 export interface ManualTable {
@@ -31,7 +31,12 @@ function reusedNameDependents(base: SchemaModel, tables: TableDiff[], d: TableDi
   const reused = d.columns.filter((c) => c.op === 'drop' && renamedTo.has(c.name)).map((c) => c.name);
   if (!reused.length) return [];
   const baseName = d.oldName ?? d.name;
-  const uses = (expr: string | undefined) => expr !== undefined && reused.some((n) => expr.includes(q(n)));
+  // 식의 따옴표 식별자로 판정한다 (문자열 안의 `이름` 은 빼고, 컬럼 이름은 대소문자 무시). 토큰으로 못 나누면 포함 여부로
+  const uses = (expr: string | undefined) => {
+    if (expr === undefined) return false;
+    const idents = quotedIdentifiers(expr)?.map((v) => v.toLowerCase());
+    return reused.some((n) => (idents ? idents.includes(n.toLowerCase()) : expr.includes(q(n))));
+  };
   const exprUsers = [
     ...d.from!.indexes.filter((i) => i.parts.some((p) => uses(p.expr))).map((i) => `인덱스 ${i.name}`),
     ...d.from!.columns.filter((c) => uses(c.generated?.expr)).map((c) => `생성 컬럼 ${c.name}`),

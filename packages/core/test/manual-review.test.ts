@@ -109,3 +109,39 @@ describe('MD 출처 CHECK 안내 (4회차 6)', () => {
     expect(renderDdl(generateDdl(d), d.partial)).not.toContain('3959');
   });
 });
+
+describe('충돌로 막힌 테이블을 참조하는 새 테이블 (5회차 5)', () => {
+  const base = dump(tbl('a', '  `id` int NOT NULL,\n  `x` int NOT NULL,\n  `y` int NOT NULL,\n  PRIMARY KEY (`id`)'));
+  const target = dump(
+    tbl('a', '  `id` int NOT NULL,\n  `y` int NOT NULL,\n  PRIMARY KEY (`id`)'),
+    tbl('child', '  `id` int NOT NULL,\n  `a_id` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `fk_child_a` (`a_id`),\n  CONSTRAINT `fk_child_a` FOREIGN KEY (`a_id`) REFERENCES `a` (`id`)'),
+  );
+
+  it('새 테이블의 FK 가 막힌 테이블을 참조하면 그 새 테이블 문장도 실행하지 않는다', () => {
+    const stmts = generateDdl(diffSchemas(base, target, [{ kind: 'column', table: 'a', from: 'x', to: 'y' }]));
+    expect(runnable(stmts, ['a', 'child'])).toEqual([]);
+    expect(stmts.some((s) => s.object === 'child' && s.comment && s.sql.includes('-- ALTER TABLE `child`'))).toBe(true);
+  });
+});
+
+describe('식별자 토큰 기준 참조 판정 (5회차 6)', () => {
+  it('막힌 테이블 이름이 뷰 본문에서 컬럼 별칭으로만 나오면 뷰를 막지 않는다', () => {
+    const base = dump(tbl('a', '  `id` int NOT NULL,\n  `x` int NOT NULL,\n  `y` int NOT NULL,\n  PRIMARY KEY (`id`)'), tbl('z', '  `id` int NOT NULL,\n  PRIMARY KEY (`id`)'));
+    const target = dump(
+      tbl('a', '  `id` int NOT NULL,\n  `y` int NOT NULL,\n  PRIMARY KEY (`id`)'), tbl('z', '  `id` int NOT NULL,\n  PRIMARY KEY (`id`)'),
+      'CREATE VIEW `v` AS select `z`.`id` AS `a` from `z`;',
+      'CREATE VIEW `w` AS select `q`.`id` AS `id` from `shop`.`a` `q`;',
+    );
+    const stmts = generateDdl(diffSchemas(base, target, [{ kind: 'column', table: 'a', from: 'x', to: 'y' }]));
+    const views = stmts.filter((s) => s.kind === 'view').map((s) => [s.object, s.comment]);
+    expect(views).toEqual([['v', false], ['w', true]]);
+  });
+
+  it('삭제 컬럼 이름이 식 안에서 문자열로만 나오면 재사용 의존성으로 보지 않는다', () => {
+    const t = (cols: string) => dump(tbl('t', `  \`id\` int NOT NULL,\n${cols},\n  PRIMARY KEY (\`id\`)`));
+    const base = t("  `old` int NOT NULL,\n  `code` int NOT NULL,\n  `tag` varchar(20) GENERATED ALWAYS AS (concat(_utf8mb4'`code`', `id`)) VIRTUAL");
+    const target = t("  `code` int NOT NULL,\n  `tag` varchar(20) GENERATED ALWAYS AS (concat(_utf8mb4'`code`', `id`)) VIRTUAL");
+    const d = diffSchemas(base, target, [{ kind: 'column', table: 't', from: 'old', to: 'code', allowOverlap: true }]);
+    expect(d.manualTables).toEqual([]);
+  });
+});

@@ -19,7 +19,7 @@ Plan 1(core) 실행 중 리뷰에서 나온 항목 가운데 미뤄 둔 것(defe
 - Task 3: minor (deferred): 실패 뷰 경로·LOCAL CHECK OPTION·columnList 테스트 없음
 - Task 4: minor (deferred): 프린터 예외가 파싱 실패로 기록됨; COLUMN_INT_WIDTH 대소문자 구분; 줄 끝 trim이 뷰 본문·문자열에도 적용; 한 줄 DDL 항상 왕복 경고
 - Task 5: minor (deferred): 거부·중복 rename 매핑 무피드백; parseError 테이블끼리 가짜 rename 후보; ViewDiff에 skipped 없음; partitions/mysql8 테스트가 다른 변경 없음을 단언하지 않음
-- Task 6: minor (deferred): 뷰 위상정렬 테스트 없음; sortViews 부분문자열 의존 탐지; COMMENT 안내 중복 가능; CHANGE/rename+move/인덱스 재생성/PK 재생성/옵션 리셋/FK modify/DROP VIEW/partial 헤더 테스트 없음; FK 컬럼 타입 변경 시 3780 경고 없음
+- Task 6: minor (deferred): 뷰 위상정렬 테스트 없음; sortViews 부분문자열 의존 탐지; COMMENT 안내 중복 가능; CHANGE/rename+move/인덱스 재생성/PK 재생성/옵션 리셋/FK modify/DROP VIEW/partial 헤더 테스트 없음; ~~FK 컬럼 타입 변경 시 3780 경고 없음~~ (해결 2026-10-11 5회차: FK 로 묶인 컬럼 타입·문자셋·콜레이션 변경 시 FK 를 1단계 삭제·8단계 재추가, 골든 `fk-type-widen`)
 - Task 6: minor (deferred): 파티션 추가/삭제와 경계 변경이 겹칠 때 from-empty 경로 범위 보존 미검증
 - Task 7: minor (deferred): cells() 마지막 열 외 파이프 미처리; INDEX_RE가 prefix/함수형 파트 오파싱; 실패 섹션이 항상 table로 들어감; 교차검증이 뷰 미검사
 - Task 7: minor (deferred): helpers.ts 주석 td-export 0.1.10 → 0.1.14; 복합 FK MD 형식은 가정(실샘플 없음)

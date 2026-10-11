@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { quoteIdent, quoteString, tokenize } from '../src/lexer';
+import { quotedIdentifiers, quoteIdent, quoteString, tableReferences, tokenize } from '../src/lexer';
 
 describe('tokenize', () => {
   it('식별자·문자열·단어·숫자·기호를 구분한다', () => {
@@ -41,5 +41,18 @@ describe('quote', () => {
   it('MySQL SHOW CREATE 규칙으로 인용한다', () => {
     expect(quoteIdent('a`b')).toBe('`a``b`');
     expect(quoteString("it's\n\\")).toBe("'it''s\\n\\\\'");
+  });
+});
+
+describe('tableReferences · quotedIdentifiers (5회차 6)', () => {
+  it('FROM/JOIN 뒤 식별자만 테이블 참조로 본다 (괄호 조인·schema.table·서브쿼리)', () => {
+    const body = "select `a`.`id` AS `b`,(select count(0) from `c`) AS `n` from ((`a` join `shop`.`d` `x` on((`x`.`id` = `a`.`id`))) left join `e` on(true)) where (`a`.`k` = 'from `f`')";
+    expect(tableReferences(body)).toEqual(['c', 'a', 'd', 'e']);
+  });
+
+  it('문자열 안 식별자는 빼고, 닫히지 않은 따옴표면 undefined', () => {
+    expect(quotedIdentifiers("concat(_utf8mb4'`x`', `y`)")).toEqual(['y']);
+    expect(quotedIdentifiers("'abc")).toBeUndefined();
+    expect(tableReferences("from `a` where 'x")).toBeUndefined();
   });
 });

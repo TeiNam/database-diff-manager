@@ -30,12 +30,19 @@ describe('listPartitionStatements', () => {
     }
   });
 
-  it('괄호형 (MAXVALUE)·비교할 수 없는 상한(날짜·문자열·다중 컬럼)이 마지막 파티션에서 바뀌면 수동 확인 (4회차 4)', () => {
+  it('괄호형 (MAXVALUE)·날짜·문자열·다중 컬럼 상한이 줄거나 비교할 수 없으면 수동 확인 (4회차 4, 5회차 4)', () => {
     const cases: [string, string][] = [
       ['(MAXVALUE)', '(20)'],
       ["('2025-01-01')", "('2024-01-01')"],
       ['(10,MAXVALUE)', '(10,5)'],
       ['(MAXVALUE,MAXVALUE)', "('a',1)"],
+      ["(TO_DAYS('2027-01-01'))", "(TO_DAYS('2026-12-01'))"],
+      // 비교할 수 없음: 종류가 다르거나, 콜레이션에 따라 순서가 달라질 수 있는 문자열, 모르는 함수, 튜플 길이 차이
+      ["('2026-12-01')", '(20261201)'],
+      ["('Abc')", "('abd')"],
+      ["(TO_DAYS('2026-12-01'))", "(UNIX_TIMESTAMP('2027-01-01'))"],
+      ["(LOWER('a'))", "(LOWER('b'))"],
+      ['(1,2)', '(3)'],
     ];
     for (const [a, b] of cases) {
       const bodies = listPartitionBodies('`t`', [P('p1'), P('pz', a.slice(1, -1))], [P('p1'), P('py', b.slice(1, -1))]);
@@ -48,6 +55,24 @@ describe('listPartitionStatements', () => {
     for (const [a, b] of [["'2025-01-01'", 'MAXVALUE'], ['10,5', 'MAXVALUE,MAXVALUE']]) {
       const [body] = listPartitionBodies('`t`', [P('p1'), P('pz', a)], [P('p1'), P('py', b)]);
       expect(body.sql).toMatch(/^ALTER TABLE `t` REORGANIZE PARTITION `pz`/);
+    }
+  });
+
+  // 실데이터(td-export 0.1.30) 의 월별 정수 경계와, 같은 종류로 비교할 수 있는 날짜·문자열·함수·튜플 경계 확대 (5회차 4)
+  it('같은 종류로 비교할 수 있는 마지막 상한 확대는 그대로 REORGANIZE', () => {
+    const cases: [string, string][] = [
+      ['202612', '202702'],
+      ["'2026-12-01'", "'2027-01-01'"],
+      ["'2026-12-01 00:00:00'", "'2027-01-01 00:00:00'"],
+      ["TO_DAYS('2026-12-01')", "TO_DAYS('2027-01-01')"],
+      ["UNIX_TIMESTAMP('2026-12-01 00:00:00')", "unix_timestamp('2027-01-01 00:00:00')"],
+      ["'m'", "'z'"],
+      ["'2026-12-01','m'", "'2026-12-01','z'"],
+      ["10,MAXVALUE", '11,0'],
+    ];
+    for (const [a, b] of cases) {
+      const [body] = listPartitionBodies('`t`', [P('p1'), P('pz', a)], [P('p1'), P('py', b)]);
+      expect(body.sql, `${a} → ${b}`).toMatch(/^ALTER TABLE `t` REORGANIZE PARTITION `pz`/);
     }
   });
 
