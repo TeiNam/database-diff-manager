@@ -60,18 +60,31 @@ const storageOf = (c: Column) => (c.generated ? (c.generated.stored ? 'STORED' :
 
 export function alterStatements(d: TableDiff): StatementBody[] {
   if (d.unparsed) return [commentBody(`-- [수동 확인 필요] ${d.name}: 파싱할 수 없는 DDL이 변경되었습니다. 원문을 비교하세요`)];
-  const plan = charsetPlan(d);
-  const options = charsetOptions(d.options, plan);
+  const { plan, options } = planOptions(d);
   const main = alterClauses(d, options, plan?.columns ?? new Set());
   return alterBodies(d, plan, options, main);
+}
+
+// 행 저장 형식 옵션: 인덱스 키 길이 한도(COMPACT 767바이트)를 정하므로 CONVERT TO 와 같은 ALTER 에 넣는다.
+// 따로 실행하면 어느 순서든 한쪽 방향에서 실패한다 (COMPACT→DYNAMIC+utf8mb4 는 CONVERT 먼저 error 3886, 반대는 ROW_FORMAT 먼저 1071 — 8.0/8.4 실측)
+const LAYOUT_KEYS = new Set(['ROW_FORMAT', 'KEY_BLOCK_SIZE']);
+
+// 문자셋 계획과 본 ALTER 에 들어갈 옵션. CONVERT 가 있으면 행 저장 형식 옵션은 CONVERT 문장으로 옮긴다
+function planOptions(d: TableDiff): { plan: CharsetPlan | undefined; options: OptionChange[] } {
+  const plan = charsetPlan(d);
+  const options = charsetOptions(d.options, plan);
+  if (!plan?.convert) return { plan, options };
+  const layout = optionClauses(options.filter((o) => LAYOUT_KEYS.has(o.key)));
+  if (!layout.length) return { plan, options };
+  return { plan: { ...plan, convert: [plan.convert, ...layout].join(', ') }, options: options.filter((o) => !LAYOUT_KEYS.has(o.key)) };
 }
 
 // 본 ALTER 가 수동 확인 문장이 되는지 (파싱 실패, 생성식 미상, VIRTUAL↔STORED·일반↔VIRTUAL). 그 ALTER 가 만들 컬럼·인덱스를
 // 다른 테이블의 FK·뷰가 쓸 수 있으므로 ddl-guard 가 전파 시드로 쓴다
 export function isAlterBlocked(d: TableDiff): boolean {
   if (d.unparsed) return true;
-  const plan = charsetPlan(d);
-  const main = alterClauses(d, charsetOptions(d.options, plan), plan?.columns ?? new Set());
+  const { plan, options } = planOptions(d);
+  const main = alterClauses(d, options, plan?.columns ?? new Set());
   return main.clauses.length > 0 && main.missing.length + main.storage.length + main.virtual.length > 0;
 }
 
