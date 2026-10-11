@@ -1,5 +1,5 @@
 import type { Statement } from '@tdm/core';
-import { renderDdl } from '@tdm/core';
+import { objectStatements, renderDdl } from '@tdm/core';
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import type { DiffResponse } from '../../api/types';
@@ -23,9 +23,8 @@ const COPY_LABEL: Record<CopyState, string> = { idle: 'DDL 복사', done: '복�
 // 복사 직전에 받은 최신 diff 에 이 객체의 문장이 없으면 옛 내용을 복사하지 않는다
 class StaleObjectError extends Error {}
 
-// 여러 테이블을 함께 다루는 문장(얽힌 테이블 rename)은 related 에 든 모든 테이블 카드의 문장이다
-const ownStatements = (statements: Statement[], entry: ObjectEntry) =>
-  statements.filter((st) => st.kind === entry.kind && (st.object === entry.name || Boolean(st.related?.includes(entry.name))));
+// 카드가 복사할 문장: 그 객체 문장(related 포함)과 함께 실행해야 하는 다른 객체 문장(depends), 전체 DDL 순서
+const cardStatements = (statements: Statement[], entry: ObjectEntry) => objectStatements(statements, entry.kind, entry.name);
 
 function ChangeBar({ added, removed }: { added: number; removed: number }) {
   const total = added + removed || 1;
@@ -56,10 +55,10 @@ export function ObjectCard({ entry, mode, layout, defaultOpen, selected = false,
     const timer = setTimeout(() => setCopy('idle'), COPY_FEEDBACK_MS);
     return () => clearTimeout(timer);
   }, [copy]);
-  const own = ownStatements(statements, entry);
+  const own = cardStatements(statements, entry);
   const copyFresh = () => {
     const text = refresh().then((fresh) => {
-      const latest = ownStatements(fresh.statements, entry);
+      const latest = cardStatements(fresh.statements, entry).statements;
       if (!latest.length) throw new StaleObjectError();
       return renderDdl(latest);
     });
@@ -84,7 +83,12 @@ export function ObjectCard({ entry, mode, layout, defaultOpen, selected = false,
         )}
         <span className={s.spacer} />
         {historyHref && <Link className={s.btn} to={historyHref}>이력</Link>}
-        {own.length > 0 && (
+        {own.dependencies.length > 0 && (
+          <span className={s.deps} title="이 객체 문장만으로는 실행할 수 없어 함께 실행해야 하는 다른 객체 문장도 복사합니다">
+            의존 문장 포함: {own.dependencies.join(', ')}
+          </span>
+        )}
+        {own.statements.length > 0 && (
           <button type="button" className={s.btn} onClick={copyFresh}>
             <Icon name="copy" />{COPY_LABEL[copy]}
           </button>

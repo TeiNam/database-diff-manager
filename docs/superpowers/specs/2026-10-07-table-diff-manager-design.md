@@ -223,12 +223,13 @@ interface Statement {
   comment: boolean;   // 실행할 SQL이 없는 안내 문장 (수동 확인, 파티션 COMMENT 변경 등)
   notes?: string[];   // 문장 위에 '-- '로 붙는 안내 (MD 기반 미확인 속성 등)
   related?: string[]; // 한 문장이 여러 테이블을 다룰 때(얽힌 테이블 rename) 그 테이블들의 TARGET 이름. 화면은 관련 카드 모두에 보여 준다
+  depends?: string[]; // 다른 테이블 문장과 함께 실행해야 하는 묶음의 테이블들(object 포함, 이름순). FK 로 묶인 컬럼 타입·문자셋 변경(fk-retype 묶음) — 부모 MODIFY 만 실행하면 자식 FK 해제·재추가가 없어 error 3780 (6회차 개정)
 }
 ```
 
 **문장 순서** (FK·뷰 의존성 때문에 이 순서를 고정한다)
 
-1. 삭제·변경되는 FK를 `ALTER TABLE … DROP FOREIGN KEY`. FK 가 자동으로 만든 인덱스는 같은 컬럼에 이름 있는 FK 를 다시 추가하면 그 FK 이름으로 바뀌므로(SHOW CREATE 로는 직접 만든 인덱스와 구별할 수 없다), FK 를 다시 추가하는 테이블은 삭제하는 FK 의 컬럼으로 시작하는 BASE 인덱스(5단계에서 바꾸지 않는 INDEX/UNIQUE)를 같은 문장에서 `RENAME INDEX x TO x` 로 고정하고 notes 로 알린다(2026-10-11 3회차 개정). FK 정의가 같아도 FK 의 로컬 컬럼이나 참조 컬럼의 타입·문자셋·콜레이션이 바뀌면(`int→bigint` 를 부모·자식 함께) 그 FK 를 `modify`(fields `columnType`)로 보고 여기서 삭제, 8단계에서 다시 추가한다 — `MODIFY` 만 하면 `FOREIGN_KEY_CHECKS=0` 이어도 error 3780 이다(notes 로 사유 안내, 골든 `fk-type-widen`, 5회차 개정)
+1. 삭제·변경되는 FK를 `ALTER TABLE … DROP FOREIGN KEY`. FK 가 자동으로 만든 인덱스는 같은 컬럼에 이름 있는 FK 를 다시 추가하면 그 FK 이름으로 바뀌므로(SHOW CREATE 로는 직접 만든 인덱스와 구별할 수 없다), FK 를 다시 추가하는 테이블은 삭제하는 FK 의 컬럼으로 시작하는 BASE 인덱스(5단계에서 바꾸지 않는 INDEX/UNIQUE)를 같은 문장에서 `RENAME INDEX x TO x` 로 고정하고 notes 로 알린다(2026-10-11 3회차 개정). FK 정의가 같아도 FK 의 로컬 컬럼이나 참조 컬럼의 타입·문자셋·콜레이션이 바뀌면(`int→bigint` 를 부모·자식 함께) 그 FK 를 `modify`(fields `columnType`)로 보고 여기서 삭제, 8단계에서 다시 추가한다 — `MODIFY` 만 하면 `FOREIGN_KEY_CHECKS=0` 이어도 error 3780 이다(notes 로 사유 안내, 골든 `fk-type-widen`, 5회차 개정). 컬럼이 테이블 기본 문자셋을 상속하면 컬럼 diff 가 없어도 테이블 `DEFAULT CHARSET`·`COLLATE` 변경으로 실효 문자셋·콜레이션이 바뀌므로 이 '실효 값' 변경으로도 판정한다 — 부모·자식을 `latin1→utf8mb4` 로 `CONVERT TO CHARACTER SET` 하면 기본 FK 검사에서 error 3780 이다(골든 `fk-charset-convert`, 값 보존 확인, 6회차 개정)
 2. 삭제되는 뷰를 `DROP VIEW`, 삭제·변경되는 루틴을 `DROP FUNCTION|PROCEDURE IF EXISTS`
 3. `RENAME TABLE a TO b` (매핑된 것만). 이름이 얽힌 rename(한 rename 의 새 이름이 다른 rename 의 옛 이름)은 한 문장으로 묶는다. MySQL 은 절을 앞에서부터 원자적으로 적용하므로 비는 이름부터 옮기고(`RENAME TABLE log TO log_2025, log_new TO log`), 순환(맞바꾸기)은 겹치지 않는 임시 이름 `__tdm_tmp_n` 을 거친다(`RENAME TABLE a TO __tdm_tmp_1, b TO a, __tdm_tmp_1 TO b`). 임시 이름은 BASE·TARGET 의 모든 테이블·뷰 이름(`SchemaDiff.objectNames`)과 겹치지 않게 고른다(2026-10-11 2회차 개정).
 4. 새 테이블을 `CREATE TABLE`. **FK를 뺀 정의**로 만들고 FK는 8단계에서 추가한다(테이블 간 생성 순서 문제 회피).
@@ -262,7 +263,7 @@ interface Statement {
 
 **특수 처리**
 
-- 순서로 풀 수 없는 rename(`이름 충돌` 로 적용되지 않은 매핑: 컬럼은 그 TARGET 테이블, 테이블은 옛·새 이름 두 테이블)이 있으면 관련 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제, ALTER, 파티션)을 수동 확인 문장으로 바꾼다. 관련 테이블이 얽힌 rename 묶음(맞바꾸기·연쇄)에 들면 묶음의 모든 테이블로, 그 테이블들을 참조하는 FK 를 바꾸는 테이블로도 넓힌다(묶음 RENAME 이 실행되지 않으면 다른 문장이 엉뚱한 테이블의 데이터를 바꾼다, 2026-10-11 3회차 개정). 넓히기는 더 이상 늘지 않을 때까지(고정점) 반복하고(FK 로 번진 테이블이 다시 다른 묶음에 들 수 있다), 막힌 테이블·뷰를 본문에서 읽는 뷰의 삭제·생성도 수동 확인으로 바꾼다. 출발점에는 `manualTables`(FK 보정명 충돌, 아래 재사용 컬럼명 의존성)도 들어간다(4회차 개정). 새로 만드는(add) 테이블도 8단계에서 FK 를 추가하므로, 그 FK 가 막힌 테이블을 참조하면 그 새 테이블의 문장도 막는다. 뷰가 읽는 객체는 본문 토큰에서 `FROM`/`JOIN` 뒤 식별자(`schema`.`table` 은 table)로 판정해 컬럼 별칭·문자열 속 이름에 걸리지 않게 한다(토큰으로 나눌 수 없으면 `` `이름` `` 포함 여부, 5회차 개정).
+- 순서로 풀 수 없는 rename(`이름 충돌` 로 적용되지 않은 매핑: 컬럼은 그 TARGET 테이블, 테이블은 옛·새 이름 두 테이블)이 있으면 관련 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제, ALTER, 파티션)을 수동 확인 문장으로 바꾼다. 관련 테이블이 얽힌 rename 묶음(맞바꾸기·연쇄)에 들면 묶음의 모든 테이블로, 그 테이블들을 참조하는 FK 를 바꾸는 테이블로도 넓힌다(묶음 RENAME 이 실행되지 않으면 다른 문장이 엉뚱한 테이블의 데이터를 바꾼다, 2026-10-11 3회차 개정). 넓히기는 더 이상 늘지 않을 때까지(고정점) 반복하고(FK 로 번진 테이블이 다시 다른 묶음에 들 수 있다), 막힌 테이블·뷰를 본문에서 읽는 뷰의 삭제·생성도 수동 확인으로 바꾼다. 출발점에는 `manualTables`(FK 보정명 충돌, 아래 재사용 컬럼명 의존성)도 들어간다(4회차 개정). 새로 만드는(add) 테이블도 8단계에서 FK 를 추가하므로, 그 FK 가 막힌 테이블을 참조하면 그 새 테이블의 문장도 막는다. 뷰가 읽는 객체는 본문 토큰에서 `FROM`/`JOIN` 뒤 식별자(`schema`.`table` 은 table)로 판정해 컬럼 별칭·문자열 속 이름에 걸리지 않게 한다(토큰으로 나눌 수 없으면 `` `이름` `` 포함 여부, 5회차 개정). 본 ALTER 만 수동 확인인 테이블(파싱 실패, 생성식 미상, VIRTUAL↔STORED·일반↔VIRTUAL — 그 CONVERT TO 포함)도 전파 시드에 넣되, 그 테이블 자신의 다른 문장과 rename 묶음은 그대로 두고 그 테이블(옛·새 이름)을 참조하는 바뀌는·새 FK 의 테이블과 그 테이블을 읽는 바뀌는 뷰만 막는다 — 막힌 ALTER 가 만들 컬럼·인덱스를 쓰면 실패하기 때문이다(컬럼 확대·추가·인덱스 추가·새 뷰 같은 일상 변경은 수동 확인 0, 6회차 개정). 문자셋 축소는 데이터 확인 안내(notes)일 뿐 수동 확인이 아니므로 시드가 아니다.
 - 삭제되는 컬럼 이름을 겹침 허용 rename 이 다시 쓸 때(`DROP COLUMN y, RENAME COLUMN x TO y`), BASE 에서 그 컬럼을 식 인덱스(`((abs(y)))`)·생성 컬럼 식이 쓰거나 다른(자기 포함) 테이블 FK 가 참조하면 그 테이블과, 바뀌는 자식 테이블의 문장을 수동 확인으로 돌린다(생성 DDL 이 실패하거나 새 컬럼을 가리키게 된다. 식은 따옴표 식별자 토큰으로 비교해 문자열 속 `` `이름` `` 은 세지 않는다 — 5회차 개정). 일반 인덱스·FK 컬럼·CHECK 는 다시 만들어 골든 `remove-rename-column-index` 로 검증되었으므로 막지 않는다(4회차 개정).
 - 생성 컬럼의 VIRTUAL↔STORED 변경과 일반 컬럼↔VIRTUAL 생성 컬럼 전환은 `MODIFY` 로 할 수 없어(MySQL error 3106) 그 ALTER 를 수동 확인 문장으로 낸다. 일반 컬럼↔STORED 생성 컬럼 전환은 `MODIFY` 로 되므로(8.0/8.4 실측, STORED→일반은 저장된 값이 남는다) 그대로 낸다(골든 `generated-stored-convert`, 5회차 개정).
 - `parseError`가 있는 객체는 DDL 대신 `-- [수동 확인 필요] <객체>: 파싱 불가` 주석 문장(`comment: true`)을 만든다.

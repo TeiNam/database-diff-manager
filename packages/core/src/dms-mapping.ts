@@ -179,11 +179,11 @@ function toRule(raw: unknown, index: number, warnings: DmsWarning[]): Rule | und
   return rule;
 }
 
-// rule-id 가 큰 쪽이 이긴다 (숫자로 비교할 수 없으면 문자열 비교)
-function isNewer(a: string, b: string): boolean {
+// AWS DMS 는 같은 객체에 룰이 여럿이면 rule-id 가 낮은 쪽을 적용한다 (숫자로 비교할 수 없으면 문자열 비교)
+function takesPrecedence(a: string, b: string): boolean {
   const x = Number(a);
   const y = Number(b);
-  return Number.isFinite(x) && Number.isFinite(y) ? x > y : a > b;
+  return Number.isFinite(x) && Number.isFinite(y) ? x < y : a < b;
 }
 
 class MappingBuilder {
@@ -250,16 +250,16 @@ class MappingBuilder {
     this.keep(this.removed, key, { ruleId: rule.id, table: rule.table, column: rule.column });
   }
 
-  // 같은 대상의 룰이 또 나오면 rule-id 가 큰 쪽을 남기고, 진 쪽을 경고로 남긴다
+  // 같은 대상의 룰이 또 나오면 rule-id 가 낮은 쪽을 남기고, 진 쪽을 경고로 남긴다
   private keep<T extends { ruleId: string }>(map: Map<string, T>, key: string, next: T): void {
     const prev = map.get(key);
     if (!prev) {
       map.set(key, next);
       return;
     }
-    const [winner, loser] = isNewer(next.ruleId, prev.ruleId) ? [next, prev] : [prev, next];
+    const [winner, loser] = takesPrecedence(next.ruleId, prev.ruleId) ? [next, prev] : [prev, next];
     map.set(key, winner);
-    this.warnings.push({ ruleId: loser.ruleId, code: 'duplicate', message: `같은 대상의 룰이 겹쳐 rule ${winner.ruleId} 를 사용합니다` });
+    this.warnings.push({ ruleId: loser.ruleId, code: 'duplicate', message: `같은 대상의 룰이 겹쳐 rule-id 가 낮은 rule ${winner.ruleId} 만 적용합니다` });
   }
 
   private unsupported(rule: Rule, what: string): void {

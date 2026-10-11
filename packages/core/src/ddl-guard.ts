@@ -1,7 +1,7 @@
 // 그대로 실행하면 데이터가 어긋나거나 DDL 이 실패하는 테이블·뷰의 문장을 수동 확인 문장으로 바꾼다 (스펙 4.6)
 // 원칙: MySQL 로 검증한 패턴만 실행 SQL 로 내고, 얽힌 조합은 관련 객체 전체를 막는다
 import type { Statement } from './ddl';
-import { commentBody, manualBody } from './ddl-alter';
+import { commentBody, isAlterBlocked, manualBody } from './ddl-alter';
 import type { SchemaDiff, TableDiff, ViewDiff } from './diff';
 import { quoteIdent as q, tableReferences } from './lexer';
 import { renameGroups } from './table-rename';
@@ -14,9 +14,23 @@ interface Conflict {
 type Conflicts = Map<string, Conflict>;
 
 export function guardStatements(stmts: Statement[], diff: SchemaDiff): Statement[] {
-  const tables = spreadConflicts(diff, seedConflicts(diff));
-  if (!tables.size) return stmts;
-  return guard(stmts, tables, viewConflicts(diff.views, blockedNames(diff, tables)));
+  const alterBlocked = alterBlockedNames(diff);
+  const tables = spreadConflicts(diff, seedConflicts(diff), alterBlocked);
+  const views = viewConflicts(diff.views, new Set([...blockedNames(diff, tables), ...alterBlocked]));
+  if (!tables.size && !views.size) return stmts;
+  return guard(stmts, tables, views);
+}
+
+// 본 ALTER 만 수동 확인인 테이블의 옛·새 이름. 그 테이블의 다른 문장은 그대로 두고, 그 테이블을 참조하는 바뀌는 FK·
+// 그 테이블을 읽는 바뀌는 뷰만 막는다 (막힌 ALTER 가 만들 컬럼·인덱스를 쓰면 실패한다. 일상 변경 과잉 차단을 피해 rename 묶음으로는 넓히지 않는다)
+function alterBlockedNames(diff: SchemaDiff): Set<string> {
+  const out = new Set<string>();
+  for (const d of diff.tables) {
+    if ((d.op !== 'modify' && d.op !== 'rename') || !isAlterBlocked(d)) continue;
+    out.add(d.name);
+    if (d.oldName) out.add(d.oldName);
+  }
+  return out;
 }
 
 const addConflict = (out: Conflicts, table: string, reason: string, note: string) => {
@@ -49,9 +63,10 @@ function blockedNames(diff: SchemaDiff, conflicts: Conflicts): Set<string> {
 }
 
 // 더 이상 늘지 않을 때까지 넓힌다: 막힌 테이블이 든 얽힌 rename 묶음의 모든 테이블 (묶음 RENAME 이 실행되지 않으면
-// 다른 테이블의 ALTER 가 엉뚱한 테이블의 데이터를 바꾼다), 막힌 테이블을 참조하는 FK 를 바꾸거나 새로 추가하는 테이블
-function spreadConflicts(diff: SchemaDiff, seeds: Conflicts): Conflicts {
-  if (!seeds.size) return seeds;
+// 다른 테이블의 ALTER 가 엉뚱한 테이블의 데이터를 바꾼다), 막힌 테이블(본 ALTER 만 막힌 테이블 포함)을 참조하는 FK 를
+// 바꾸거나 새로 추가하는 테이블
+function spreadConflicts(diff: SchemaDiff, seeds: Conflicts, alterBlocked: ReadonlySet<string>): Conflicts {
+  if (!seeds.size && !alterBlocked.size) return seeds;
   const out = new Map(seeds);
   const groups = renameGroups(diff.tables, new Set());
   // 새 테이블도 8단계에서 FK 를 추가하므로 함께 본다
@@ -67,8 +82,9 @@ function spreadConflicts(diff: SchemaDiff, seeds: Conflicts): Conflicts {
         out.set(d.name, { reason: `${d.name}: 함께 묶인 테이블 rename 이 수동 확인이라 실행하지 않습니다 — 값 대응을 확인해 직접 작성하세요`, notes: [`테이블 rename 묶음(${pairs})의 다른 테이블이 수동 확인입니다`] });
       }
     }
+    const referenced = new Set([...blocked, ...alterBlocked]);
     for (const d of changed) {
-      const refs = out.has(d.name) ? [] : referencingFks(d, blocked);
+      const refs = out.has(d.name) ? [] : referencingFks(d, referenced);
       if (!refs.length) continue;
       out.set(d.name, { reason: `${d.name}: 참조하는 테이블의 문장이 수동 확인이라 FK 변경을 실행하지 않습니다 — 직접 작성하세요`, notes: [`FK ${refs.map((f) => f.name).join(', ')} 가 수동 확인 테이블을 참조합니다`] });
     }

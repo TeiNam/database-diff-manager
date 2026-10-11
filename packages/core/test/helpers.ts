@@ -19,7 +19,7 @@ export const SCENARIOS = ['columns', 'tables', 'rename-table', 'rename-column', 
   'remove-rename-column', 'remove-rename-column-reverse', 'routines', 'table-swap', 'table-replace', 'column-swap', 'column-chain', 'partition-middle-drop',
   'rename-table-fk', 'table-replace-fk', 'table-swap-fk', 'remove-rename-column-order', 'rename-table-check',
   'partition-list-merge', 'partition-hash-named', 'rename-table-fk-auto', 'remove-rename-column-index',
-  'generated-stored-convert', 'partition-key-rename', 'fk-type-widen', 'partition-date-bound'];
+  'generated-stored-convert', 'partition-key-rename', 'fk-type-widen', 'partition-date-bound', 'fk-charset-convert'];
 
 // 값 보존 확인 (선택): base 에 seed 를 넣고 DDL 적용 뒤 query 결과가 rows 와 같아야 한다
 export interface ScenarioValues {

@@ -1,0 +1,5 @@
+{
+  "seed": "INSERT INTO `member` (`code`, `name`) VALUES ('A1', 'kim'), ('B2', 'lee'); INSERT INTO `orders` (`id`, `member_code`) VALUES (10, 'A1'), (11, 'A1'), (12, 'B2')",
+  "query": "SELECT `m`.`code`, `m`.`name`, (SELECT COUNT(*) FROM `orders` `o` WHERE `o`.`member_code` = `m`.`code`) AS `orders` FROM `member` `m` ORDER BY `m`.`code`",
+  "rows": [{ "code": "A1", "name": "kim", "orders": 2 }, { "code": "B2", "name": "lee", "orders": 1 }]
+}

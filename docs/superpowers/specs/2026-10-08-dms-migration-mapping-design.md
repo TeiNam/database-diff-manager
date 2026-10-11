@@ -48,7 +48,7 @@ BASE(As-Is)·TARGET(To-Be) 스키마는 지금처럼 각각 업로드하고, 매
 - **모든 `object-locator` 는 As-Is 이름 기준이다.** 컬럼 룰의 테이블은 테이블 rename 을 거쳐 To-Be 테이블을 찾는다.
 - 이름 비교는 **대소문자를 무시**한다. 샘플의 컬럼명은 전부 대문자(`PRM_ID`)이고 MySQL 컬럼명은 대소문자를 구분하지 않는다. 테이블명도 같은 규칙을 쓰되, 정확히 일치하는 것을 먼저 고른다.
 - locator 의 `%` 와일드카드는 selection 에서만 지원한다. transformation 의 와일드카드(예: 모든 테이블 이름 소문자화)는 경고로 남긴다.
-- 같은 대상에 대한 rename 룰이 둘 이상이면 rule-id 가 큰 쪽을 쓰고 경고한다.
+- 같은 대상에 대한 rename(·remove-column) 룰이 둘 이상이면 AWS DMS 와 같이 rule-id 가 **낮은** 쪽을 쓰고 경고한다 (DMS User Guide, Transformation rules and actions — `rule-id`: "AWS DMS applies the transformation rule with the lower rule-id").
 - JSON 이 아니거나 `rules` 배열이 없으면 업로드를 거부한다(400). 룰은 20,000개까지.
 
 ## 3. 데이터 모델과 적용 범위
@@ -165,4 +165,4 @@ DMS 매핑이 기본이고, 화면에서 넣는 수동 rename 매핑(`rename_map
 - `PUT /diff/renames` 는 DMS 로 계산된 rename 과 같은 항목을 수동 한도(500개) 적용 전에 서버에서 버린다.
 - `fromSchema`: 서버(업로드·적용)와 웹 미리보기는 BASE(As-Is) Schema 이름을 `parseDmsMapping(text, { fromSchema })` 로 넘기고, 그 스키마(대소문자 무시)의 룰만 쓴다. 지정하지 않으면 룰 순서상 첫 번째로 와일드카드(`%`)가 없는 `schema-name` 이다(모두 와일드카드면 `%`). 이와 맞지 않는 schema 의 룰은 경고로 남기고 반영하지 않는다.
 - 길이 상한: 룰마다 schema·table·column·value·rule-id·rule-type·rule-action·rule-target 이 256자를 넘으면 `invalid` 경고로 버리고, 통과한 룰만 `fromSchema` 후보·비교에 쓴다(거대한 schema-name 이 매 룰 비교에 쓰이는 DoS 방지). 경고 메시지에 넣는 사용자 값은 64자로 잘라 표시한다.
-- 웹의 diff·전환 표 쿼리는 `staleTime` 30초에 쿼리별로 `refetchOnWindowFocus: true`·`refetchInterval` 60초를 켠다(전역 기본값은 그대로, 백그라운드 탭에선 주기 재조회가 멈춘다). 다른 사용자가 바꾼 매핑·수동 rename 은 창으로 돌아오거나 다음 주기에 반영된다. DDL 탭의 전체 복사·다운로드는 직전에 최신 diff 를 `fetchQuery` 로 다시 받아 그 결과를 쓰고, 문장 복사는 그 문장이 최신 DDL 에 없으면 복사하지 않고 알린다. 객체 diff 카드의 DDL 복사도 최신 diff 에서 그 객체의 문장을 골라 복사한다.
+- 웹의 diff·전환 표 쿼리는 `staleTime` 30초에 쿼리별로 `refetchOnWindowFocus: true`·`refetchInterval` 60초를 켠다(전역 기본값은 그대로, 백그라운드 탭에선 주기 재조회가 멈춘다). 다른 사용자가 바꾼 매핑·수동 rename 은 창으로 돌아오거나 다음 주기에 반영된다. DDL 탭의 전체 복사·다운로드는 직전에 최신 diff 를 `fetchQuery` 로 다시 받아 그 결과를 쓰고, 문장 복사는 그 문장이 최신 DDL 에 없으면 복사하지 않고 알린다. 객체 diff 카드의 DDL 복사도 최신 diff 에서 그 객체의 문장을 골라 복사하되, core `objectStatements` 로 그 문장들이 `depends` 로 요구하는 다른 객체의 문장(예: `fk-type-widen` 의 `member` 카드는 `comment`·`post` 의 FK 해제·MODIFY·재추가)까지 전체 DDL 순서대로 묶어 단독 실행할 수 있게 하고, 카드에 "의존 문장 포함: …" 을 표시한다(6회차 개정).

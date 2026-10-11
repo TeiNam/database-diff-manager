@@ -123,6 +123,29 @@ const dataFor = (baseSql: string, targetSql: string) => {
 };
 const emptyVersion = () => mockApi({ '/api/versions/12': { version: {}, model: target, objects: [] } });
 
+describe('객체 카드 DDL 복사의 의존 문장 (6회차 2)', () => {
+  const schema = (type: string) => `CREATE TABLE \`member\` (\n  \`id\` ${type} NOT NULL,\n  PRIMARY KEY (\`id\`)\n) ENGINE=InnoDB;\n`
+    + `CREATE TABLE \`post\` (\n  \`id\` int NOT NULL,\n  \`member_id\` ${type} NOT NULL,\n  PRIMARY KEY (\`id\`),\n  KEY \`ix_post_member\` (\`member_id\`),\n`
+    + '  CONSTRAINT `fk_post_member` FOREIGN KEY (`member_id`) REFERENCES `member` (`id`)\n) ENGINE=InnoDB;';
+
+  it('FK 로 묶인 부모 카드는 자식 FK 해제·변경·재추가까지 전체 순서로 복사하고, 의존 문장 포함을 표시한다', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    const data = dataFor(schema('int'), schema('bigint')) as { statements: { sql: string }[] };
+    mockApi({ '/api/versions/12': { version: {}, model: target, objects: [] }, '/api/diff?base=11&target=12': data });
+    renderWithProviders(<DiffTab data={data as never} />, { route: ROUTE, path: PATH });
+    const card = within(screen.getByRole('region', { name: 'table member' }));
+    expect(card.getByText('의존 문장 포함: post')).toBeInTheDocument();
+    await user.click(card.getByRole('button', { name: 'DDL 복사' }));
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalled());
+    const copied = await (writeText.mock.calls[0][0] as string | Promise<string>);
+    const order = ['DROP FOREIGN KEY `fk_post_member`', 'MODIFY COLUMN `id` bigint', 'MODIFY COLUMN `member_id` bigint', 'ADD CONSTRAINT `fk_post_member`'].map((t) => copied.indexOf(t));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+});
+
 describe('DiffTab 표 모드 보완', () => {
   it('charset 만 바뀐 컬럼도 mod 행으로 표시하고 해당 셀을 강조한다', () => {
     emptyVersion();
