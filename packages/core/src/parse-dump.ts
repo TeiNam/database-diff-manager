@@ -1,7 +1,7 @@
 // td-export SQL 파일 → SchemaModel
 import { lineOf } from './cursor';
 import { lexTokens, tokenize, type LexMode, type Token } from './lexer';
-import type { Routine, RoutineKind, SchemaModel, Table, View } from './model';
+import { UNIDENTIFIED_NAME, type Routine, type RoutineKind, type SchemaModel, type Table, type View } from './model';
 import { normalizeDdl, normalizeRoutineDdl } from './normalize';
 import { parseRoutine } from './parse-routine';
 import { parseCreateTable } from './parse-table';
@@ -9,8 +9,9 @@ import { parseCreateView } from './parse-view';
 import { printRoutine, printTable, printView } from './print';
 
 export interface ParseWarning {
-  code: 'parse-error' | 'round-trip'; // parse-error: 파싱 실패(rawDdl만 보존), round-trip: 재출력이 원문과 다름
-  kind: 'table' | 'view' | 'routine';
+  // parse-error: 파싱 실패(rawDdl만 보존), round-trip: 재출력이 원문과 다름, empty-schema: 객체가 0개인 빈 스키마 (업로드 시 서버가 붙인다)
+  code: 'parse-error' | 'round-trip' | 'empty-schema';
+  kind: 'table' | 'view' | 'routine' | 'schema';
   object: string;
   line: number;
   message: string;
@@ -137,7 +138,7 @@ export function parseSqlDump(text: string): ParsedDump {
       continue;
     }
     const isView = VIEW_RE.test(ddl);
-    const object = NAME_RE.exec(ddl)?.[1].replace(/``/g, '`') ?? '(unknown)';
+    const object = NAME_RE.exec(ddl)?.[1].replace(/``/g, '`') ?? UNIDENTIFIED_NAME;
     try {
       if (isView) {
         const view = parseCreateView(ddl);

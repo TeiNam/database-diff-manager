@@ -241,3 +241,34 @@ describe('FK 표준 키 검사 일반화 (9회차 5)', () => {
     expect(blocked('fk-type-widen')).toEqual([]);
   });
 });
+
+describe('불완전한 TARGET 의 객체 삭제 차단 (13회차 1)', () => {
+  const customers = tbl('customers', '  `id` int NOT NULL,\n  PRIMARY KEY (`id`)');
+  const orders = tbl('orders', '  `id` int NOT NULL,\n  `cid` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `fk_o_c` (`cid`),\n  CONSTRAINT `fk_o_c` FOREIGN KEY (`cid`) REFERENCES `customers` (`id`)');
+  const view = 'CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `v` AS select `customers`.`id` AS `id` from `customers`;';
+  const fn = 'DELIMITER ;;\nCREATE DEFINER=`root`@`%` FUNCTION `f`() RETURNS int\n    DETERMINISTIC\nRETURN 1;;\nDELIMITER ;';
+  const base = dump(customers, orders, view, fn);
+  const drops = (stmts: Statement[]) => stmts.filter((s) => s.op === 'drop');
+
+  it('식별 불가 parse-error 문장이 있는 TARGET: 테이블·뷰·루틴 DROP 은 수동 확인, 사유 표시', () => {
+    const target = dump('This is not a schema dump;');
+    const d = diffSchemas(base, target);
+    expect(d.targetIncomplete).toContain('식별할 수 없는');
+    const stmts = generateDdl(d);
+    expect(drops(stmts).length).toBeGreaterThan(0);
+    expect(drops(stmts).filter((s) => !s.comment).map((s) => s.sql)).toEqual([]);
+    expect(stmts.find((s) => s.op === 'drop' && s.object === 'orders' && s.sql.includes('DROP TABLE'))!.sql).toContain('TARGET 이 불완전');
+  });
+
+  it('객체가 0개인 TARGET: DROP 을 모두 수동 확인으로 막는다', () => {
+    const d = diffSchemas(base, dump('/* Database : x */\nSET NAMES utf8mb4;'));
+    expect(d.targetIncomplete).toContain('객체가 없');
+    expect(drops(generateDdl(d)).filter((s) => !s.comment)).toEqual([]);
+  });
+
+  it('정상 TARGET 의 DROP 은 그대로 실행한다', () => {
+    const d = diffSchemas(base, dump(customers));
+    expect(d.targetIncomplete).toBeUndefined();
+    expect(drops(generateDdl(d)).filter((s) => !s.comment).map((s) => s.object).sort()).toEqual(['f', 'orders', 'orders', 'v']);
+  });
+});

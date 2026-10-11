@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalJson, parseMdDump, routineNameKey, parseSqlDump, type ParsedDump, type ParseWarning, type Routine, type SchemaModel, type SourceFormat, type Table, type View } from '@tdm/core';
+import { canonicalJson, parseMdDump, routineNameKey, parseSqlDump, UNIDENTIFIED_NAME, type ParsedDump, type ParseWarning, type Routine, type SchemaModel, type SourceFormat, type Table, type View } from '@tdm/core';
 import { all, one, run, tx, type Db } from '../db/connection';
 import { AppError } from '../errors';
 import { ensureDatabase, ensureSchema } from '../repos/catalog';
@@ -44,6 +44,20 @@ function parse(format: SourceFormat, text: string): ParsedDump {
   return format === 'sql' ? parseSqlDump(text) : parseMdDump(text);
 }
 
+// 이름을 알 수 없는 파싱 실패 문장(스키마 덤프가 아닌 내용 등)이 있으면 거부한다. 불완전한 버전을 TARGET 으로 비교하면 빠진 객체가 DROP 된다
+function assertIdentified({ warnings }: ParsedDump): void {
+  const bad = warnings.filter((w) => w.code === 'parse-error' && w.object === UNIDENTIFIED_NAME);
+  if (!bad.length) return;
+  throw new AppError(400, `식별할 수 없는 문장이 있습니다 (줄 ${bad.map((w) => w.line).join(', ')}) — 스키마 덤프(td-export) 파일인지 확인하세요`);
+}
+
+// 객체 0개: td-export SQL 헤더(/* Database : x */)가 있으면 빈 스키마로 받고 경고를 남긴다. 그 밖(헤더 없는 SQL, MD)은 거부한다
+function withEmptySchemaWarning(format: SourceFormat, { model, warnings }: ParsedDump): ParseWarning[] {
+  if (model.tables.length || model.views.length || model.routines.length) return warnings;
+  if (format !== 'sql' || model.name === '') throw new AppError(400, '파일에서 테이블이나 뷰를 찾지 못했습니다');
+  return [...warnings, { code: 'empty-schema', kind: 'schema', object: model.name, line: 1, message: '객체가 0개인 빈 스키마입니다 — 이 버전을 TARGET 으로 비교하면 객체 삭제는 수동 확인으로 막힙니다' }];
+}
+
 function assertUniqueNames(model: SchemaModel): void {
   const seen = new Set<string>();
   for (const obj of [...model.tables, ...model.views, ...model.routines]) {
@@ -55,8 +69,10 @@ function assertUniqueNames(model: SchemaModel): void {
 
 export function ingest(db: Db, input: IngestInput): IngestResult {
   const format = formatOf(input.filename);
-  const { model, warnings } = parse(format, input.text);
-  if (!model.tables.length && !model.views.length && !model.routines.length) throw new AppError(400, '파일에서 테이블이나 뷰를 찾지 못했습니다');
+  const parsed = parse(format, input.text);
+  const { model } = parsed;
+  assertIdentified(parsed);
+  const warnings = withEmptySchemaWarning(format, parsed);
   assertUniqueNames(model);
   const hash = modelHash(model);
   return tx(db, () => {

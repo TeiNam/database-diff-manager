@@ -190,7 +190,8 @@ interface SchemaDiff { tables: TableDiff[]; views: ViewDiff[];
   partial: boolean /* 한쪽이라도 partial 출처 */;
   routines: RoutineDiff[]; routinesUnknown: boolean /* 한쪽이라도 MD 출처라 루틴을 비교하지 않음 */;
   manualTables: { table: string; reason: string; note: string }[] /* 생성 DDL 을 그대로 실행할 수 없어 문장을 수동 확인으로 돌릴 테이블 */
-  schemaNames?: string[] /* BASE·TARGET 스키마 이름(빈 이름 제외). 뷰 본문의 다른 스키마 한정 참조를 로컬 의존에서 뺀다 (11회차 개정) */ }
+  schemaNames?: string[] /* BASE·TARGET 스키마 이름(빈 이름 제외). 뷰 본문의 다른 스키마 한정 참조를 로컬 의존에서 뺀다 (11회차 개정) */
+  targetIncomplete?: string /* TARGET 이 불완전한 이유: 식별 불가 parse-error 문장이 있거나 객체가 0개. 있으면 객체 DROP(TABLE·VIEW·ROUTINE)을 수동 확인으로 막는다 (13회차 개정) */ }
 interface RoutineDiff { op: 'add' | 'drop' | 'modify'; kind: 'function' | 'procedure'; name: string; from?: Routine; to?: Routine;
   fields: string[] /* 'params', 'returns', 'characteristics.deterministic' …, 'body', 'sqlMode' */ }
 ```
@@ -279,6 +280,8 @@ interface Statement {
 
 **특수 처리**
 
+- 불완전한 TARGET(13회차 개정): `targetIncomplete`(식별 불가 parse-error 문장 또는 객체 0개)이면 삭제되는 테이블·뷰·루틴의 문장(FK 해제·`DROP TABLE`·`DROP VIEW`·`DROP FUNCTION|PROCEDURE`)을 사유와 함께 수동 확인으로 돌린다. 삭제 테이블은 수동 확인 전파의 출발점이 되어, 그 테이블을 참조하는 FK·읽는 뷰도 함께 막힌다. 업로드 검증(5.2)이 같은 파일을 먼저 거부하지만, 이미 저장된 버전·직접 만든 모델에 대한 심층 방어다.
+
 - 순서로 풀 수 없는 rename(`이름 충돌` 로 적용되지 않은 매핑: 컬럼은 그 TARGET 테이블, 테이블은 옛·새 이름 두 테이블)이 있으면 관련 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제, ALTER, 파티션)을 수동 확인 문장으로 바꾼다. 관련 테이블이 얽힌 rename 묶음(맞바꾸기·연쇄)에 들면 묶음의 모든 테이블로, 그 테이블들을 참조하는 FK 를 바꾸는 테이블로도 넓힌다(묶음 RENAME 이 실행되지 않으면 다른 문장이 엉뚱한 테이블의 데이터를 바꾼다, 2026-10-11 3회차 개정). 넓히기는 더 이상 늘지 않을 때까지(고정점) 반복하고(FK 로 번진 테이블이 다시 다른 묶음에 들 수 있다), 막힌 테이블·뷰를 본문에서 읽는 뷰의 삭제·생성도 수동 확인으로 바꾼다. 출발점에는 `manualTables`(FK 보정명 충돌, 아래 재사용 컬럼명 의존성)도 들어간다(4회차 개정). 새로 만드는(add) 테이블도 8단계에서 FK 를 추가하므로, 그 FK 가 막힌 테이블을 참조하면 그 새 테이블의 문장도 막는다. 뷰가 읽는 객체는 본문 토큰에서 `FROM`/`JOIN` 뒤 식별자(`schema`.`table` 은 table — 다른 스키마 한정이면 로컬 객체가 아니다, 11회차 개정)로 판정해 컬럼 별칭·문자열 속 이름에 걸리지 않게 한다(토큰으로 나눌 수 없으면 `` `이름` `` 포함 여부, 5회차 개정). 본 ALTER 가 수동 확인인 테이블(파싱 실패, 생성식 미상, VIRTUAL↔STORED·일반↔VIRTUAL — 그 CONVERT TO 포함)은 그 테이블의 모든 문장(FK 해제·재추가, rename, 파티션 등)을 막는다 — 차단 단위는 "테이블의 모든 문장 + 그 FK 쌍" 이다. 본 ALTER 만 빼고 FK 해제·재추가를 실행하면, 막힌 ALTER 가 만들 컬럼(`pid`→`new_pid`)을 쓰는 FK 재추가가 error 1072 로 실패해 FK 가 사라진다(8.4 실측, 골든 `fk-alter-blocked`, 11회차 개정 — 6회차의 '그 테이블의 다른 문장은 그대로 둔다'를 대체). 그 테이블(옛·새 이름)을 참조하는 바뀌는·새 FK 의 테이블, 그 테이블을 읽는 바뀌는 뷰, 그 테이블이 든 rename 묶음·fk-retype 묶음도 위 고정점 전파로 막는다. 사유는 묶음 사유(fk-retype 등)가 먼저 붙으면 그것을 쓴다(골든 `fk-retype-generated` 출력 그대로). 문자셋 축소는 데이터 확인 안내(notes)일 뿐 수동 확인이 아니므로 시드가 아니다. 막힌 테이블(본 ALTER 가 막힌 테이블 포함)이 fk-retype 묶음(`depends`)에 들면 묶음의 모든 테이블 문장(FK 해제·부모/자식 MODIFY·FK 재추가)을 수동 확인으로 돌린다 — 자식 생성 컬럼 VIRTUAL→STORED 로 자식 ALTER 만 막히면 부모 MODIFY 뒤 FK 재추가가 error 3780 으로 실패해 FK 가 사라진다(8.4 실측, 골든 `fk-retype-generated`, 8회차 개정).
 - 삭제되는 컬럼 이름을 겹침 허용 rename 이 다시 쓸 때(`DROP COLUMN y, RENAME COLUMN x TO y`), BASE 에서 그 컬럼을 식 인덱스(`((abs(y)))`)·생성 컬럼 식이 쓰거나 다른(자기 포함) 테이블 FK 가 참조하면 그 테이블과, 바뀌는 자식 테이블의 문장을 수동 확인으로 돌린다(생성 DDL 이 실패하거나 새 컬럼을 가리키게 된다. 식은 따옴표 식별자 토큰으로 비교해 문자열 속 `` `이름` `` 은 세지 않는다 — 5회차 개정). 일반 인덱스·FK 컬럼·CHECK 는 다시 만들어 골든 `remove-rename-column-index` 로 검증되었으므로 막지 않는다(4회차 개정).
 - FK 표준 키 검사(9회차 일반화): MySQL 8.4 기본값 `restrict_fk_on_non_standard_key=ON` 에서는 부모에 참조 컬럼과 같은 컬럼·순서의 전체 길이 PRIMARY/UNIQUE(표준 키)가 없으면 FK 추가가 error 6125 로, 그런 FK 가 쓰는 부모 인덱스 삭제가 error 1553 으로 실패한다(8.0 은 둘 다 실행된다, 8.4 실측). TARGET 에 존재할 모든 FK(유지·재생성·신규, 자기 참조 포함) 중 TARGET 부모에 표준 키가 없는 것을, 생성 DDL 이 그 FK 를 추가(새 테이블·새·바뀐·fk-retype 재생성 FK)하거나 부모의 참조 컬럼이 든 인덱스를 바꾸면 자식(바뀌는 경우)과 부모(바뀌는 경우)를 `manualTables` 에 넣어 문장 전체를 수동 확인으로 묶는다. 사유에 '8.4 에서 실패, 8.0 은 실행 가능' 을 적는다. 부모 UNIQUE 를 일반 인덱스로 바꾸면서 자식 FK 를 `ON DELETE CASCADE` 로 바꾸면 FK 해제 → UNIQUE 제거 → FK 재추가가 8.4 에서 error 6125 로 FK 를 잃으므로 둘 다 막는다(골든 `fk-unique-replace`·`fk-unique-replace-cascade`). 표준 키가 TARGET 에 있으면(같은 키 재생성, 이름만 다른 키) 막지 않고, 비표준 FK 라도 어떤 문장도 건드리지 않으면(부모의 무관한 인덱스 추가 등) 막지 않는다. MD 인덱스는 종류(Normal)·키 파트 상세를 모를 수 있어 컬럼이 같으면 표준 키일 수 있다고 본다.
@@ -362,7 +365,7 @@ interface Statement {
      - Database는 물리 엔진 인스턴스 하나다. td-export 0.1.20+는 기본 포트(3306)가 아니면 endpoint를 `{host}_{port}`로 쓴다(`:`는 파일명에 못 쓴다). 꼬리가 100~65535 범위의 `_숫자`(3~5자리, 앞자리 0 아님)이면 `{host}:{port}`로 제안한다(`sample-app(10.0.0.15_3309).sql` → `10.0.0.15:3309`). 그 밖에는 endpoint를 그대로 제안한다(`sample-app(10.0.0.15).sql` → `10.0.0.15`, `db_01`·`db_2` → 그대로). 서버 이름 검증(`NameSchema`, trim 후 1~128자)은 `:`를 허용한다.
      - xlsx(`{host}_{port}.xlsx`)는 업로드 대상이 아니다.
   2. 사용자가 확정하고, 없는 Database는 그 자리에서 생성한다.
-  3. 서버가 재파싱한다.
+  3. 서버가 재파싱한다. 이름을 알 수 없는 파싱 실패 문장(`(unknown)` — 스키마 덤프가 아닌 내용 등)이 하나라도 있으면 그 파일을 거부한다(400, 줄 번호 표시). 불완전한 버전을 TARGET 으로 비교하면 빠진 객체가 실행 가능한 DROP 이 되기 때문이다. 객체가 0개이면 td-export SQL 헤더(`/* Database : x */`)가 있을 때만 빈 스키마로 받고 `empty-schema` 경고(객체 0개)를 남긴다 — 새 DB 를 BASE 로 두고 첫 TARGET 의 CREATE 를 받는 용도. 헤더 없는 SQL·MD 의 객체 0개는 거부한다(13회차 개정).
   4. 정규화 모델 해시가 직전 버전과 같으면 해당 파일 결과를 `duplicate`로 반환한다(요청 전체는 200, 파일별 상태).
 - **업로드 제한**: 파일당 20 MB, UTF-8만 허용(BOM은 제거).
 - **업로드 응답**: 파일별로 `ok | duplicate | error`와 파싱 경고(객체, 줄 번호, 사유) 목록을 담는다.
