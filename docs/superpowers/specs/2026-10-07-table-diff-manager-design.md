@@ -18,7 +18,7 @@
 
 - DDL을 DB에 직접 실행하거나 DB에 접속해 스키마를 수집하는 기능 (수집은 td-export가 담당)
 - PostgreSQL. `core`의 dialect 경계만 열어 두고 구현하지 않는다.
-- 트리거·이벤트. td-export 출력에 없다. (2026-10-11 개정: 함수·프로시저는 td-export 0.1.52 SQL 출력부터 지원한다 — 4.1·4.2·4.5·4.6 참고)
+- 트리거·이벤트. 사용자 결정으로 범위 밖이다(td-export 출력에도 없다). (2026-10-11 개정: 함수·프로시저는 td-export 0.1.52 SQL 출력부터 지원한다 — 4.1·4.2·4.5·4.6 참고)
 - Excel(.xlsx) 업로드
 - SSO/OIDC
 
@@ -125,13 +125,14 @@ interface SchemaModel { name: string; tables: Table[]; views: View[]; routines: 
 td-export MD 형식을 따른다.
 
 - **스키마명**: 첫 줄 제목에서 읽는다.
-- **테이블명**: `## Table List`의 `[Name (comment)](#anchor)`에서 원래 대소문자를 복원한다. 섹션 헤딩 `## name`은 소문자라서 쓰지 않는다.
+- **테이블명**: `## Table List`의 `[Name (comment)](#anchor)`에서 원래 대소문자를 복원한다. 섹션 헤딩 `## name`은 소문자라서 쓰지 않는다. 이름에 공백이 있을 수 있어(`Order Items`) 소문자로 바꾸면 앵커와 같아지는 ` (` 앞부분을 이름으로 읽는다(2026-10-11 개정).
 - **표 섹션**
   - Information 표: Engine / Row format / Collate / Comment
   - Columns 표: Name, Type, Nullable, Default, Charset, Collation, Key, Extra, Comment
   - td-export 0.1.22+는 셀 안의 `|`를 `\|`로, 줄바꿈을 `<br>`로 이스케이프한다. 0.1.22를 직접 가리키는 표기가 없으므로 상세 인덱스 형식(0.1.19+)으로 판별된 파일만 이스케이프되지 않은 `|`로 셀을 나누고 `\|`를 되돌린다. 그 밖의 파일은 모든 `|`로 나눈다(0.1.15 코멘트가 `C:\`처럼 `\`로 끝나도 그대로 읽는다). `<br>`은 버전과 관계없이 줄바꿈으로 읽는다(0.1.21 이하 코멘트에 `<br>` 글자가 그대로 있으면 SQL과 다르게 보인다).
   - td-export 0.1.30도 백슬래시는 이스케이프하지 않는다. 그래서 0.1.22+ 파일에서 `\`로 끝나는 셀 뒤의 구분자 `|`는 `\|`(이스케이프된 `|`)와 구분할 수 없어, 그 셀과 다음 셀이 합쳐진다. 단 줄 끝의 `|`는 항상 표 구분자로 먼저 떼어 내므로 마지막 셀(Comment)의 `C:\`와 `C:|`는 구분된다.
   - 그 이전 버전은 `|`를 이스케이프하지 않는다. 셀 수가 열 수보다 많으면 넘친 셀을 마지막 Comment로 합친다.
+  - td-export 0.1.46+(#37·#48)는 셀·인덱스·FK 줄의 `\` `` ` `` `*` `<` 앞과 `](` 의 `(` 앞에 백슬래시를 붙인다(줄바꿈은 `<br>`, 테이블 목록의 이름과 뷰 SQL 블록은 이스케이프하지 않음). 버전 표기가 없으므로 파일 단위로 백슬래시 연속(k개) 뒤 글자를 센다: `` ` ``·`*`·`<`(`<br>` 제외) 앞의 홀수 k 는 새 형식, 짝수 k(0 포함, 맨몸 글자)는 옛 형식의 증거다. 그 밖의 글자 앞 홀수 k 는 옛 형식(새 형식은 백슬래시를 늘 둘씩 낸다), 따옴표 Default 안의 k ≡ 0 (mod 4) 는 새 형식, k ≡ 2 (mod 4)(제어 문자 이스케이프 `\n` 등 앞 제외)는 옛 형식의 증거다. 새 형식 증거만 있을 때 셀을 이스케이프되지 않은 `|` 로 나누고 이스케이프를 푼 뒤(셀 복원), Default 를 SQL 리터럴로 해석한다. 근거가 없으면 기존 해석을 유지한다(2026-10-11 개정).
 - **형식 판별(파일 단위)**: 이전 버전이 낼 수 없는 표기가 하나라도 있으면 그 버전 이상으로 본다.
 
   | td-export | Default 칸 | Index 목록 | 판별 근거 |
@@ -148,7 +149,7 @@ td-export MD 형식을 따른다.
   - 상세 형식이 아니면 컬럼명만 읽고 키 파트 상세는 unknown이다.
 - **td-export 버그 대응**: `non_unique` 조회 실패 시 UNIQUE 인덱스도 `[Normal]`로 출력된다(샘플에서 13개 UNIQUE가 모두 Normal). `[Unique]`는 신뢰하고, `[Normal]`은 인덱스 종류를 unknown으로 둔다. 상세 형식(0.1.19+)의 `[Normal]`은 INDEX와 UNIQUE 중 무엇인지만 모르므로, 양쪽 키 파트 상세가 알려져 있으면 FULLTEXT·SPATIAL과의 차이(`Normal` ↔ `Fulltext`)는 종류 변경으로 비교한다. 0.1.19 미만은 FULLTEXT·SPATIAL도 `[Normal]`로 출력하므로 계열도 비교하지 않는다.
 - **PK**: Columns 표의 `Key=PRI` 컬럼들로 구성한다. 복합 PK의 컬럼 순서는 표 순서로 추정한다 → `partial`.
-- **Extra 정규화**: `DEFAULT_GENERATED`는 버리고, `on update X`는 `onUpdate`로, `auto_increment`는 `autoIncrement`로, `VIRTUAL/STORED GENERATED`는 `generated`(표현식 미상)로 옮긴다.
+- **Extra 정규화**: Extra 칸은 information_schema `EXTRA` 속성 뒤에 생성식이 붙은 값이다. 앞에서부터 속성 토큰(`auto_increment`, `DEFAULT_GENERATED`, `on update X`, `VIRTUAL/STORED GENERATED`, `INVISIBLE`)만 떼어 판단한다(생성식 안의 `'invisible'` 같은 글자를 속성으로 읽지 않는다). `DEFAULT_GENERATED`는 버리고, `on update X`는 `onUpdate`로, `auto_increment`는 `autoIncrement`로, `VIRTUAL/STORED GENERATED`는 `generated`(표현식 미상, 저장 방식은 앎)로 옮긴다.
 - **Constraint 목록**: FK만 있다. `- name FOREIGN KEY (c1, c2) Reference t.col|t(r1, r2) ON DELETE … ON UPDATE …`.
   - 0.1.28 이하는 다중 컬럼 FK를 참조 컬럼마다 한 줄씩 낸다 → 이름으로 합친다. 0.1.29+는 한 줄에 `t(r1, r2)`로 낸다.
   - 0.1.29+는 다른 스키마를 참조하면 `schema.t.col` / `schema.t(r1, r2)`로 낸다 → `refSchema`.
@@ -201,9 +202,10 @@ interface RoutineDiff { op: 'add' | 'drop' | 'modify'; kind: 'function' | 'proce
   - 인덱스: 정의가 같고 이름만 다르면 후보로 둔다.
   - 테이블: drop된 테이블과 add된 테이블의 컬럼 구성이 같으면 후보로 둔다.
 - **rename 매핑을 받으면** drop+add 쌍을 `rename` 하나로 합치고, 나머지 속성 차이는 `fields`에 담는다.
-  - 매핑은 BASE에 새 이름이 없고, TARGET에 옛 이름이 없고, 같은 대상이 아직 짝지어지지 않았을 때만 적용한다. 적용하지 못한 매핑은 이유와 함께 `ignoredRenames`에 담는다.
+  - 매핑은 같은 대상이 아직 짝지어지지 않았을 때 적용한다. 새 이름이 BASE 에 있으면 그 BASE 객체도 다른 매핑으로 옮겨져야 하고, 옛 이름이 TARGET 에 있으면 그 TARGET 객체도 다른 매핑으로 채워져야 한다(맞바꾸기 a↔b, 연쇄 a→b·b→c, 교체 log→log_2025·log_new→log). 조건을 못 맞춘 매핑을 빼면 다른 매핑이 무너질 수 있어 안정될 때까지 반복한다. 적용하지 못한 매핑은 이유와 함께 `ignoredRenames`에 담는다(2026-10-11 개정: 이전에는 이름이 겹치면 모두 '이름 충돌'이었다).
   - 파싱 실패 테이블은 테이블 rename 후보에서 뺀다.
 - **파티션**: 방식·표현식·개수·파티션 목록과 `SUBPARTITION BY …` 절을 비교한다.
+- **생성 컬럼**: 한쪽이 MD(표현식 미상)여도 생성 여부와 저장 방식(VIRTUAL/STORED)은 비교하고, 표현식만 `skipped`(`column.generated`)로 남긴다.
 - **루틴**: (종류, 이름)으로 짝짓고 이름은 대소문자를 구분하지 않는다(MySQL 루틴 이름 규칙). 기본값과 같은 명시 특성은 생략과 같다. 본문은 줄 끝 공백·줄바꿈(CRLF) 차이만 무시한다. `sqlMode` 는 양쪽 다 알 때만 비교한다. rename 후보는 만들지 않는다. 한쪽이라도 `routinesUnknown`(MD)이면 루틴은 비교하지 않고 `routines: []`, `routinesUnknown: true` 를 돌려준다(모두 drop/add 로 보이지 않게).
 - **비교 제외**: 뷰·루틴 DEFINER, `AUTO_INCREMENT=N`. 4.2 정규화 단계에서 제거한다.
 
@@ -216,6 +218,7 @@ interface Statement {
   delimited?: boolean; // 루틴 CREATE: sql 이 `DELIMITER ;;` … `;;` `DELIMITER ;` 로 스스로 끝난다 (';' 를 덧붙이지 않음)
   comment: boolean;   // 실행할 SQL이 없는 안내 문장 (수동 확인, 파티션 COMMENT 변경 등)
   notes?: string[];   // 문장 위에 '-- '로 붙는 안내 (MD 기반 미확인 속성 등)
+  related?: string[]; // 한 문장이 여러 테이블을 다룰 때(얽힌 테이블 rename) 그 테이블들의 TARGET 이름. 화면은 관련 카드 모두에 보여 준다
 }
 ```
 
@@ -223,11 +226,11 @@ interface Statement {
 
 1. 삭제·변경되는 FK를 `ALTER TABLE … DROP FOREIGN KEY`
 2. 삭제되는 뷰를 `DROP VIEW`, 삭제·변경되는 루틴을 `DROP FUNCTION|PROCEDURE IF EXISTS`
-3. `RENAME TABLE a TO b` (매핑된 것만)
+3. `RENAME TABLE a TO b` (매핑된 것만). 이름이 얽힌 rename(한 rename 의 새 이름이 다른 rename 의 옛 이름)은 한 문장으로 묶는다. MySQL 은 절을 앞에서부터 원자적으로 적용하므로 비는 이름부터 옮기고(`RENAME TABLE log TO log_2025, log_new TO log`), 순환(맞바꾸기)은 겹치지 않는 임시 이름 `__tdm_tmp_n` 을 거친다(`RENAME TABLE a TO __tdm_tmp_1, b TO a, __tdm_tmp_1 TO b`).
 4. 새 테이블을 `CREATE TABLE`. **FK를 뺀 정의**로 만들고 FK는 8단계에서 추가한다(테이블 간 생성 순서 문제 회피).
 5. 변경 테이블마다 `ALTER TABLE` 문 **하나**. 절 순서는 다음과 같다.
    - `DROP CHECK` / `DROP INDEX`(PK면 `DROP PRIMARY KEY`)
-   - `RENAME COLUMN`(이름만 바뀐 경우), 이름과 정의가 함께 바뀌면 `CHANGE COLUMN old new <정의>`
+   - `RENAME COLUMN`(이름만 바뀐 경우), 이름과 정의가 함께 바뀌면 `CHANGE COLUMN old new <정의>`. 한 ALTER 안의 RENAME/CHANGE 는 동시에 적용되므로(MySQL 8.0+) 컬럼 맞바꾸기·연쇄도 임시 이름 없이 그대로 낸다(`RENAME COLUMN a TO b, RENAME COLUMN b TO a`)
    - `MODIFY COLUMN <전체 정의> [FIRST|AFTER x]` (속성 변경, 위치 변경)
    - `ADD COLUMN <정의> [FIRST|AFTER x]`
    - `DROP COLUMN`
@@ -241,7 +244,7 @@ interface Statement {
    - 테이블 콜레이션과 같은 `COLLATE`만 붙은 컬럼은 상속한 값이므로 `COLLATE`를 빼고 출력한다(명시하면 `SHOW CREATE` 출력이 달라진다).
 6. 파티션 변경은 테이블별로 별도 `ALTER TABLE` 하나로 처리한다(다른 변경과 섞지 않는다).
    - 타입·표현식이 같고 **RANGE/LIST 파티션이 끝에 추가만 됨**: `ADD PARTITION (…)`. 월별 파티션 운영에서 가장 흔한 경우다.
-   - 같은 조건에서 파티션이 **삭제됨**: `DROP PARTITION p1, p2`
+   - 같은 조건에서 파티션이 **삭제됨**: 맨 앞(보관 기간 정리)이면 `DROP PARTITION p1, p2`. RANGE 중간 삭제는 다음 파티션과 합쳐 `REORGANIZE PARTITION p2, p3 INTO (p3 …)` 로 지운 구간의 행을 보존한다. 뒤쪽(다음 파티션 없음)·LIST 삭제는 `DROP PARTITION` 에 `[데이터 확인]` notes 를 단다(2026-10-11 개정)
    - 같은 조건에서 중간 파티션의 경계·구성이 바뀜: `REORGANIZE PARTITION … INTO (…)`
    - 파티션 COMMENT/ENGINE만 바뀜: DDL 없이 `-- 파티션 메타 변경` 주석
    - HASH/KEY 개수만 바뀜: `ADD PARTITION PARTITIONS n` / `COALESCE PARTITION n`
@@ -250,10 +253,12 @@ interface Statement {
 7. 삭제되는 테이블을 `DROP TABLE`
 8. 추가·변경되는 FK를 `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`
 8-b. 추가·변경되는 루틴을 `CREATE FUNCTION|PROCEDURE`(DEFINER 없이 — 실행한 사용자가 DEFINER 가 된다는 notes). 뷰가 함수를 부를 수 있어 뷰 생성보다 앞에 둔다. 문장 하나에 `DELIMITER ;;` / `CREATE …;;` / `DELIMITER ;` 를 넣어 mysql 클라이언트에 그대로 붙여 넣을 수 있게 하고, `sqlMode` 를 알면 앞뒤에 `SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = '…';` / `SET SQL_MODE = @OLD_SQL_MODE;` 를 같은 문장에 넣는다(`delimited: true`). 파싱 실패 루틴은 수동 확인 주석.
-9. 추가·변경되는 뷰를 `CREATE OR REPLACE [ALGORITHM=…] [SQL SECURITY …] VIEW … AS …`. 뷰 본문에서 다른 뷰 이름 참조를 찾아 위상 정렬한다.
+9. 추가·변경되는 뷰를 `CREATE OR REPLACE [ALGORITHM=…] [SQL SECURITY …] VIEW … AS …`(DEFINER 없이 — 루틴과 같은 DEFINER notes). 뷰 본문에서 다른 뷰 이름 참조를 찾아 위상 정렬한다.
 
 **특수 처리**
 
+- 순서로 풀 수 없는 rename(`이름 충돌` 로 적용되지 않은 매핑: 컬럼은 그 TARGET 테이블, 테이블은 옛·새 이름 두 테이블)이 있으면 관련 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제, ALTER, 파티션)을 수동 확인 문장으로 바꾼다.
+- 생성 컬럼의 VIRTUAL↔STORED 변경은 `MODIFY` 로 할 수 없어(MySQL error 3106) 그 ALTER 를 수동 확인 문장으로 낸다.
 - `parseError`가 있는 객체는 DDL 대신 `-- [수동 확인 필요] <객체>: 파싱 불가` 주석 문장(`comment: true`)을 만든다.
 - partial 출처가 있으면 출력 맨 위에 `-- [MD 기반] 일부 속성(…)은 비교하지 않았습니다` 주석을 단다.
 - partial(MD) TARGET으로 문장을 만들 때
@@ -323,7 +328,8 @@ interface Statement {
   4. 정규화 모델 해시가 직전 버전과 같으면 해당 파일 결과를 `duplicate`로 반환한다(요청 전체는 200, 파일별 상태).
 - **업로드 제한**: 파일당 20 MB, UTF-8만 허용(BOM은 제거).
 - **업로드 응답**: 파일별로 `ok | duplicate | error`와 파싱 경고(객체, 줄 번호, 사유) 목록을 담는다.
-- **diff 결과 캐시**: `(base, target, rename 매핑 해시)` 키로 메모리 LRU에 캐시한다. 버전 내용은 불변이라 무효화 조건이 rename 변경뿐이다.
+- **diff 결과 캐시**: `(base, target, 전환 매핑, 수동 rename 매핑과 그 방향)` 키로 메모리 LRU에 캐시한다. 버전 내용은 불변이라 무효화 조건은 rename 변경과 Database 이름 변경(응답 메타에 이름이 들어 있어 PATCH 시 diff 캐시를 비운다)이다.
+- **수동 rename 의 역방향**: (base, target) 쌍에 저장된 수동 매핑이 없으면 역쌍(target, base)의 수동 매핑을 뒤집어 적용한다(column/index 의 `table` 은 새 TARGET 쪽 이름). 응답 rename 은 `source: 'manual'`, `reversed: true`. 저장(PUT)은 그 쌍에만 한다(2026-10-11 개정).
 - 입력 검증은 서버의 zod 스키마로 한다. core는 의존성이 없으므로 타입만 공유한다.
 
 ### 5.3 인증·보안
@@ -331,6 +337,8 @@ interface Statement {
 - **비밀번호**: `scrypt`(N=2^15, salt 16B)로 해시하고 비교는 `timingSafeEqual`로 한다.
 - **세션**: 랜덤 32B 토큰의 SHA-256만 DB에 저장한다. 쿠키는 `HttpOnly; Secure; SameSite=Strict`, 만료 12시간 슬라이딩.
 - **CSRF**: `SameSite=Strict`에 더해, 상태를 바꾸는 요청에는 `X-Requested-With` 헤더를 요구한다.
+- **권한 검사 시점**: 모든 라우트는 로그인·역할을 `onRequest` 에서 확인한다. 익명·권한 없는 요청의 본문(업로드 multipart, JSON)은 파싱하지 않는다(2026-10-11 개정).
+- **로그인 경합**: scrypt 검증(비동기) 뒤 세션 발급 직전에 같은 트랜잭션에서 사용자의 `password_hash`·`disabled` 를 다시 읽어 검증 당시와 같을 때만 세션을 만든다(동시에 비밀번호를 재설정하면 옛 비밀번호의 세션이 남지 않는다).
 - **보안 헤더**: `@fastify/helmet`으로 CSP `default-src 'self'`를 걸고 인라인 스크립트를 쓰지 않는다.
 - **최초 admin**: `npm run create-admin -- <username>`으로 만든다. 비밀번호는 프롬프트로 입력하며 env나 CLI 인자로 받지 않는다.
 - **XSS**: DDL·코멘트는 텍스트 노드로만 렌더링한다. `dangerouslySetInnerHTML`은 쓰지 않는다.

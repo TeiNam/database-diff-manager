@@ -13,25 +13,27 @@ const PatchBody = z
 const DeleteBody = z.object({ confirmName: z.string() });
 
 export function catalogRoutes(app: FastifyInstance, ctx: AppContext): void {
-  app.get('/tree', { preHandler: requireLogin }, async () => getTree(ctx.db));
+  app.get('/tree', { onRequest: requireLogin }, async () => getTree(ctx.db));
 
-  app.get('/schemas/:id', { preHandler: requireLogin }, async (req) => getSchema(ctx.db, IdParams.parse(req.params).id));
+  app.get('/schemas/:id', { onRequest: requireLogin }, async (req) => getSchema(ctx.db, IdParams.parse(req.params).id));
 
-  app.delete('/schemas/:id', { preHandler: requireEditor }, async (req) => {
+  app.delete('/schemas/:id', { onRequest: requireEditor }, async (req) => {
     deleteSchema(ctx.db, IdParams.parse(req.params).id, DeleteBody.parse(req.body).confirmName);
     ctx.cache.clear(); // 버전이 연쇄 삭제되므로 diff 캐시를 비운다(rowid 재사용 대비)
     return { ok: true };
   });
 
-  app.post('/databases', { preHandler: requireEditor }, async (req, reply) => {
+  app.post('/databases', { onRequest: requireEditor }, async (req, reply) => {
     return reply.status(201).send(createDatabase(ctx.db, CreateBody.parse(req.body)));
   });
 
-  app.patch('/databases/:id', { preHandler: requireEditor }, async (req) => {
-    return updateDatabase(ctx.db, IdParams.parse(req.params).id, PatchBody.parse(req.body));
+  app.patch('/databases/:id', { onRequest: requireEditor }, async (req) => {
+    const updated = updateDatabase(ctx.db, IdParams.parse(req.params).id, PatchBody.parse(req.body));
+    ctx.cache.diff.clear(); // diff 응답 메타(base·target)에 Database 이름이 들어 있어 옛 이름이 남지 않게 비운다
+    return updated;
   });
 
-  app.delete('/databases/:id', { preHandler: requireEditor }, async (req) => {
+  app.delete('/databases/:id', { onRequest: requireEditor }, async (req) => {
     deleteDatabase(ctx.db, IdParams.parse(req.params).id, DeleteBody.parse(req.body).confirmName);
     ctx.cache.clear(); // 버전이 연쇄 삭제되므로 diff 캐시를 비운다(rowid 재사용 대비)
     return { ok: true };

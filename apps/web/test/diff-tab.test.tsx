@@ -84,6 +84,17 @@ describe('DiffTab', () => {
     expect(calls.filter((c) => c.url === '/api/diff?base=11&target=12')).toHaveLength(1);
   });
 
+  it('여러 테이블을 함께 다루는 문장(related)은 관련 카드 모두에서 복사된다', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    const joint = { object: 'users', kind: 'table', op: 'rename', sql: 'RENAME TABLE `a` TO `users`, `b` TO `orders`', comment: false, related: ['users', 'orders'] };
+    mockApi({ '/api/versions/12': { version: {}, model: target, objects: [] }, '/api/diff?base=11&target=12': { ...(DATA as object), statements: [joint] } });
+    renderWithProviders(<DiffTab data={DATA} />, { route: ROUTE, path: PATH });
+    await user.click(within(screen.getByRole('region', { name: 'table orders' })).getByRole('button', { name: 'DDL 복사' }));
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('RENAME TABLE `a` TO `users`')));
+  });
+
   it('최신 diff 에 그 객체 문장이 없으면 복사하지 않고 알린다', async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);

@@ -15,30 +15,43 @@ export function subpartitionKey(p: Partitioning): string | undefined {
   return SUBPARTITION_RE.exec(p.clause)?.[0].replace(/\s+/g, ' ').trim();
 }
 
-export function partitionStatements(d: TableDiff): string[] {
+// sql 이 '--' 로 시작하면 실행할 SQL 이 없는 안내 문장이다. notes 는 문장 위에 붙는 안내
+export interface PartitionStatement {
+  sql: string;
+  notes?: string[];
+}
+
+const lossNote = (ps: PartitionDef[]) => `[데이터 확인] ${ps.map((p) => p.name).join(', ')}: 파티션을 삭제하면 그 안의 행도 함께 삭제됩니다`;
+
+export const partitionStatements = (d: TableDiff): string[] => partitionBodies(d).map((s) => s.sql);
+export const listPartitionStatements = (table: string, a: PartitionDef[], b: PartitionDef[], range = true): string[] =>
+  listPartitionBodies(table, a, b, range).map((s) => s.sql);
+
+export function partitionBodies(d: TableDiff): PartitionStatement[] {
   const p = d.partition;
   if (!p) return [];
   const table = q(d.name);
-  if (!p.to) return [`ALTER TABLE ${table} REMOVE PARTITIONING`];
+  if (!p.to) return [{ sql: `ALTER TABLE ${table} REMOVE PARTITIONING` }];
   if (!p.from || p.from.method !== p.to.method || p.from.expr !== p.to.expr || subpartitionKey(p.from) !== subpartitionKey(p.to)) {
-    return [`ALTER TABLE ${table} ${p.to.clause}`];
+    return [{ sql: `ALTER TABLE ${table} ${p.to.clause}` }];
   }
   if (!p.from.partitions.length && !p.to.partitions.length) {
     const delta = (p.to.count ?? 1) - (p.from.count ?? 1);
-    if (delta > 0) return [`ALTER TABLE ${table} ADD PARTITION PARTITIONS ${delta}`];
-    if (delta < 0) return [`ALTER TABLE ${table} COALESCE PARTITION ${-delta}`];
+    if (delta > 0) return [{ sql: `ALTER TABLE ${table} ADD PARTITION PARTITIONS ${delta}` }];
+    if (delta < 0) return [{ sql: `ALTER TABLE ${table} COALESCE PARTITION ${-delta}` }];
     return [];
   }
-  return listPartitionStatements(table, p.from.partitions, p.to.partitions, p.to.method.startsWith('RANGE'));
+  return listPartitionBodies(table, p.from.partitions, p.to.partitions, p.to.method.startsWith('RANGE'));
 }
 
-export function listPartitionStatements(table: string, a: PartitionDef[], b: PartitionDef[], range = true): string[] {
-  const out: string[] = [];
+export function listPartitionBodies(table: string, a: PartitionDef[], b: PartitionDef[], range = true): PartitionStatement[] {
+  const out: PartitionStatement[] = [];
+  const push = (sql: string, notes?: string[]) => out.push(notes ? { sql, notes } : { sql });
   const bNames = new Set(b.map((p) => p.name));
   // 1) 보관 기간 정리: TARGET이 기존 파티션으로 시작할 때만 앞쪽의 사라진 파티션을 DROP
   let lead = 0;
   if (b.length && a.some((p) => p.name === b[0].name)) while (lead < a.length && !bNames.has(a[lead].name)) lead++;
-  if (lead) out.push(`ALTER TABLE ${table} DROP PARTITION ${names(a.slice(0, lead))}`);
+  if (lead) push(`ALTER TABLE ${table} DROP PARTITION ${names(a.slice(0, lead))}`);
   // 2) 공통 앞·뒤를 제외한 가운데 구간만 재구성
   const rest = a.slice(lead);
   let pre = 0;
@@ -56,15 +69,19 @@ export function listPartitionStatements(table: string, a: PartitionDef[], b: Par
       suf--;
     }
   }
-  if (!from.length && to.length && suf === 0) out.push(`ALTER TABLE ${table} ADD PARTITION (\n${to.map(printPart).join(',\n')})`);
-  else if (from.length && !to.length) out.push(`ALTER TABLE ${table} DROP PARTITION ${names(from)}`);
+  if (!from.length && to.length && suf === 0) push(`ALTER TABLE ${table} ADD PARTITION (\n${to.map(printPart).join(',\n')})`);
+  else if (from.length && !to.length && range && suf > 0) {
+    // RANGE 중간 삭제: 다음 파티션과 합쳐 다음 파티션 정의로 재구성하면 지운 구간의 행이 다음 파티션으로 옮겨진다
+    const next = b[b.length - suf];
+    push(`ALTER TABLE ${table} REORGANIZE PARTITION ${names([...from, rest[rest.length - suf]])} INTO (\n${printPart(next)})`);
+  } else if (from.length && !to.length) push(`ALTER TABLE ${table} DROP PARTITION ${names(from)}`, [lossNote(from)]);
   else if (to.length) {
     if (!from.length) {
       // MAXVALUE 같은 뒤쪽 파티션 앞에 끼워 넣기: 뒤쪽 첫 파티션을 쪼갠다
       from = [rest[rest.length - suf]];
       to = [...to, b[b.length - suf]];
     }
-    out.push(`ALTER TABLE ${table} REORGANIZE PARTITION ${names(from)} INTO (\n${to.map(printPart).join(',\n')})`);
+    push(`ALTER TABLE ${table} REORGANIZE PARTITION ${names(from)} INTO (\n${to.map(printPart).join(',\n')})`);
   }
   // 3) COMMENT만 바뀐 파티션
   const commentOnly = b.filter((y) => {
@@ -72,7 +89,7 @@ export function listPartitionStatements(table: string, a: PartitionDef[], b: Par
     return x !== undefined && x.def !== y.def && stripComment(x.def) === stripComment(y.def);
   });
   if (commentOnly.length) {
-    out.push(`-- 파티션 COMMENT 변경(${commentOnly.map((p) => p.name).join(', ')}): MySQL은 COMMENT만 바꾸는 DDL이 없습니다. 필요하면 REORGANIZE PARTITION으로 재정의하세요`);
+    push(`-- 파티션 COMMENT 변경(${commentOnly.map((p) => p.name).join(', ')}): MySQL은 COMMENT만 바꾸는 DDL이 없습니다. 필요하면 REORGANIZE PARTITION으로 재정의하세요`);
   }
   return out;
 }

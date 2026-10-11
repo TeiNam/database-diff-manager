@@ -1,0 +1,4 @@
+[
+  { "kind": "column", "table": "orders", "from": "addr", "to": "addr2" },
+  { "kind": "column", "table": "orders", "from": "addr2", "to": "addr3" }
+]

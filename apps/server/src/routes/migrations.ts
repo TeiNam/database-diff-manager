@@ -29,14 +29,14 @@ export function migrationRoutes(app: FastifyInstance, ctx: AppContext): void {
     return reply.status(201).send(result);
   });
 
-  app.get('/migrations', { preHandler: requireLogin }, async (req) => {
+  app.get('/migrations', { onRequest: requireLogin }, async (req) => {
     const { from, to } = PairQuery.parse(req.query);
     getSchema(ctx.db, from);
     getSchema(ctx.db, to);
     return listMigrations(ctx.db, from, to);
   });
 
-  app.get('/migrations/:id/source', { preHandler: requireLogin }, async (req, reply) => {
+  app.get('/migrations/:id/source', { onRequest: requireLogin }, async (req, reply) => {
     const { filename, text } = getMigrationSource(ctx.db, IdParams.parse(req.params).id);
     return reply.header('content-type', 'application/json; charset=utf-8').header('content-disposition', attachment(filename)).send(text);
   });
@@ -47,7 +47,7 @@ export function migrationRoutes(app: FastifyInstance, ctx: AppContext): void {
     return { ok: true };
   });
 
-  app.get('/migration-flow', { preHandler: requireLogin }, async (req) => {
+  app.get('/migration-flow', { onRequest: requireLogin }, async (req) => {
     const { base, target } = FlowQuery.parse(req.query);
     return computeMigrationFlow(ctx.db, ctx.cache, base, target);
   });

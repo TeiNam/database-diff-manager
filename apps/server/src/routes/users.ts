@@ -12,7 +12,8 @@ const PatchUserBody = z
   .refine((v) => Object.values(v).some((x) => x !== undefined), '변경할 항목이 없습니다');
 
 export function userRoutes(app: FastifyInstance, ctx: AppContext): void {
-  app.addHook('preHandler', requireAdmin);
+  // 본문을 읽기 전(onRequest)에 관리자 권한을 확인한다
+  app.addHook('onRequest', requireAdmin);
 
   app.get('/', async () => listUsers(ctx.db));
 

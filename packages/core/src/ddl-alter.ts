@@ -4,7 +4,7 @@ import type { Change, OptionChange, TableDiff } from './diff';
 import { quoteIdent as q, quoteString } from './lexer';
 import type { Column, Index, IndexKind, Table } from './model';
 import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated, indexNote, printable } from './partial-fill';
-import { partitionStatements } from './partition-ddl';
+import { partitionBodies } from './partition-ddl';
 import { printCheck, printColumn, printIndexParts } from './print';
 
 // 문장 본문: sql은 ';' 없음(delimited 제외). comment=true면 '-- ' 주석 줄로만 이루어진다
@@ -46,21 +46,26 @@ interface Collected {
   clauses: string[];
   notes: string[];
   missing: string[]; // 표현식을 모르는 생성 컬럼
+  storage: string[]; // VIRTUAL↔STORED 가 바뀐 생성 컬럼 (MySQL 은 MODIFY 로 바꿀 수 없다: error 3106)
 }
+
+const storageReason = (table: string, columns: string[]): string =>
+  `${table}: 생성 컬럼(${columns.map(q).join(', ')})의 VIRTUAL↔STORED 변경은 MODIFY 로 할 수 없습니다. 컬럼을 삭제한 뒤 다시 추가하세요`;
 
 export function alterStatements(d: TableDiff): StatementBody[] {
   if (d.unparsed) return [commentBody(`-- [수동 확인 필요] ${d.name}: 파싱할 수 없는 DDL이 변경되었습니다. 원문을 비교하세요`)];
   const plan = charsetPlan(d);
   const options = charsetOptions(d.options, plan);
   const main = alterClauses(d, options, plan?.columns ?? new Set());
-  const out: StatementBody[] = plan?.convert ? [convertBody(d.name, plan.convert, plan.notes, main.missing)] : [];
+  const out: StatementBody[] = plan?.convert ? [convertBody(d.name, plan.convert, plan.notes, [...main.missing, ...main.storage])] : [];
   if (main.clauses.length) {
     const sql = alter(d.name, main.clauses);
     const notes = [...(plan && !plan.convert ? plan.notes : []), ...main.notes];
-    out.push(main.missing.length ? manualBody(generatedReason(d.name, main.missing), sql, notes) : sqlBody(sql, notes));
+    const reason = main.missing.length ? generatedReason(d.name, main.missing) : main.storage.length ? storageReason(d.name, main.storage) : undefined;
+    out.push(reason ? manualBody(reason, sql, notes) : sqlBody(sql, notes));
   }
   out.push(...optionNotes(options).map(commentBody));
-  for (const sql of partitionStatements(d)) out.push(sql.startsWith('--') ? commentBody(sql) : sqlBody(sql));
+  for (const p of partitionBodies(d)) out.push(p.sql.startsWith('--') ? commentBody(p.sql) : sqlBody(p.sql, p.notes));
   return out;
 }
 
@@ -72,7 +77,7 @@ function convertBody(table: string, sql: string, notes: string[], missing: strin
 
 // 절 순서: 삭제(CHECK·인덱스·컬럼) → 컬럼 추가·변경(TARGET 순서) → 인덱스 추가·rename·가시성 → CHECK 추가 → 옵션
 function alterClauses(d: TableDiff, options: OptionChange[], forced: CharsetPlan['columns']): Collected {
-  const out: Collected = { clauses: [], notes: [], missing: [] };
+  const out: Collected = { clauses: [], notes: [], missing: [], storage: [] };
   for (const c of d.checks) if (c.op === 'drop' || c.op === 'modify') out.clauses.push(`DROP CHECK ${q(c.name)}`);
   for (const i of d.indexes) if (rebuildsIndex(i) || i.op === 'drop') out.clauses.push(dropIndex(i.oldName ?? i.name, i.from!.kind));
   for (const c of d.columns) if (c.op === 'drop') out.clauses.push(`DROP COLUMN ${q(c.name)}`);
@@ -113,6 +118,8 @@ function columnClauses(d: TableDiff, forced: ReadonlySet<string>, out: Collected
     const col = fillColumn(raw, ch?.op === 'add' ? undefined : bases.get(raw.name));
     pushNote(out.notes, columnNote(col));
     if (hasUnknownGenerated(col)) out.missing.push(col.name);
+    const before = ch?.op === 'add' ? undefined : bases.get(raw.name);
+    if (before?.generated && col.generated && before.generated.stored !== col.generated.stored) out.storage.push(col.name);
     const pos = idx === 0 ? ' FIRST' : ` AFTER ${q(to.columns[idx - 1].name)}`;
     const def = printColumn(printable(inheritCollation(col, to)), false);
     if (ch?.op === 'add') out.clauses.push(`ADD COLUMN ${def}${idx === to.columns.length - 1 ? '' : pos}`);

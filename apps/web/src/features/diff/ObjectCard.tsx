@@ -23,7 +23,9 @@ const COPY_LABEL: Record<CopyState, string> = { idle: 'DDL 복사', done: '복�
 // 복사 직전에 받은 최신 diff 에 이 객체의 문장이 없으면 옛 내용을 복사하지 않는다
 class StaleObjectError extends Error {}
 
-const ownStatements = (statements: Statement[], entry: ObjectEntry) => statements.filter((st) => st.kind === entry.kind && st.object === entry.name);
+// 여러 테이블을 함께 다루는 문장(얽힌 테이블 rename)은 related 에 든 모든 테이블 카드의 문장이다
+const ownStatements = (statements: Statement[], entry: ObjectEntry) =>
+  statements.filter((st) => st.kind === entry.kind && (st.object === entry.name || Boolean(st.related?.includes(entry.name))));
 
 function ChangeBar({ added, removed }: { added: number; removed: number }) {
   const total = added + removed || 1;

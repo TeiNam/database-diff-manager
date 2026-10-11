@@ -5,6 +5,7 @@ import { quoteIdent as q, quoteString } from './lexer';
 import type { Routine, RoutineKind, Table } from './model';
 import { columnNote, fillColumn, fillIndex, generatedReason, hasUnknownGenerated, indexNote, printable, tableNote } from './partial-fill';
 import { printForeignKey, printRoutine, printTable, printView } from './print';
+import { renameGroups, renameTableSql } from './table-rename';
 
 export interface Statement extends StatementBody {
   object: string;
@@ -12,6 +13,8 @@ export interface Statement extends StatementBody {
   op: Op;
   // sql: ';' 없음(delimited=true 인 루틴 CREATE 는 DELIMITER 로 감싼 완결된 문장). comment=true(실행할 SQL 없는 안내 문장)면 '-- ' 주석 줄로만 이루어진다
   // notes: 문장 위에 '-- '로 붙는 안내 (MD 기반 미확인 속성 등)
+  // related: 한 문장이 여러 테이블을 함께 다룰 때(얽힌 테이블 rename) 그 테이블들의 TARGET 이름. object 도 포함한다
+  related?: string[];
 }
 
 const MARK: Record<Op, string> = { add: '+', drop: '-', modify: '~', rename: '>' };
@@ -44,8 +47,16 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
     // TARGET 을 파싱하지 못하면 다시 만들 수 없으므로 삭제도 실행하지 않는다
     routine(r, r.op === 'modify' && r.to!.parseError ? manualBody(`${name}: 바뀐 루틴을 파싱할 수 없어 삭제·재생성하지 않습니다. 원문을 확인하세요`, drop) : sqlBody(drop));
   }
-  // 3. 테이블 rename
-  for (const d of altered) if (d.op === 'rename') table(d, sqlBody(`RENAME TABLE ${q(d.oldName!)} TO ${q(d.name)}`));
+  // 3. 테이블 rename (이름이 얽힌 rename 은 한 문장으로 묶는다)
+  const taken = new Set(diff.tables.flatMap((d) => [d.name, d.oldName ?? d.name]));
+  for (const g of renameGroups(diff.tables, taken)) {
+    const [first] = g.tables;
+    if (g.tables.length === 1) table(first, sqlBody(renameTableSql(g.clauses)));
+    else {
+      const note = `얽힌 테이블 rename 을 한 문장으로 함께 적용합니다: ${g.tables.map((d) => `${d.oldName}→${d.name}`).join(', ')}`;
+      out.push({ object: first.name, kind: 'table', op: 'rename', ...sqlBody(renameTableSql(g.clauses), [note]), related: g.tables.map((d) => d.name) });
+    }
+  }
   // 4. 테이블 생성 (FK는 8단계에서)
   for (const d of diff.tables) if (d.op === 'add') table(d, createTable(d.to!));
   // 5·6. 테이블 변경, 파티션
@@ -65,9 +76,9 @@ export function generateDdl(diff: SchemaDiff): Statement[] {
   for (const v of sortViews(diff.views.filter((x) => x.op !== 'drop'))) {
     view(v, v.to!.parseError
       ? commentBody(`-- [수동 확인 필요] ${v.name}: 파싱할 수 없는 뷰입니다. 원문을 확인하세요`)
-      : sqlBody(printView(v.to!, { orReplace: true })));
+      : sqlBody(printView(v.to!, { orReplace: true }), [DEFINER_NOTE]));
   }
-  return guardConflicts(out, columnConflicts(diff));
+  return guardConflicts(out, renameConflicts(diff));
 }
 
 export function renderDdl(stmts: Statement[], partial = false): string {
@@ -102,29 +113,45 @@ function createTable(t: Table): StatementBody {
   return missing.length ? manualBody(generatedReason(t.name, missing), sql, notes) : sqlBody(sql, notes);
 }
 
-// 순서로 풀 수 없는 컬럼 rename (맞바꾸기·연쇄 등 '이름 충돌'로 적용되지 않은 매핑)을 TARGET 테이블별로 모은다
-function columnConflicts(diff: SchemaDiff): Map<string, string[]> {
-  const out = new Map<string, string[]>();
+interface Conflict {
+  reason: string;
+  notes: string[];
+}
+
+// 순서로 풀 수 없는 rename ('이름 충돌'로 적용되지 않은 매핑)을 테이블별로 모은다. 컬럼은 TARGET 테이블,
+// 테이블 매핑은 옛·새 이름 두 테이블 모두 (옛 이름 테이블이 그대로 남거나 새 이름 테이블이 따로 만들어진다)
+function renameConflicts(diff: SchemaDiff): Map<string, Conflict> {
+  const out = new Map<string, Conflict>();
+  const add = (table: string, kind: string, note: string) => {
+    const prev = out.get(table);
+    out.set(table, { reason: prev?.reason ?? `${table}: ${kind} rename 이름 충돌 — 값 대응을 확인해 직접 작성하세요`, notes: [...(prev?.notes ?? []), note] });
+  };
   for (const { mapping: m, reason } of diff.ignoredRenames) {
-    if (m.kind !== 'column' || reason !== '이름 충돌' || m.table === undefined) continue;
-    out.set(m.table, [...(out.get(m.table) ?? []), `컬럼 rename ${m.from}→${m.to} 이 다른 컬럼 이름과 겹쳐 적용하지 못했습니다`]);
+    if (reason !== '이름 충돌') continue;
+    if (m.kind === 'table') {
+      const note = `테이블 rename ${m.from}→${m.to} 이 다른 테이블 이름과 겹쳐 적용하지 못했습니다`;
+      for (const name of new Set([m.from, m.to])) add(name, '테이블', note);
+    } else if (m.kind === 'column' && m.table !== undefined) {
+      add(m.table, '컬럼', `컬럼 rename ${m.from}→${m.to} 이 다른 컬럼 이름과 겹쳐 적용하지 못했습니다`);
+    }
   }
   return out;
 }
 
-// 컬럼 rename 이 이름 충돌로 빠진 테이블은 값 대응이 어긋나므로 그 테이블의 모든 문장(FK 삭제·추가, 테이블 rename,
+// rename 이 이름 충돌로 빠진 테이블은 값 대응이 어긋나므로 그 테이블의 모든 문장(FK 삭제·추가, 테이블 rename·생성·삭제,
 // ALTER, 파티션)을 실행하지 않는 수동 확인 문장으로 바꾼다. 그 테이블 문장이 하나도 없으면 안내 문장 하나를 만든다
-function guardConflicts(stmts: Statement[], conflicts: Map<string, string[]>): Statement[] {
+function guardConflicts(stmts: Statement[], conflicts: Map<string, Conflict>): Statement[] {
   if (!conflicts.size) return stmts;
-  const reason = (table: string) => `${table}: 컬럼 rename 이름 충돌 — 값 대응을 확인해 직접 작성하세요`;
+  const objectsOf = (st: Statement) => (st.kind === 'table' ? st.related ?? [st.object] : []);
   const guarded = stmts.map((st) => {
-    const notes = st.kind === 'table' ? conflicts.get(st.object) : undefined;
-    if (!notes || st.comment) return st;
-    return { ...st, ...manualBody(reason(st.object), st.sql, [...(st.notes ?? []), ...notes]) };
+    const hits = objectsOf(st).map((n) => conflicts.get(n)).filter((c): c is Conflict => c !== undefined);
+    if (!hits.length || st.comment) return st;
+    const notes = [...new Set(hits.flatMap((c) => c.notes))];
+    return { ...st, ...manualBody(hits[0].reason, st.sql, [...(st.notes ?? []), ...notes]) };
   });
-  const covered = new Set(stmts.filter((st) => st.kind === 'table').map((st) => st.object));
-  const extra = [...conflicts].filter(([name]) => !covered.has(name)).map(([name, notes]): Statement => (
-    { object: name, kind: 'table', op: 'modify', ...commentBody(`-- [수동 확인 필요] ${reason(name)}`), notes }
+  const covered = new Set(stmts.flatMap(objectsOf));
+  const extra = [...conflicts].filter(([name]) => !covered.has(name)).map(([name, c]): Statement => (
+    { object: name, kind: 'table', op: 'modify', ...commentBody(`-- [수동 확인 필요] ${c.reason}`), notes: c.notes }
   ));
   return [...guarded, ...extra];
 }

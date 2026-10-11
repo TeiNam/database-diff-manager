@@ -1,0 +1,4 @@
+[
+  { "kind": "table", "from": "coupon", "to": "voucher" },
+  { "kind": "table", "from": "voucher", "to": "coupon" }
+]

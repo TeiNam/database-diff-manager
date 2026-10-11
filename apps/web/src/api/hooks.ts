@@ -106,6 +106,7 @@ export function useUpload() {
     onSuccess: () => {
       client.invalidateQueries({ queryKey: queryKeys.tree });
       client.invalidateQueries({ queryKey: ['versions'] });
+      client.invalidateQueries({ queryKey: ['object-history'] }); // 새 버전으로 객체 리비전이 늘어난다
     },
   });
 }

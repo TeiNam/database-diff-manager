@@ -45,7 +45,8 @@ function parseMeta(raw: string | undefined): FileMeta[] {
 
 export function uploadRoutes(app: FastifyInstance, ctx: AppContext): void {
   // 파일 크기는 multipart limits(파일당 20MB)로 제한한다. JSON용 기본 bodyLimit(1MB)이 업로드에 걸리지 않도록 라우트 한도를 넓힌다
-  app.post('/', { preHandler: requireEditor, bodyLimit: UPLOAD_BODY_LIMIT }, async (req) => {
+  // 권한은 본문을 읽기 전(onRequest)에 확인한다. 익명 요청이 큰 본문을 보내 파싱까지 가지 않도록
+  app.post('/', { onRequest: requireEditor, bodyLimit: UPLOAD_BODY_LIMIT }, async (req) => {
     if (!req.isMultipart()) throw new AppError(400, 'multipart/form-data 요청이어야 합니다');
     const files = new Map<string, Buffer>();
     let metaRaw: string | undefined;

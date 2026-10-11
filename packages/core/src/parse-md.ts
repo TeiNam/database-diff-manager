@@ -9,7 +9,8 @@ import { parseCreateView } from './parse-view';
 const NO_DEFAULT_TYPES = /^((tiny|medium|long)?(blob|text)|geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geomcollection|geometrycollection)\b/i;
 const VIEW_HEADER = '|Table type|Charset|';
 const MD_OPTION_KEYS = ['ENGINE', 'COLLATE', 'COMMENT'];
-const TABLE_LIST_RE = /^\s*- \[(\S+) \(.*\)\]\(#(.*)\)\s*$/;
+// '- [이름 (코멘트)](#앵커)'. 이름에 공백이 있을 수 있어 앵커(소문자 이름)와 맞는 위치에서 나눈다
+const TABLE_LIST_RE = /^\s*- \[(.*)\]\(#(.*)\)\s*$/;
 const INDEX_RE = /^- \[(Normal|Unique|Fulltext|Spatial)\](.+?)\((.*)\)(?: WHERE .*)?$/;
 const INDEX_KINDS: Record<string, Index['kind']> = { Normal: 'INDEX', Unique: 'UNIQUE', Fulltext: 'FULLTEXT', Spatial: 'SPATIAL' };
 const FK_RE = /^- (\S+) FOREIGN KEY \((.*)\) Reference (.+?) ON DELETE (.+) ON UPDATE (.+)$/;
@@ -31,9 +32,11 @@ interface MdFormat {
   indexDetails: boolean;
   // 0.1.22+: 셀 안의 '|'를 '\\|'로 이스케이프한다. 판별 근거가 없어 indexDetails(0.1.19+)일 때만 이스케이프로 읽는다
   cellEscapes: boolean;
+  // 0.1.46+: 셀·인덱스·FK 줄의 '\\' '`' '*' '<' 앞과 '](' 의 '(' 앞에 백슬래시를 붙인다 (detectMarkdownEscapes)
+  markdownEscapes: boolean;
 }
 // 판별 전에는 이스케이프를 모르는 상태로 셀을 나눈다
-const PLAIN_FORMAT: MdFormat = { defaults: 'legacy', indexDetails: false, cellEscapes: false };
+const PLAIN_FORMAT: MdFormat = { defaults: 'legacy', indexDetails: false, cellEscapes: false, markdownEscapes: false };
 const ESCAPED_FORMAT: MdFormat = { ...PLAIN_FORMAT, cellEscapes: true };
 // 0.1.21+가 반드시 따옴표로 감싸는 타입 (문자열·날짜/시간). 이 타입의 맨몸 Default는 0.1.20 이하의 증거다
 const QUOTED_TYPE = /^((var)?char|(tiny|medium|long)?text|enum|set|date|datetime|time|timestamp)\b/i;
@@ -53,7 +56,8 @@ export function parseMdDump(text: string): ParsedDump {
   const realNames = new Map<string, string>(); // 앵커(소문자) → 원래 이름
   for (const l of lines) {
     const m = TABLE_LIST_RE.exec(l);
-    if (m) realNames.set(m[2], m[1]);
+    const name = m ? listedName(m[1], m[2]) : undefined;
+    if (m && name !== undefined) realNames.set(m[2], name);
   }
   const tables: Table[] = [];
   const views: View[] = [];
@@ -77,6 +81,15 @@ export function parseMdDump(text: string): ParsedDump {
     }
   }
   return { model: { name: (lines[0] ?? '').trim(), tables, views, routines: [], routinesUnknown: true }, warnings };
+}
+
+// '이름 (코멘트)' 에서 이름: 소문자로 바꾸면 앵커와 같아지는 ' (' 앞부분. 맞는 곳이 없으면 첫 ' (' 앞
+function listedName(text: string, anchor: string): string | undefined {
+  if (!text.endsWith(')')) return undefined;
+  const cuts = [...text.matchAll(/ \(/g)].map((m) => m.index);
+  if (!cuts.length) return undefined;
+  const hit = cuts.find((i) => text.slice(0, i).toLowerCase() === anchor);
+  return text.slice(0, hit ?? cuts[0]);
 }
 
 function sections(lines: string[]): Section[] {
@@ -109,7 +122,35 @@ function detectFormat(secs: Section[]): MdFormat {
   const isQuoted = !hasBareLiteral && hasQuotedDefault;
   const isV2 = isQuoted || defaults.some((d) => d === 'NULL' || d === "''");
   const indexDetails = isQuoted || hasDetailedIndex;
-  return { defaults: isQuoted ? 'quoted' : isV2 ? 'v2' : 'legacy', indexDetails, cellEscapes: indexDetails };
+  const markdownEscapes = indexDetails && detectMarkdownEscapes(secs, rows);
+  return { defaults: isQuoted ? 'quoted' : isV2 ? 'v2' : 'legacy', indexDetails, cellEscapes: indexDetails, markdownEscapes };
+}
+
+// 0.1.46+ 서식 문자 이스케이프 판별. 백슬래시 연속(k개) 뒤 글자로 증거를 센다
+// - '`' '*' '<'(<br> 제외) 앞: k 가 홀수면 이스케이프됨(새 형식), 짝수(0 포함)면 맨몸(옛 형식)
+// - 그 밖의 글자 앞: 새 형식은 백슬래시를 늘 둘씩 내므로 홀수 k 는 옛 형식의 증거 ('|' '(' 와 칸 끝은 두 형식 모두 나올 수 있어 뺀다)
+// - 따옴표 Default 는 td-export 가 SQL 처럼 '\\' 를 '\\\\' 로 써 둔 값이라, 새 형식이면 4의 배수로 늘어난다
+//   (k ≡ 2 mod 4 는 옛 형식. 단 '\\n' 등 제어 문자 이스케이프 앞은 새 형식의 줄바꿈일 수 있어 뺀다)
+// 새 형식 증거가 있고 옛 형식 증거가 없을 때만 새 형식으로 읽는다 (근거가 없으면 기존 해석 유지)
+function detectMarkdownEscapes(secs: Section[], columnRows: string[][]): boolean {
+  let fresh = 0;
+  let old = 0;
+  const scan = (text: string, isQuotedLiteral: boolean) => {
+    for (const m of text.matchAll(/(\\*)([\s\S]?)/g)) {
+      const k = m[1].length;
+      const next = m[2];
+      if (next === '`' || next === '*' || (next === '<' && !text.startsWith('br>', m.index + k + 1))) {
+        if (k % 2) fresh++;
+        else old++;
+      } else if (k === 0 || next === '' || next === '|' || next === '(') continue;
+      else if (k % 2) old++;
+      else if (isQuotedLiteral && k % 4 === 0) fresh++;
+      else if (isQuotedLiteral && !/[nr0Z]/.test(next)) old++;
+    }
+  };
+  for (const row of columnRows) row.forEach((cell, i) => scan(cell, i === 3 && cell.startsWith("'")));
+  for (const sec of secs) for (const line of [...listAfter(sec.body, '**Index**'), ...listAfter(sec.body, '**Constraint**')]) scan(line, false);
+  return fresh > 0 && old === 0;
 }
 
 // 0.1.21+라면 따옴표로 감쌌을 Default (표현식 Default·생성 컬럼은 따옴표 없이 나오므로 제외)
@@ -144,13 +185,14 @@ function parseSection(name: string, body: string[], format: MdFormat): Table | V
     ? [{ name: 'PRIMARY', kind: 'PRIMARY', parts: pk.map((column) => ({ column, desc: false })), invisible: false, unknown: ['partOrder', 'partDetails', 'using', 'comment', 'invisible'] }]
     : [];
   const columnNames = new Set(columns.map((c) => c.name));
-  indexes.push(...listAfter(body, '**Index**').map((l) => mdIndex(l, format, columnNames)));
+  const listLines = (marker: string) => listAfter(body, marker).map((l) => (format.markdownEscapes ? unescapeMarkdown(l) : l));
+  indexes.push(...listLines('**Index**').map((l) => mdIndex(l, format, columnNames)));
   return {
     kind: 'table',
     name,
     columns,
     indexes,
-    foreignKeys: mergeForeignKeys(listAfter(body, '**Constraint**').map(mdForeignKey)),
+    foreignKeys: mergeForeignKeys(listLines('**Constraint**').map(mdForeignKey)),
     checks: [],
     options: [
       ...(engine ? [{ key: 'ENGINE', value: engine }] : []),
@@ -174,8 +216,31 @@ function rowsAfter(body: string[], header: string, n: number, format: MdFormat):
     else if (raw.length > 0 && line.trim() !== '' && !line.startsWith('**') && !line.startsWith('- ')) raw[raw.length - 1] += `\n${line}`;
     else break;
   }
-  return raw.map((l) => cells(l, n, format.cellEscapes));
+  return raw.map((l) => (format.markdownEscapes ? markdownCells(l) : cells(l, n, format.cellEscapes)));
 }
+
+// 0.1.46+ 행: 백슬래시는 다음 글자 하나를 글자 그대로 만들고, 이스케이프되지 않은 '|' 만 칸 구분자다. '<br>' 은 줄바꿈
+function markdownCells(line: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  const body = line.replace(/^\|/, '');
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === '\\' && i + 1 < body.length) cur += body[++i];
+    else if (ch === '|') {
+      out.push(cur);
+      cur = '';
+    } else if (body.startsWith('<br>', i)) {
+      cur += '\n';
+      i += 3;
+    } else cur += ch;
+  }
+  if (cur.trim() !== '') out.push(cur);
+  return out;
+}
+
+// 0.1.46+ 인덱스·FK 줄: 셀과 같은 규칙으로 이스케이프를 푼다 (줄 단위라 '|' 는 구분자가 아니다)
+const unescapeMarkdown = (line: string): string => line.replace(/\\([\s\S])/g, '$1');
 
 // td-export 0.1.22+는 셀 안의 '|'를 '\\|'로, 줄바꿈을 '<br>'로 이스케이프한다 (백슬래시는 이스케이프하지 않는다).
 // 그 이전은 '|'를 이스케이프하지 않으므로 넘친 셀은 마지막 열로 합친다 ('\\'로 끝나는 셀도 그대로 둔다)
@@ -196,7 +261,9 @@ function listAfter(body: string[], marker: string): string[] {
 }
 
 function mdColumn(c: string[], format: MdFormat): { col: Column; isPk: boolean } {
-  const [name, type, nullable, def = '', , , key, extra = '', comment = ''] = c;
+  const [name, type, nullable, def = '', , , key, rawExtra = '', comment = ''] = c;
+  // Extra 칸 = information_schema EXTRA 속성 + ' ' + 생성식. 속성 토큰만 보고 판단한다 (생성식 안의 'invisible' 등 오인 방지)
+  const extra = extraAttributes(rawExtra);
   const ex = extra.toLowerCase();
   const unknown: Column['unknown'] = ['charset', 'collation', 'srid'];
   const col: Column = {
@@ -220,6 +287,19 @@ function mdColumn(c: string[], format: MdFormat): { col: Column; isPk: boolean }
   }
   if (comment) col.comment = comment;
   return { col, isPk: key === 'PRI' };
+}
+
+// EXTRA 속성 토큰(auto_increment, DEFAULT_GENERATED, on update …, VIRTUAL/STORED GENERATED, INVISIBLE)만 앞에서부터 떼어 낸다
+const EXTRA_TOKEN = /^\s*(auto_increment|default_generated|on update \S+|(?:virtual|stored) generated|invisible)(?=\s|$)/i;
+function extraAttributes(extra: string): string {
+  const tokens: string[] = [];
+  let rest = extra;
+  for (let m = EXTRA_TOKEN.exec(rest); m; m = EXTRA_TOKEN.exec(rest)) {
+    tokens.push(m[1]);
+    rest = rest.slice(m[0].length);
+  }
+  // 알 수 없는 형식(토큰 없이 시작)은 예전처럼 칸 전체로 판단한다
+  return tokens.length ? tokens.join(' ') : extra;
 }
 
 // 기본값이 없음이 확실한 컬럼 (text/blob/geometry, auto_increment)

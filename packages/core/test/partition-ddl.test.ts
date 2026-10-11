@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { listPartitionStatements, partitionStatements } from '../src/partition-ddl';
+import { listPartitionBodies, listPartitionStatements, partitionStatements } from '../src/partition-ddl';
 import type { TableDiff } from '../src/diff';
 import type { Partitioning } from '../src/model';
 
@@ -26,10 +26,23 @@ describe('listPartitionStatements', () => {
     ]);
   });
 
-  it('중간 삭제는 DROP PARTITION', () => {
-    expect(listPartitionStatements('`t`', [P('p1'), P('p2'), P('p3')], [P('p1'), P('p3')])).toEqual([
-      'ALTER TABLE `t` DROP PARTITION `p2`',
+  it('RANGE 중간 삭제는 다음 파티션과 합쳐(REORGANIZE) 데이터를 보존한다', () => {
+    expect(listPartitionStatements('`t`', [P('p1'), P('p2'), P('p3'), P('p4')], [P('p1'), P('p4')])).toEqual([
+      'ALTER TABLE `t` REORGANIZE PARTITION `p2`, `p3`, `p4` INTO (\n PARTITION `p4` VALUES LESS THAN (4))',
     ]);
+  });
+
+  it('앞쪽 보관기간 정리는 안내 없이 DROP, 뒤쪽·LIST 삭제는 데이터 손실 안내를 붙인 DROP', () => {
+    expect(listPartitionBodies('`t`', [P('p1'), P('p2'), P('p3')], [P('p2'), P('p3')])).toEqual([
+      { sql: 'ALTER TABLE `t` DROP PARTITION `p1`' },
+    ]);
+    const [tail] = listPartitionBodies('`t`', [P('p1'), P('p2'), P('p3')], [P('p1'), P('p2')]);
+    expect(tail.sql).toBe('ALTER TABLE `t` DROP PARTITION `p3`');
+    expect(tail.notes?.[0]).toMatch(/^\[데이터 확인\] p3/);
+    const L = (name: string) => ({ name, def: `VALUES IN (${name.slice(1)})` });
+    const [list] = listPartitionBodies('`t`', [L('p1'), L('p2'), L('p3')], [L('p1'), L('p3')], false);
+    expect(list.sql).toBe('ALTER TABLE `t` DROP PARTITION `p2`');
+    expect(list.notes?.[0]).toMatch(/^\[데이터 확인\] p2/);
   });
 
   it('중간 RANGE 파티션의 경계가 바뀌면 뒤쪽 파티션까지 묶어 REORGANIZE', () => {

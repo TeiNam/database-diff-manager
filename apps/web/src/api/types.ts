@@ -83,7 +83,8 @@ export interface DiffResponse {
 
 // diff 에 적용된 rename 의 출처: DMS 전환 매핑 또는 화면에서 넣은 수동 매핑. 출처가 없으면 수동으로 본다
 export type RenameSource = 'dms' | 'manual';
-export type SourcedRename = RenameMapping & { source?: RenameSource };
+// reversed: 역쌍(target, base)에 저장된 수동 매핑을 뒤집어 적용한 것 (이 쌍에는 저장되어 있지 않다)
+export type SourcedRename = RenameMapping & { source?: RenameSource; reversed?: boolean };
 
 export interface UploadMeta {
   filename: string;

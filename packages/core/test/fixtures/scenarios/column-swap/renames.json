@@ -1,0 +1,4 @@
+[
+  { "kind": "column", "table": "member", "from": "first_name", "to": "last_name" },
+  { "kind": "column", "table": "member", "from": "last_name", "to": "first_name" }
+]

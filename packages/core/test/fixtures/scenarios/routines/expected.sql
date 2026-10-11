@@ -54,4 +54,5 @@ DELIMITER ;
 SET SQL_MODE = @OLD_SQL_MODE;
 
 -- [+] VIEW order_net
+-- DEFINER 없이 생성합니다 — 실행한 사용자가 DEFINER 가 됩니다
 CREATE OR REPLACE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `order_net` AS select `orders`.`id` AS `id`,`net`(`orders`.`amount`) AS `net` from `orders`;

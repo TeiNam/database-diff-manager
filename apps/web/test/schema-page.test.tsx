@@ -113,4 +113,25 @@ describe('SchemaPage', () => {
     await waitFor(() => expect(calls.some((c) => c.url === '/api/diff/renames')).toBe(true));
     expect(JSON.parse(String(calls.find((c) => c.url === '/api/diff/renames')!.init.body)).renames).toEqual([]);
   });
+
+  it('역쌍에서 뒤집어 온 수동 rename 은 해제 버튼 없이 역방향으로 표시하고, 후보 처리 시 이 쌍에 함께 저장한다 (dba)', async () => {
+    const reversed = { kind: 'column', table: 'orders', from: 'x', to: 'y', source: 'manual', reversed: true };
+    const calls = mockApi({
+      ...DBA,
+      '/api/schemas/7/versions': [V(12, 2), V(11, 1)],
+      '/api/diff?base=11&target=12': { ...response(), renames: [reversed] },
+      'PUT /api/diff/renames': () => response(),
+    });
+    renderWithProviders(<SchemaPage />, { route: `${ROUTE}?base=11&target=12&tab=summary`, path: '/db/:dbId/schema/:schemaId' });
+    const applied = await screen.findByRole('region', { name: '적용된 이름 변경' });
+    const candidates = screen.getByRole('region', { name: '이름 변경 후보' });
+    await within(candidates).findByRole('button', { name: '이름 변경으로 처리' });
+    expect(applied).toHaveTextContent(/수동 · 역방향\s*orders\.x → y/);
+    expect(within(applied).queryByRole('button', { name: '해제' })).not.toBeInTheDocument();
+    await userEvent.setup().click(within(candidates).getByRole('button', { name: '이름 변경으로 처리' }));
+    await waitFor(() => expect(calls.some((c) => c.url === '/api/diff/renames')).toBe(true));
+    expect(JSON.parse(String(calls.find((c) => c.url === '/api/diff/renames')!.init.body)).renames).toEqual([
+      { kind: 'column', table: 'orders', from: 'x', to: 'y' }, { kind: 'table', from: 'members', to: 'member' },
+    ]);
+  });
 });
