@@ -18,6 +18,7 @@ A team web tool for managing MySQL schema definitions exported with [td-export](
 ## Features
 
 - **Versioning**: upload definitions per Database (a physical engine instance) → Schema. An upload identical to the latest version does not create a new version.
+- **Apply ALTER scripts**: paste or upload an ALTER script against a stored SQL version to create the next version without re-exporting (columns, indexes, foreign keys, table options, CREATE/DROP/RENAME TABLE, routines; results are checked against real MySQL 8.0/8.4 by `npm run test:mysql`). Scope and limits: [Apply ALTER scripts](#apply-alter-scripts).
 - **Comparison**: summary, per-object diff (SQL split/unified and a spreadsheet-like grid), and a tree that can filter to changed objects only.
 - **DDL generation**: ALTER/CREATE/DROP for tables, columns, indexes, foreign keys, views, partitions, and stored functions/procedures, plus the reverse (rollback) direction. Renames are mapped in the UI; swaps and chains (a↔b, a→b→c, replacing a table with another) become one `RENAME TABLE` statement or `RENAME COLUMN` clauses in one ALTER, and manual renames saved for one direction are inverted for the reverse diff.
 - **DB migration mapping**: upload an AWS DMS table-mapping JSON for an As-Is → To-Be Schema pair. The Migration (전환) tab shows table and column correspondence with a status for each, and the same mapping is applied as renames to the object diff and DDL. Manual rename mappings still win for the same object.
@@ -36,6 +37,23 @@ A team web tool for managing MySQL schema definitions exported with [td-export](
 | DMS mapping | AWS DMS table-mapping JSON: `selection` include/exclude (`%` wildcard), `transformation` rename of schema/table/column, and `remove-column`. Other actions are listed as warnings and not applied. Up to 20,000 rules, 20MB |
 
 See [table-define-exporter](https://github.com/TeiNam/table-define-exporter) for how to run td-export.
+
+## Apply ALTER scripts
+
+To make a few schema changes without applying them to a real database and re-exporting with td-export, apply an ALTER script to a stored version. An admin or dba opens a Schema's version history, clicks **Apply ALTER** (ALTER 적용), chooses a base version, and picks a `.sql` file or pastes the script. **Preview** (미리보기) shows the number of applied statements and the objects that change, or the failed statement with its number, line, and reason. **Save** (저장) creates the next version, marked `ALTER 적용 (기준 vN)` in the history; the badge opens the script. Table, column, and index renames in the script are saved as rename mappings between the two versions.
+
+`@tdm/core` applies the script to the stored schema model, following how MySQL 8.0/8.4 handles the same statements (type and default normalization, automatic index and constraint names, cascading changes). The server needs no MySQL, and the tool never executes DDL. The dialog also asks for the Schema's default character set and collation (`utf8mb4` / `utf8mb4_0900_ai_ci` at first, then the value of the last ALTER apply), because a dump does not record them and MySQL uses them for a `CREATE TABLE` without a character set and for functions that return strings.
+
+| Item | Details |
+|---|---|
+| Statements | `ALTER TABLE` (columns, indexes, primary and foreign keys, table options, `RENAME`), `CREATE INDEX`, `DROP INDEX`, `CREATE`/`DROP`/`RENAME TABLE`, `CREATE`/`DROP FUNCTION` and `PROCEDURE`, `DROP VIEW`. `SET FOREIGN_KEY_CHECKS` and `SET SQL_MODE` take effect; `SET NAMES`, other `SET` statements, comments, and a `USE` of the current Schema are ignored. Up to 1,000,000 characters per script |
+| Base version | SQL-sourced versions only: an uploaded td-export `.sql`, or a version created by an earlier ALTER apply. `.md` versions are refused because their model is partial, and so are versions stored by an older parser (stale) — use a version re-uploaded from the same dump instead |
+| InnoDB only | `CREATE TABLE` or `ALTER TABLE` with another `ENGINE`, and changes to a table that uses another engine, are rejected. `DROP TABLE` and `RENAME TABLE` are accepted |
+| Out of scope | `CREATE`/`ALTER VIEW` (`DROP VIEW` works), adding `CHECK` constraints, generated columns, expression defaults, partition clauses, `CONVERT TO CHARACTER SET` and table-level `CHARACTER SET`/`COLLATE`, type changes of foreign-key columns, data statements (`INSERT`, `UPDATE`, …), triggers, events, and names qualified with another Schema. The tool does not guess: it rejects the statement with the reason and a hint to re-export with td-export |
+| Foreign key auto indexes | A dump does not mark the index MySQL creates automatically for a foreign key. The tool infers it from index names (all other indexes count as user-created) and rejects, with the same re-export hint, a statement whose result depends on an index it cannot classify (some `ADD`/`DROP FOREIGN KEY`, index, and `DROP COLUMN` forms) |
+| MySQL checks | Not every MySQL check is reproduced (key length and row size limits, for example), so a script this tool accepts can still be rejected by a real database. Results are compared with real MySQL 8.0/8.4 by `npm run test:mysql` |
+
+The design document lists every rule and rejected statement: [docs/superpowers/specs/2026-10-13-alter-apply-design.md](docs/superpowers/specs/2026-10-13-alter-apply-design.md) (Korean).
 
 ## Run with Docker
 
@@ -81,7 +99,7 @@ The command refuses to overwrite an existing file. To restore, stop the server, 
 |---|---|---|---|
 | Browse, compare, copy/download DDL | ✓ | ✓ | ✓ |
 | Save rename mappings (affects everyone's diff results) | ✓ | ✓ | — |
-| Upload; create, edit, delete Databases; delete versions and Schemas | ✓ | ✓ | — |
+| Upload; apply ALTER scripts; create, edit, delete Databases; delete versions and Schemas | ✓ | ✓ | — |
 | Upload or delete DMS migration mappings | ✓ | ✓ | — |
 | Manage accounts | ✓ | — | — |
 
@@ -105,7 +123,7 @@ npm run dev:server   # API (127.0.0.1:3000, HTTP dev cookies)
 npm run dev:web      # Vite (http://localhost:5173, proxies /api to 3000)
 npm test             # all tests
 npm run typecheck
-npm run test:mysql -w @tdm/core   # applies generated DDL on MySQL 8.0/8.4 containers (requires Docker)
+npm run test:mysql -w @tdm/core   # applies generated DDL and ALTER-apply scripts on MySQL 8.0/8.4 containers (requires Docker)
                                   #   (override ports with MYSQL80_PORT / MYSQL84_PORT, default 33080 / 33084)
 ```
 
