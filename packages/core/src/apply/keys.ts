@@ -164,9 +164,9 @@ export function addIndex(t: Table, item: IndexItem): Table {
   return { ...t, indexes: [...t.indexes, { ...index, name }] };
 }
 
-// InnoDB 는 USING HASH 를 BTREE 로 만들고 SHOW CREATE 에서 지운다 (USING BTREE 는 남긴다 — MySQL 8.0 실측)
+// InnoDB 는 USING HASH 를 BTREE 로 만들고 SHOW CREATE 에서 지운다 (USING BTREE 는 남긴다 — MySQL 8.0 실측). ENGINE 옵션이 없는 테이블은 InnoDB 로 본다 (assertInnoDbTable 과 같다)
 function withoutInnodbHash(t: Table, index: Index): Index {
-  if (index.using !== 'HASH' || t.options.find((o) => o.key === 'ENGINE')?.value !== 'InnoDB') return index;
+  if (index.using !== 'HASH' || (t.options.find((o) => o.key === 'ENGINE')?.value ?? 'InnoDB') !== 'InnoDB') return index;
   const next: Index = { ...index };
   delete next.using;
   return next;

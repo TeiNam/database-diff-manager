@@ -39,6 +39,13 @@ describe('addIndex', () => {
     expect(addIndex(table(st, 'child'), { ...hash, index: { ...hash.index, using: 'BTREE' } }).indexes.at(-1)!.using).toBe('BTREE');
   });
 
+  it('ENGINE 옵션이 없는 테이블도 InnoDB 로 보아 USING HASH 를 지운다 (options.ts 와 같은 판단)', () => {
+    const st = fresh();
+    const hash = idx('h', 'INDEX', ['name']);
+    const noEngine = { ...table(st, 'child'), options: table(st, 'child').options.filter((o) => o.key !== 'ENGINE') };
+    expect(addIndex(noEngine, { ...hash, index: { ...hash.index, using: 'HASH' } }).indexes.at(-1)!.using).toBeUndefined();
+  });
+
   it('이름 없는 UNIQUE 는 첫 컬럼 이름, PRIMARY KEY 는 컬럼을 NOT NULL 로 만든다', () => {
     const st = fresh();
     expect(addIndex(table(st, 'child'), idx('', 'UNIQUE', ['name'], false)).indexes.at(-1)).toMatchObject({ name: 'name', kind: 'UNIQUE' });
