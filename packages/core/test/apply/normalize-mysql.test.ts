@@ -137,6 +137,19 @@ describe('문자셋 (SHOW CREATE 표기)', () => {
     expect(() => tableCharset([{ key: 'COLLATE', value: name }], T)).toThrow(ApplyFailure);
   });
 
+  // 콜레이션 이름은 SHOW CREATE 에 따옴표 없이 찍힌다. 접두어(문자셋)만 보면 'utf8mb4_bin, DROP COLUMN b' 가 DDL 로 새어 나간다 (MySQL 8.0.46: 1273)
+  it.each([['utf8mb4_bin, DROP COLUMN b'], ['utf8mb4_bin;'], ['utf8mb4_bin '], ['utf8mb4 bin'], ['utf8mb4_`bin`'], ["utf8mb4_bin'"]])('콜레이션 이름 전체가 \\w+ 가 아니면 거부 (1273): %s', (name) => {
+    expect(() => canonicalCollation(name)).toThrow(/\(MySQL 1273\)/);
+    expect(() => columnCharset('varchar(10)', { collation: name }, T)).toThrow(/\(MySQL 1273\)/);
+    expect(() => tableCharset([{ key: 'COLLATE', value: name }], T)).toThrow(/\(MySQL 1273\)/);
+  });
+
+  it('canonicalCollation: 올바른 이름은 소문자로, utf8_ 는 utf8mb3_ 로', () => {
+    expect(canonicalCollation('UTF8MB4_0900_AI_CI')).toBe('utf8mb4_0900_ai_ci');
+    expect(canonicalCollation('utf8_general_ci')).toBe('utf8mb3_general_ci');
+    expect(canonicalCollation('latin1_bin')).toBe('latin1_bin');
+  });
+
   it('tableCharset: 옵션의 문자셋·콜레이션, 없으면 기본값', () => {
     expect(tableCharset([{ key: 'DEFAULT CHARSET', value: 'latin1' }], T)).toEqual({ charset: 'latin1', collation: 'latin1_swedish_ci' });
     expect(tableCharset([{ key: 'DEFAULT CHARSET', value: 'utf8mb4' }, { key: 'COLLATE', value: 'utf8mb4_bin' }], T)).toEqual({ charset: 'utf8mb4', collation: 'utf8mb4_bin' });

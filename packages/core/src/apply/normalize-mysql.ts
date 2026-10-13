@@ -106,8 +106,10 @@ export function canonicalCharset(name: string): string {
   return PRIMARY_COLLATION.has(cs) ? cs : fail(`알 수 없는 문자셋입니다: ${name} (MySQL 1115)`);
 }
 
+// 콜레이션 이름은 SHOW CREATE 에 따옴표 없이 찍히므로 이름 전체가 \w+ 여야 한다 (charsetOfCollation 은 접두어만 본다)
 export function canonicalCollation(name: string): string {
   const coll = name.toLowerCase().replace(/^utf8_/, 'utf8mb3_');
+  if (!/^\w+$/.test(coll)) fail(`알 수 없는 콜레이션입니다: ${name} (MySQL 1273)`);
   charsetOfCollation(coll);
   return coll;
 }
