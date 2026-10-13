@@ -50,6 +50,18 @@ describe('AlterDialog', () => {
     await user.type(screen.getByLabelText('ALTER 스크립트'), ' ');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
+
+  it('입력 검증 실패(zod)는 첫 번째 이유도 함께 보여 준다', async () => {
+    const details = [{ path: 'defaults.charset', message: '문자셋·콜레이션 이름은 영문·숫자·_ 만 쓸 수 있습니다' }, { path: 'script', message: '두 번째' }];
+    mockApi({ 'POST /api/versions/1/alter': () => new Response(JSON.stringify({ error: '입력값이 올바르지 않습니다', details }), { status: 400, headers: { 'content-type': 'application/json' } }) });
+    renderWithProviders(<AlterDialog versions={[version(1, 1, 'sql')]} onClose={() => undefined} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('ALTER 스크립트'), 'ALTER TABLE member ADD x INT;');
+    await user.click(screen.getByRole('button', { name: '미리보기' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('입력값이 올바르지 않습니다: 문자셋·콜레이션 이름은 영문·숫자·_ 만 쓸 수 있습니다');
+    expect(alert).not.toHaveTextContent('두 번째');
+  });
 });
 
 describe('HistoryPage — ALTER 적용', () => {
@@ -178,6 +190,18 @@ describe('AlterDialog — 파일 끌어다 놓기·읽기 실패', () => {
     expect(screen.getByLabelText('ALTER 스크립트')).toHaveValue('ALTER TABLE keep ADD x INT;');
     await user.type(screen.getByLabelText('ALTER 스크립트'), ' ');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('입력 검증 실패(zod)는 첫 번째 이유도 함께 보여 준다', async () => {
+    const details = [{ path: 'defaults.charset', message: '문자셋·콜레이션 이름은 영문·숫자·_ 만 쓸 수 있습니다' }, { path: 'script', message: '두 번째' }];
+    mockApi({ 'POST /api/versions/1/alter': () => new Response(JSON.stringify({ error: '입력값이 올바르지 않습니다', details }), { status: 400, headers: { 'content-type': 'application/json' } }) });
+    renderWithProviders(<AlterDialog versions={[version(1, 1, 'sql')]} onClose={() => undefined} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('ALTER 스크립트'), 'ALTER TABLE member ADD x INT;');
+    await user.click(screen.getByRole('button', { name: '미리보기' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('입력값이 올바르지 않습니다: 문자셋·콜레이션 이름은 영문·숫자·_ 만 쓸 수 있습니다');
+    expect(alert).not.toHaveTextContent('두 번째');
   });
 });
 

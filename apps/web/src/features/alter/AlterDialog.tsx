@@ -1,4 +1,5 @@
 import { useRef, useState, type DragEvent } from 'react';
+import { ApiError } from '../../api/client';
 import { useApplyAlter } from '../../api/hooks';
 import type { AlterChange, AlterRequest, AlterResponse, VersionSummary } from '../../api/types';
 import { Icon } from '../../components/Icon';
@@ -89,7 +90,7 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
           </ul>
         )}
         {saved && <p role="status" className={s.ok}>{saved.status === 'ok' ? `v${saved.versionNo} 생성` : `v${saved.versionNo}와 내용이 같습니다`}</p>}
-        {alter.error && <p role="alert" className={s.warn}>{alter.error.message}</p>}
+        {alter.error && <p role="alert" className={s.warn}>{errorText(alter.error)}</p>}
         <footer className={s.foot}>
           <button type="button" className={s.btn} onClick={onClose}>닫기</button>
           <button type="button" className={s.btn} disabled={!ready} onClick={() => submit(true)}>미리보기</button>
@@ -98,6 +99,13 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
       </div>
     </div>
   );
+}
+
+// 입력 검증 실패(zod)는 서버가 '입력값이 올바르지 않습니다' 와 함께 이유 목록(details)을 준다 — 스크립트 길이·문자셋 이름처럼 왜 틀렸는지 알 수 있게 첫 이유를 붙인다.
+// 스크립트 적용 실패의 details 는 목록이 아니고, 메시지에 이미 이유가 있다
+function errorText(error: Error): string {
+  const first: unknown = error instanceof ApiError && Array.isArray(error.details) ? (error.details[0] as { message?: unknown } | undefined)?.message : undefined;
+  return typeof first === 'string' && first ? `${error.message}: ${first}` : error.message;
 }
 
 // .sql 파일을 고르거나 끌어다 놓는 상자. 파일을 읽는 일은 부모가 한다.
