@@ -398,7 +398,7 @@ function syncIndexOrigins(st: State, table: string, t: Table): void {
 
 // 다른 테이블 FK 가 참조하는 이 테이블 컬럼 이름도 따라 바뀐다 (MySQL 8.0)
 function renameReferencedColumns(st: State, table: string, renamed: ReadonlyMap<string, string>): void {
-  if (!renamed.size) return;
+  if (!renamed.size || !st.refTables.has(table)) return;
   const rename = (n: string) => renamed.get(n.toLowerCase()) ?? n;
   const refersTable = (f: { refTable: string; refSchema?: string }) => f.refTable === table && f.refSchema === undefined;
   st.model.tables = st.model.tables.map((x) => (x.name === table || !x.foreignKeys.some(refersTable) ? x : {

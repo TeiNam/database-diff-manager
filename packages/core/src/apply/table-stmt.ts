@@ -7,7 +7,7 @@ import { addKeys, checkSetNullFks, checkTable, columnKeyItems, enforcePrimaryKey
 import { splitList } from './lists';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, finalizeColumn, primaryCollation, tableCharset } from './normalize-mysql';
 import { innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
-import { appendTable, forgetOrigins, moveOrigins, nameTaken, needTable, objectName, objectNameList, removeTables, replaceTable, sameName, trackNew, type State } from './state';
+import { appendTable, forgetOrigins, moveOrigins, moveRefTable, nameTaken, needTable, objectName, objectNameList, removeTables, replaceTable, sameName, trackNew, type State } from './state';
 import { assertColumnCount, assertKeyCount } from './limits';
 import { fail, RE_EXPORT, type ConstraintItem } from './types';
 
@@ -30,7 +30,10 @@ export function renameTable(st: State, from: string, to: string): void {
     checks: checks.some((k, i) => k.name !== t.checks[i].name) ? sortChecks(checks) : checks,
   };
   replaceTable(st, from, renamed);
-  st.model.tables = withRefTableRenamed(st.model.tables, from, to);
+  if (st.refTables.has(from)) {
+    st.model.tables = withRefTableRenamed(st.model.tables, from, to);
+    moveRefTable(st, from, to);
+  }
   moveOrigins(st.origins, from, to);
 }
 
@@ -121,7 +124,7 @@ export function dropTable(st: State, c: Cursor): void {
   const ifExists = c.acceptWord('IF', 'EXISTS');
   const names = objectNameList(c, st);
   const targets = new Set(names.filter((n) => st.tableAt.has(n) || (ifExists ? false : fail(`테이블 \`${n}\` 이 없습니다 (MySQL 1051)`))));
-  if (st.fkChecks) {
+  if (st.fkChecks && [...targets].some((n) => st.refTables.has(n))) {
     for (const child of st.model.tables) {
       if (targets.has(child.name)) continue;
       const fk = child.foreignKeys.find((f) => f.refSchema === undefined && targets.has(f.refTable));

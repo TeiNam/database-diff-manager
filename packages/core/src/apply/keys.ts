@@ -469,7 +469,7 @@ export function checkTable(st: State, t: Table, renamed: ReadonlyMap<string, str
       if (!hasKey(refs)) fail(`\`${child.name}\` 의 FK \`${fk.name}\` 가 쓰는 인덱스를 지울 수 없습니다 (MySQL 1553)`);
     }
   };
-  for (const child of st.model.tables) if (child.foreignKeys.length && child.name !== t.name) checkChild(child);
+  if (st.refTables.has(t.name)) for (const child of st.model.tables) if (child.foreignKeys.length && child.name !== t.name) checkChild(child); // 아무 FK 도 참조하지 않으면 훑지 않는다
   checkChild(t);
 }
 

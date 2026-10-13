@@ -32,9 +32,11 @@ export interface State {
   // 테이블 이름 → st.model.tables 안의 자리. 이름 목록은 늘 정확하고 (테이블을 더하고 지우고 이름을 바꾸는 CREATE·DROP·RENAME TABLE 이 고친다),
   // 자리는 DROP TABLE 뒤에 어긋날 수 있어 tableIndex 가 확인한다. 테이블이 수만 개인 스크립트에서도 문장마다 모든 테이블을 훑어 이름을 찾지 않게 한다
   readonly tableAt: Map<string, number>;
-  // 스키마의 FK 이름(소문자) → 개수. FK 이름은 스키마 안에서 유일해야 해서 FK 를 더할 때마다 본다. 테이블을 바꾸는 replaceTable·appendTable·removeTables 가 고친다
-  // (st.model.tables 를 직접 다시 쓰는 곳 — FK 의 참조 테이블·컬럼 이름만 바꾸는 곳 — 은 FK 이름을 바꾸지 않는다)
+  // 스키마의 FK 이름(소문자) → 개수와 FK 가 참조하는 테이블 이름 → 그 FK 수 (다른 스키마를 참조하는 FK 는 세지 않는다). FK 이름은 스키마 안에서 유일해야 해서
+  // FK 를 더할 때마다 보고, 참조 수는 아무 FK 도 참조하지 않는 테이블에서 모든 테이블을 훑지 않으려고 본다. 테이블을 바꾸는 replaceTable·appendTable·removeTables 가 고치고,
+  // st.model.tables 를 직접 다시 쓰는 곳은 FK 이름을 바꾸지 않으며 참조 테이블 이름을 바꾸면 moveRefTable 을 부른다
   readonly fkNames: Map<string, number>;
+  readonly refTables: Map<string, number>;
   // 루틴 '<종류>:<이름 소문자>' (routineKey). CREATE·DROP FUNCTION·PROCEDURE 가 고친다
   readonly routineKeys: Set<string>;
 }
@@ -49,18 +51,30 @@ export function initialState(base: SchemaModel, schemaName: string, defaults: Ap
   model.tables.forEach((t, k) => {
     if (!tableAt.has(t.name)) tableAt.set(t.name, k); // 같은 이름이 둘이면 앞의 것 (find 와 같다)
   });
-  const st: State = { model, schemaName, defaults, fkChecks: true, sqlMode, saved: new Map(), origins, tableAt, fkNames: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
-  for (const t of model.tables) countFkNames(st, t, 1);
+  const st: State = { model, schemaName, defaults, fkChecks: true, sqlMode, saved: new Map(), origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
+  for (const t of model.tables) countForeignKeys(st, t, 1);
   return st;
 }
 
-function countFkNames(st: State, t: Table | undefined, delta: 1 | -1): void {
+function addCount(counts: Map<string, number>, key: string, delta: number): void {
+  const n = (counts.get(key) ?? 0) + delta;
+  if (n > 0) counts.set(key, n);
+  else counts.delete(key);
+}
+
+function countForeignKeys(st: State, t: Table | undefined, delta: 1 | -1): void {
   for (const f of t?.foreignKeys ?? []) {
-    const key = f.name.toLowerCase();
-    const n = (st.fkNames.get(key) ?? 0) + delta;
-    if (n > 0) st.fkNames.set(key, n);
-    else st.fkNames.delete(key);
+    addCount(st.fkNames, f.name.toLowerCase(), delta);
+    if (f.refSchema === undefined) addCount(st.refTables, f.refTable, delta);
   }
+}
+
+// 모든 FK 의 참조 테이블 이름을 from 에서 to 로 바꾼 뒤 (RENAME TABLE) 참조 수를 옮긴다
+export function moveRefTable(st: State, from: string, to: string): void {
+  const n = st.refTables.get(from);
+  if (n === undefined) return;
+  st.refTables.delete(from);
+  addCount(st.refTables, to, n);
 }
 
 // 테이블의 이름 추적을 시작한다 (fromBase: 기준 버전에 있던 테이블이면 지금 이름이 곧 기준 이름). 출처 표는 건드리지 않는다 — CREATE TABLE 은 addKeys 가 이미 적었다
@@ -120,8 +134,8 @@ export function replaceTable(st: State, name: string, next: Table): void {
   const at = tableIndex(st, name);
   if (at < 0) return;
   const tables = st.model.tables.slice();
-  countFkNames(st, tables[at], -1);
-  countFkNames(st, next, 1);
+  countForeignKeys(st, tables[at], -1);
+  countForeignKeys(st, next, 1);
   tables[at] = next;
   st.model.tables = tables;
   if (next.name === name) return;
@@ -133,12 +147,12 @@ export function replaceTable(st: State, name: string, next: Table): void {
 export function appendTable(st: State, t: Table): void {
   st.tableAt.set(t.name, st.model.tables.length);
   st.model.tables = [...st.model.tables, t];
-  countFkNames(st, t, 1);
+  countForeignKeys(st, t, 1);
 }
 
 // 테이블을 지운다 (DROP TABLE). 뒤의 테이블 자리는 tableIndex 가 찾을 때 고친다
 export function removeTables(st: State, names: ReadonlySet<string>): void {
-  for (const t of st.model.tables) if (names.has(t.name)) countFkNames(st, t, -1);
+  for (const t of st.model.tables) if (names.has(t.name)) countForeignKeys(st, t, -1);
   st.model.tables = st.model.tables.filter((t) => !names.has(t.name));
   for (const n of names) st.tableAt.delete(n);
 }
