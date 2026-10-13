@@ -9,7 +9,7 @@ import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
 import { assertAutoKeysKnown, assertTargetsKept, classifyFkIndexes, planAutoKeys, renameProvenance, shrunkIndexes, syncProvenance, withoutNames, type AutoKeyPlan } from './auto-index';
-import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, enforcePrimaryKeyNotNull, exprUses, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
+import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, enforcePrimaryKeyNotNull, exprUses, isExplicitNull, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
 import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { engineName, optionValue, parseCommonOption, setOption } from './options';
@@ -286,7 +286,7 @@ function assertEngineChangeAllowed(st: State, before: Table, options: readonly E
 // 이 문장의 컬럼 정의가 NULL 이나 DEFAULT NULL 을 쓴 컬럼의 (최종) 이름, 소문자 — PRIMARY KEY 에 있으면 1171 (enforcePrimaryKeyNotNull)
 function explicitNullColumns(clauses: readonly Clause[]): Set<string> {
   const specs = clauses.flatMap((x) => (x.k === 'add' || x.k === 'modify' ? [x.spec] : []));
-  return new Set(specs.filter((s) => s.nullable === true || s.default?.kind === 'null').map((s) => s.name.toLowerCase()));
+  return new Set(specs.filter(isExplicitNull).map((s) => s.name.toLowerCase()));
 }
 
 // 2) 기존 컬럼 변경 3) 컬럼 추가 4) 위치. 컬럼을 더하는 절과 FIRST·AFTER 를 준 MODIFY·CHANGE 는 절 순서대로 하나씩 목록에 넣는다 — MySQL 8.0.46·8.4.11 실측:

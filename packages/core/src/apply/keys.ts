@@ -148,6 +148,9 @@ function checkKeyParts(t: Table, index: Index): void {
   }
 }
 
+// 컬럼 정의가 NULL 이나 DEFAULT NULL 을 직접 썼는가 (PRIMARY KEY 에 들어가면 1171 — enforcePrimaryKeyNotNull)
+export const isExplicitNull = (s: ColumnSpec): boolean => s.nullable === true || s.default?.kind === 'null';
+
 // 문장 끝 검사: PRIMARY KEY 에 든 컬럼은 NOT NULL 이다 — `DEFAULT NULL` 은 없어지고 다른 기본값은 남는다 (MySQL 8.0.46·8.4.11 실측). 기존 PK 컬럼을 NOT NULL 없이 MODIFY·CHANGE 한 경우,
 // ADD PRIMARY KEY 로 새 키를 더한 경우, CREATE TABLE 의 PRIMARY KEY 가 모두 이 함수 하나로 처리된다 (키가 다 정해진 뒤에 부른다).
 // explicitNull: 이 문장의 컬럼 정의가 NULL 이나 DEFAULT NULL 을 명시한 컬럼의 (최종) 이름, 소문자. 그런 컬럼이 PRIMARY KEY 에 있으면 MySQL 은 1171 로 거부한다
@@ -236,16 +239,21 @@ function checkSetNull(t: Table, columns: readonly string[], fk: Pick<ForeignKey,
 
 const setNullOnNotNull = (column: string, fkName: string): string => `컬럼 \`${column}\` 은 NOT NULL 이라 FK \`${fkName}\` 의 SET NULL 을 쓸 수 없습니다 (MySQL 1830)`;
 
-// 문장 끝 검사: NULL 허용이던 컬럼이 이 문장에서 NOT NULL 이 되었는데 SET NULL FK 가 쓰면 1830 (MODIFY·CHANGE 가 NOT NULL 을 쓸 때, PRIMARY KEY 가 컬럼을 암묵적으로
-// NOT NULL 로 만들 때. MySQL 8.0.46·8.4.11 실측). 같은 문장에서 지운 FK 는 보지 않고, 새로 붙인 FK 는 addForeignKey 가 본다.
-// renamed: 이 문장에서 바뀐 컬럼 이름 (소문자 옛 이름 → 새 이름)
-export function checkNowNotNull(before: Table, t: Table, renamed: ReadonlyMap<string, string>): void {
-  const wasNullable = new Set(before.columns.filter((c) => c.nullable).map((c) => (renamed.get(c.name.toLowerCase()) ?? c.name).toLowerCase()));
+// 문장 끝 검사: SET NULL FK 의 컬럼이 NOT NULL 이면 1830 (MySQL 8.0.46·8.4.11 실측). 새로 붙인 FK 는 addForeignKey 가 붙일 때 보지만, PRIMARY KEY 가 컬럼을 암묵적으로
+// NOT NULL 로 만드는 것은 FK 를 붙인 뒤(`FOREIGN KEY (x) … SET NULL, PRIMARY KEY (x)`)에 정해지므로 키가 다 정해진 뒤 여기서 본다.
+// notNullBefore: 이 문장 앞에 이미 NOT NULL 이던 컬럼 (소문자, 이 문장에서 바뀐 이름) — 기준에 있는 상태는 다시 검사하지 않는다. CREATE TABLE 은 비워 둔다
+export function checkSetNullFks(t: Table, notNullBefore: ReadonlySet<string> = new Set()): void {
   for (const fk of t.foreignKeys) {
     if (fk.onDelete !== 'SET NULL' && fk.onUpdate !== 'SET NULL') continue;
-    const column = fk.columns.map((n) => findColumn(t, n)!).find((c) => !c.nullable && wasNullable.has(c.name.toLowerCase()));
+    const column = fk.columns.map((n) => findColumn(t, n)!).find((c) => !c.nullable && !notNullBefore.has(c.name.toLowerCase()));
     if (column) fail(setNullOnNotNull(column.name, fk.name));
   }
+}
+
+// ALTER TABLE 의 문장 끝 검사: 이 문장에서 NOT NULL 이 된 컬럼(MODIFY·CHANGE 의 NOT NULL, PRIMARY KEY 의 암묵적 NOT NULL)과 이 문장이 더한 컬럼을 본다.
+// 같은 문장에서 지운 FK 는 t 에 없으니 보지 않는다. renamed: 이 문장에서 바뀐 컬럼 이름 (소문자 옛 이름 → 새 이름)
+export function checkNowNotNull(before: Table, t: Table, renamed: ReadonlyMap<string, string>): void {
+  checkSetNullFks(t, new Set(before.columns.filter((c) => !c.nullable).map((c) => (renamed.get(c.name.toLowerCase()) ?? c.name).toLowerCase())));
 }
 
 // 부모 쪽 검사: 참조 컬럼이 있고, 타입·콜레이션이 맞고(3780), 참조 컬럼에 정확히 맞는 PRIMARY KEY·UNIQUE 가 있어야 한다 (8.4 6125).

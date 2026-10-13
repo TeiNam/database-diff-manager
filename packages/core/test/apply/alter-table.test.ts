@@ -218,6 +218,28 @@ describe('ALTER TABLE — SET NULL FK 컬럼은 NOT NULL 이 될 수 없다 (MyS
     rejected(script, '1830');
   });
 
+  // 이 문장이 더한 컬럼은 기준(before)에 없다. PRIMARY KEY 가 FK 보다 뒤에 오면 FK 를 붙일 때는 NULL 허용이라 문장 끝 검사가 잡아야 한다 (MySQL 8.0.46·8.4.11 실측: 순서와 상관없이 1830)
+  describe('이 문장이 더한 컬럼', () => {
+    const NOPK = 'CREATE TABLE nopk (k int unsigned);\n';
+    const FK = 'ADD FOREIGN KEY (x) REFERENCES parent (id) ON DELETE SET NULL';
+    it.each([
+      [`ALTER TABLE nopk ADD COLUMN x int unsigned, ${FK}, ADD PRIMARY KEY (x);`], // FK 가 먼저 — 예전에는 받아들였다
+      [`ALTER TABLE nopk ADD COLUMN x int unsigned, ADD PRIMARY KEY (x), ${FK};`], // PRIMARY KEY 가 먼저
+      [`ALTER TABLE nopk ADD COLUMN x int unsigned PRIMARY KEY, ${FK};`],
+      [`ALTER TABLE nopk ${FK}, ADD COLUMN x int unsigned PRIMARY KEY;`], // FK 절이 컬럼 절보다 앞
+      ['ALTER TABLE nopk ADD FOREIGN KEY (k) REFERENCES parent (id) ON DELETE SET NULL, ADD PRIMARY KEY (k);'], // 기존 컬럼
+      ['ALTER TABLE nopk ADD FOREIGN KEY (k) REFERENCES parent (id) ON UPDATE SET NULL, MODIFY k int unsigned PRIMARY KEY;'],
+      [`ALTER TABLE nopk ADD COLUMN x int unsigned NOT NULL, ${FK};`], // 직접 쓴 NOT NULL
+    ])('거부: %s', (script) => {
+      rejected(`${NOPK}${script}`, '1830');
+    });
+
+    it('PRIMARY KEY 가 없으면 받는다 (UNIQUE 는 컬럼을 NOT NULL 로 만들지 않는다)', () => {
+      expect(col(okKeys(`${NOPK}ALTER TABLE nopk ADD COLUMN x int unsigned, ${FK};`), 'nopk', 'x').nullable).toBe(true);
+      expect(col(okKeys(`${NOPK}ALTER TABLE nopk ADD COLUMN x int unsigned, ${FK}, ADD UNIQUE (x);`), 'nopk', 'x').nullable).toBe(true);
+    });
+  });
+
   it('그 FK 를 같은 문장에서 지우면 NOT NULL 로 바꿀 수 있고, SET NULL 이 아닌 FK·FK 없는 컬럼은 상관없다', () => {
     expect(col(okKeys('ALTER TABLE child DROP FOREIGN KEY child_ibfk_1, MODIFY pid int unsigned NOT NULL;'), 'child', 'pid').nullable).toBe(false);
     expect(col(okKeys('ALTER TABLE child MODIFY pid int unsigned NOT NULL, DROP FOREIGN KEY child_ibfk_1;'), 'child', 'pid').nullable).toBe(false);
