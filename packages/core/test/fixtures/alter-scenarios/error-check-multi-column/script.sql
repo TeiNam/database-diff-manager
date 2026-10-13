@@ -1,0 +1,1 @@
+ALTER TABLE chk_pair DROP COLUMN lo;

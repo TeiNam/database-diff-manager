@@ -33,7 +33,7 @@ describe('CREATE TABLE', () => {
     const t = tbl(r, 'coupon');
     expect(t.foreignKeys.map((f) => f.name)).toEqual(['coupon_ibfk_1', 'fk_cm']); // SHOW CREATE 는 FK 를 이름(소문자) 순으로 찍는다
     expect(t.indexes.map((i) => i.name)).toEqual(['PRIMARY', 'fk_cm', 'parent_id']);
-    expect(t.options.find((o) => o.key === 'COLLATE')!.value).toBe('latin1_swedish_ci');
+    expect(t.options).toEqual([{ key: 'ENGINE', value: 'InnoDB' }, { key: 'DEFAULT CHARSET', value: 'latin1' }]); // latin1 의 기본 콜레이션이라 COLLATE 옵션은 찍지 않는다 (MySQL 8.0.46·8.4.11 실측)
   });
 
   it('PRIMARY KEY 컬럼: 직접 쓴 NULL 은 1171 (컬럼 안 DEFAULT NULL PRIMARY KEY 만 1067), 안 쓰면 NOT NULL 이고 DEFAULT NULL 이 없다', () => {
@@ -59,6 +59,42 @@ describe('CREATE TABLE', () => {
     expect(apply('CREATE TABLE p (id INT) PARTITION BY HASH (id) PARTITIONS 2;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('파티션') } });
     expect(apply('CREATE TABLE d (a INT, A INT);')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1060') } });
     expect(apply('CREATE TABLE e (a INT,);')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('쉼표') } });
+  });
+});
+
+// MySQL 8.0.46·8.4.11 실측 (SHOW CREATE TABLE 의 DEFAULT CHARSET·COLLATE): utf8mb4 는 콜레이션을 늘 찍는다 (기본 utf8mb4_0900_ai_ci 도).
+// 그 밖의 문자셋은 콜레이션이 그 문자셋의 기본이면 COLLATE 를 찍지 않고, 다른 콜레이션이면 찍는다. 컬럼은 그 기본을 물려받는다
+describe('CREATE TABLE — 테이블 문자셋·콜레이션 옵션 표기', () => {
+  const charsetOptions = (tail: string, defaults?: { charset: string; collation: string }): string[] =>
+    tbl(ok(`CREATE TABLE cs (a VARCHAR(10), b TEXT) ${tail};`, defaults), 'cs').options.filter((o) => o.key === 'DEFAULT CHARSET' || o.key === 'COLLATE').map((o) => `${o.key}=${o.value}`);
+
+  it.each([
+    ['DEFAULT CHARSET=utf8', ['DEFAULT CHARSET=utf8mb3']],
+    ['CHARSET=utf8mb3', ['DEFAULT CHARSET=utf8mb3']],
+    ['DEFAULT CHARACTER SET = utf8 COLLATE = utf8_general_ci', ['DEFAULT CHARSET=utf8mb3']], // 기본 콜레이션을 직접 써도 찍지 않는다
+    ['DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci', ['DEFAULT CHARSET=utf8mb3', 'COLLATE=utf8mb3_unicode_ci']],
+    ['DEFAULT CHARSET=latin1', ['DEFAULT CHARSET=latin1']],
+    ['DEFAULT CHARSET=latin1 COLLATE=latin1_general_ci', ['DEFAULT CHARSET=latin1', 'COLLATE=latin1_general_ci']],
+    ['DEFAULT CHARSET=ascii', ['DEFAULT CHARSET=ascii']],
+    ['DEFAULT CHARSET=euckr', ['DEFAULT CHARSET=euckr']],
+    ['COLLATE=latin1_bin', ['DEFAULT CHARSET=latin1', 'COLLATE=latin1_bin']], // 콜레이션만 쓰면 그 콜레이션의 문자셋
+    ['DEFAULT CHARSET=utf8mb4', ['DEFAULT CHARSET=utf8mb4', 'COLLATE=utf8mb4_0900_ai_ci']], // utf8mb4 는 기본 콜레이션도 찍는다
+    ['DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci', ['DEFAULT CHARSET=utf8mb4', 'COLLATE=utf8mb4_general_ci']],
+    ['COLLATE=utf8mb4_bin', ['DEFAULT CHARSET=utf8mb4', 'COLLATE=utf8mb4_bin']],
+    ['', ['DEFAULT CHARSET=utf8mb4', 'COLLATE=utf8mb4_0900_ai_ci']], // 안 쓰면 스키마 기본값
+  ])('%s', (tail, expected) => {
+    expect(charsetOptions(tail)).toEqual(expected);
+  });
+
+  it('문자셋을 안 쓰면 스키마 기본값을 따르고, 그 기본이 utf8mb4 가 아니면 같은 규칙으로 찍는다', () => {
+    expect(charsetOptions('', { charset: 'latin1', collation: 'latin1_swedish_ci' })).toEqual(['DEFAULT CHARSET=latin1']);
+    expect(charsetOptions('', { charset: 'utf8mb3', collation: 'utf8mb3_general_ci' })).toEqual(['DEFAULT CHARSET=utf8mb3']);
+    expect(charsetOptions('', { charset: 'utf8mb4', collation: 'utf8mb4_unicode_ci' })).toEqual(['DEFAULT CHARSET=utf8mb4', 'COLLATE=utf8mb4_unicode_ci']);
+  });
+
+  it('COLLATE 옵션을 찍지 않아도 컬럼은 테이블의 (기본) 콜레이션을 물려받는다', () => {
+    const t = tbl(ok('CREATE TABLE cs (a VARCHAR(10), b VARCHAR(10) COLLATE utf8_unicode_ci) DEFAULT CHARSET=utf8;'), 'cs');
+    expect(t.columns.map((c) => [c.charset, c.collation])).toEqual([[undefined, undefined], ['utf8mb3', 'utf8mb3_unicode_ci']]);
   });
 });
 

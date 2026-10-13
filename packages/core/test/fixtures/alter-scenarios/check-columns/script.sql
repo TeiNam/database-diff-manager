@@ -1,0 +1,4 @@
+ALTER TABLE chk DROP COLUMN qty, DROP COLUMN price;
+ALTER TABLE chk ADD COLUMN extra INT;
+RENAME TABLE chk_pair TO zz_pair;
+ALTER TABLE zz_pair DROP CHECK chk_pair_range, DROP COLUMN lo;

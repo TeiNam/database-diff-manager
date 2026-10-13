@@ -1,6 +1,6 @@
 // 인덱스·FK: 추가·삭제·이름 변경·자동 이름, FK 자동 인덱스, 문장 끝 테이블 검사, MySQL 키 저장 순서
-import { quotedIdentifiers } from '../lexer';
-import type { Column, ForeignKey, Index, IndexKind, IndexPart, Table } from '../model';
+import { LexError, quotedIdentifiers, tokenize } from '../lexer';
+import type { Check, Column, ForeignKey, Index, IndexKind, IndexPart, Partitioning, Table } from '../model';
 import { markProvenance, planAutoKeys, type AutoKeyPlan } from './auto-index';
 import { baseType, BLOB_TYPES, CHARSET_TYPES, effectiveCollation, INT_TYPES, tableCharset } from './normalize-mysql';
 import { findColumn, findTable, sameName, type State } from './state';
@@ -53,12 +53,60 @@ export function nextFkName(t: Pick<Table, 'name' | 'foreignKeys'>): string {
 //   (실측 `ä, é, ñ, ß, Ä, É`, 그리스 대문자·소문자는 뒤섞인다) — 그 이름끼리의 순서는 맞추지 못한다. 그래서 FK 를 더하거나 테이블 이름을 바꿔 FK 이름이 달라질 때만 부른다.
 //   입력은 바꾸지 않고, 소문자가 같은 이름은 원래 순서를 지킨다 (안정 정렬)
 export function sortForeignKeys(fks: readonly ForeignKey[]): ForeignKey[] {
-  const key = (f: ForeignKey) => f.name.toLowerCase();
-  return [...fks].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+  return byLowerName(fks);
+}
+
+// SHOW CREATE 가 CHECK 를 찍는 순서도 같다 (8.0.46·8.4.11 실측: a-b < a1 < a_1 < alpha < ALPHA2 < Beta < t_chk_10 < t_chk_9 < Zeta < 한글). 테이블 이름을 바꿔 자동 이름 '<테이블>_chk_N' 이 바뀌면 순서도 달라진다
+export function sortChecks(checks: readonly Check[]): Check[] {
+  return byLowerName(checks);
+}
+
+function byLowerName<T extends { name: string }>(items: readonly T[]): T[] {
+  const key = (x: T) => x.name.toLowerCase();
+  return [...items].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
 }
 
 // 식(생성 컬럼·CHECK·함수 인덱스)이 컬럼을 쓰는지. SHOW CREATE 의 식은 컬럼을 늘 백틱으로 쓴다
 export const exprUses = (expr: string, column: string): boolean => (quotedIdentifiers(expr) ?? []).some((n) => sameName(n, column));
+
+// 식이 쓰는 컬럼 이름 (소문자, 중복 없음)
+export const exprColumns = (expr: string): Set<string> => new Set((quotedIdentifiers(expr) ?? []).map((n) => n.toLowerCase()));
+
+// 파티션 식이 쓰는 컬럼 (소문자). HASH·RANGE·LIST 의 식은 컬럼을 백틱으로 찍고, KEY·COLUMNS 의 컬럼 목록은 백틱 없이 (필요할 때만 백틱) 찍는다 (8.0.46·8.4.11 실측).
+// 컬럼 목록이 없는 KEY () 는 PRIMARY KEY 를 쓰므로 빈 집합이다
+export function partitionColumns(p: Pick<Partitioning, 'method' | 'expr'>): Set<string> {
+  if (!/(COLUMNS|KEY)$/.test(p.method)) return exprColumns(p.expr);
+  try {
+    return new Set(tokenize(p.expr).filter((t) => t.t === 'ident' || t.t === 'word').map((t) => t.v.toLowerCase()));
+  } catch (e) {
+    if (e instanceof LexError) return new Set();
+    throw e;
+  }
+}
+
+// PRIMARY KEY·UNIQUE 는 파티션 컬럼을 (prefix 없이) 모두 포함해야 한다 (MySQL 1503)
+function assertPartitionKeys(t: Table): void {
+  const columns = t.partition ? partitionColumns(t.partition) : new Set<string>();
+  if (!columns.size) return;
+  for (const i of t.indexes) {
+    if (i.kind !== 'PRIMARY' && i.kind !== 'UNIQUE') continue;
+    const have = new Set(i.parts.filter((p) => p.column !== undefined && p.length === undefined).map((p) => p.column!.toLowerCase()));
+    if ([...columns].some((c) => !have.has(c))) fail(`${i.kind === 'PRIMARY' ? 'PRIMARY KEY' : `UNIQUE 인덱스 \`${i.name}\``} 는 파티션 식이 쓰는 컬럼 ${[...columns].map((c) => `\`${c}\``).join(', ')} 을 모두 포함해야 합니다 (MySQL 1503)`);
+  }
+}
+
+// 지우는 컬럼 하나만 쓰는 CHECK: MySQL 은 컬럼과 함께 지운다 (8.0.46·8.4.11 실측 — 이름을 직접 붙인 것도, 같은 문장에서 컬럼을 같은 이름으로 다시 더해도 같다).
+// 다른 컬럼도 쓰는 CHECK 는 그 컬럼들을 모두 지워도 3959 다 (assertNoDependents)
+export const isSoleColumnCheck = (k: Pick<Check, 'expr'>, dropped: ReadonlySet<string>): boolean => {
+  const columns = exprColumns(k.expr);
+  return columns.size === 1 && dropped.has([...columns][0]);
+};
+
+// 지우는 컬럼만 쓰는 CHECK 를 뺀 테이블. 입력은 바꾸지 않는다
+export function dropSoleColumnChecks(t: Table, dropped: ReadonlySet<string>): Table {
+  const checks = t.checks.filter((k) => !isSoleColumnCheck(k, dropped));
+  return checks.length === t.checks.length ? t : { ...t, checks };
+}
 
 // PRIMARY KEY 에 들어간 컬럼은 NOT NULL 이 되고 DEFAULT NULL 은 없어진다
 function notNull(c: Column): Column {
@@ -374,13 +422,14 @@ export function setIndexVisibility(t: Table, name: string, invisible: boolean): 
   return { ...t, indexes: t.indexes.map((i) => (i === index ? { ...i, invisible } : i)) };
 }
 
-// 문장 끝 검사 (MySQL 이 거부하는 상태): AUTO_INCREMENT 는 하나이고 인덱스 첫 컬럼(1075), 보이는 컬럼 하나 이상(4028),
+// 문장 끝 검사 (MySQL 이 거부하는 상태): AUTO_INCREMENT 는 하나이고 인덱스 첫 컬럼(1075), 보이는 컬럼 하나 이상(4028), 파티션 컬럼을 모두 포함한 PRIMARY KEY·UNIQUE(1503),
 // 모든 FK 에 받치는 인덱스 — 자기 쪽과 부모 쪽 (1553, 정렬 방향은 보지 않는다 — leadsWith 주석). renamed: 이 문장에서 바뀐 t 의 컬럼 이름 (다른 테이블 FK 의 참조 이름은 아직 옛 이름)
 export function checkTable(st: State, t: Table, renamed: ReadonlyMap<string, string> = new Map()): void {
   const autos = t.columns.filter((c) => c.autoIncrement);
   if (autos.length > 1) fail('AUTO_INCREMENT 컬럼은 하나만 둘 수 있습니다 (MySQL 1075)');
   if (autos.length && !t.indexes.some((i) => i.parts[0]?.column !== undefined && sameName(i.parts[0].column, autos[0].name))) fail(`AUTO_INCREMENT 컬럼 \`${autos[0].name}\` 은 인덱스의 첫 컬럼이어야 합니다 (MySQL 1075)`);
   if (t.columns.every((c) => c.invisible)) fail('보이는 컬럼이 하나 이상 있어야 합니다 (MySQL 4028)');
+  assertPartitionKeys(t);
   for (const fk of t.foreignKeys) if (!t.indexes.some((i) => isFkKey(i, fk.columns))) fail(`FK \`${fk.name}\` 에 필요한 인덱스를 지울 수 없습니다 (MySQL 1553)`);
   for (const child of [...st.model.tables.filter((x) => x.name !== t.name), t]) {
     for (const fk of child.foreignKeys) {

@@ -9,7 +9,7 @@ import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
 import { assertAutoKeysKnown, assertTargetsKept, classifyFkIndexes, planAutoKeys, renameProvenance, shrunkIndexes, syncProvenance, withoutNames, type AutoKeyPlan } from './auto-index';
-import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, enforcePrimaryKeyNotNull, exprUses, isExplicitNull, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
+import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, dropSoleColumnChecks, enforcePrimaryKeyNotNull, exprUses, isExplicitNull, isSoleColumnCheck, partitionColumns, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
 import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { assertInnoDbTable, innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
@@ -223,7 +223,7 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   const renames = pick('renameIndex');
   // 문장 시작에 아는 출처·덤프 이름으로 가린 FK 자동 인덱스. RENAME INDEX 가 건드린 옛 이름·새 이름은 뺀다 (자동 표시가 지워지고, 다른 인덱스가 그 이름을 이어받는다)
   const flagged = withoutNames(classifyFkIndexes(before, st.origins.provenance.get(before.name)), renames.flatMap((r) => [r.old, r.to]));
-  let t = keepKeys(before, entries, clauses, dropped, renamed); // 5) 키 삭제 → 컬럼 변화 반영 → 인덱스 이름 변경·가시성
+  let t = dropSoleColumnChecks(keepKeys(before, entries, clauses, dropped, renamed), dropped); // 5) 키 삭제 → 컬럼 변화 반영 (지우는 컬럼만 쓰는 CHECK 도 함께) → 인덱스 이름 변경·가시성
   for (const r of renames) {
     t = renameIndex(t, r.old, r.to);
     moveIndexOrigin(st, before.name, r.old, r.to);
@@ -339,7 +339,7 @@ function assertUniqueColumns(entries: readonly Entry[]): void {
   }
 }
 
-// 지우거나 이름을 바꾸는 컬럼을 쓰는 것: 생성 컬럼(3108)·CHECK(3959)·함수 인덱스(3837)는 MySQL 이 거부하고, 지우는 컬럼을 쓰는
+// 지우거나 이름을 바꾸는 컬럼을 쓰는 것: 생성 컬럼(3108)·CHECK(3959, 그 컬럼만 쓰는 CHECK 를 지울 때는 제외)·함수 인덱스(3837)·파티션 식(3855)은 MySQL 이 거부하고, 지우는 컬럼을 쓰는
 // FK 는 자기 쪽 1828, 다른 테이블(자기 참조 포함) 쪽 1829. 같은 문장에서 함께 지우는 키는 빼고 본다
 function assertNoDependents(st: State, t: Table, dropped: ReadonlySet<string>, renamed: ReadonlyMap<string, string>, keyDrops: readonly KeyDrop[]): void {
   const changed = [...dropped, ...renamed.keys()];
@@ -348,8 +348,9 @@ function assertNoDependents(st: State, t: Table, dropped: ReadonlySet<string>, r
   for (const name of changed) {
     const gen = t.columns.find((c) => c.generated && !dropped.has(c.name.toLowerCase()) && exprUses(c.generated.expr, name));
     if (gen) fail(`생성 컬럼 \`${gen.name}\` 이 쓰는 컬럼 \`${name}\` 은 지우거나 이름을 바꿀 수 없습니다 (MySQL 3108)`);
-    const check = t.checks.find((k) => !keyDropped('check', k.name) && exprUses(k.expr, name));
+    const check = t.checks.find((k) => !keyDropped('check', k.name) && exprUses(k.expr, name) && !isSoleColumnCheck(k, dropped));
     if (check) fail(`CHECK \`${check.name}\` 이 쓰는 컬럼 \`${name}\` 은 지우거나 이름을 바꿀 수 없습니다 (MySQL 3959)`);
+    if (t.partition && partitionColumns(t.partition).has(name.toLowerCase())) fail(`파티션 식이 쓰는 컬럼 \`${name}\` 은 지우거나 이름을 바꿀 수 없습니다 (MySQL 3855)`);
     const fn = t.indexes.find((i) => !keyDropped('index', i.name) && i.parts.some((p) => p.expr !== undefined && exprUses(p.expr, name)));
     if (fn) fail(`함수 인덱스 \`${fn.name}\` 이 쓰는 컬럼 \`${name}\` 은 지우거나 이름을 바꿀 수 없습니다 (MySQL 3837)`);
   }

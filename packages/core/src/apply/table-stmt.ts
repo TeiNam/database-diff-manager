@@ -3,7 +3,7 @@ import { renamedAutoName } from '../auto-name';
 import { Cursor } from '../cursor';
 import type { Table, TableOption } from '../model';
 import { parseTableItem } from './def-parser';
-import { addKeys, checkSetNullFks, checkTable, columnKeyItems, enforcePrimaryKeyNotNull, isExplicitNull, sortForeignKeys, sortIndexes } from './keys';
+import { addKeys, checkSetNullFks, checkTable, columnKeyItems, enforcePrimaryKeyNotNull, isExplicitNull, sortChecks, sortForeignKeys, sortIndexes } from './keys';
 import { splitList } from './lists';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, finalizeColumn, primaryCollation, tableCharset } from './normalize-mysql';
 import { innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
@@ -20,12 +20,13 @@ export function renameTable(st: State, from: string, to: string): void {
   const t = needTable(st, from);
   assertRenamedFkNamesFree(st, t, to);
   const foreignKeys = t.foreignKeys.map((f) => ({ ...f, name: renamedAutoName(f.name, from, to, 'ibfk') }));
+  const checks = t.checks.map((k) => ({ ...k, name: renamedAutoName(k.name, from, to, 'chk') }));
   const renamed: Table = {
     ...t,
     name: to,
-    // 자동 이름이 바뀌면 SHOW CREATE 의 FK 순서(이름 순)도 달라진다 (MySQL 8.0.46·8.4.11 실측). 이름이 안 바뀌면 순서를 건드리지 않는다
+    // 자동 이름이 바뀌면 SHOW CREATE 의 FK·CHECK 순서(이름 순)도 달라진다 (MySQL 8.0.46·8.4.11 실측). 이름이 안 바뀌면 순서를 건드리지 않는다
     foreignKeys: foreignKeys.some((f, i) => f.name !== t.foreignKeys[i].name) ? sortForeignKeys(foreignKeys) : foreignKeys,
-    checks: t.checks.map((k) => ({ ...k, name: renamedAutoName(k.name, from, to, 'chk') })),
+    checks: checks.some((k, i) => k.name !== t.checks[i].name) ? sortChecks(checks) : checks,
   };
   st.model.tables = st.model.tables
     .map((x) => (x.name === from ? renamed : x))
@@ -74,7 +75,7 @@ export function createTable(st: State, c: Cursor): void {
   trackNew(st.origins, t, false);
 }
 
-// CREATE TABLE 의 테이블 옵션 → SHOW CREATE 모양 (ENGINE·DEFAULT CHARSET·COLLATE 는 늘 있다)
+// CREATE TABLE 의 테이블 옵션 → SHOW CREATE 모양 (ENGINE·DEFAULT CHARSET 은 늘 있고, COLLATE 는 showsCollate 일 때만)
 function createOptions(c: Cursor, st: State): TableOption[] {
   let charset: string | undefined;
   let collation: string | undefined;
@@ -96,8 +97,12 @@ function createOptions(c: Cursor, st: State): TableOption[] {
   if (charset && charset !== cs) fail(`COLLATE ${coll} 은 문자셋 ${charset} 의 콜레이션이 아닙니다 (MySQL 1253)`);
   // 기본 문자셋이 binary 인 테이블은 MySQL 이 CHAR·VARCHAR·TEXT 컬럼을 BINARY·VARBINARY·BLOB 으로 바꾼다 (8.0.46·8.4.11 실측) — 컬럼 쪽 CHARACTER SET binary 와 같은 이유로 거부한다
   if (cs === 'binary') fail(`테이블 문자셋 binary 는 MySQL 이 문자열 컬럼을 BINARY·VARBINARY·BLOB 으로 바꿔 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
-  return [{ key: 'ENGINE', value: 'InnoDB' }, { key: 'DEFAULT CHARSET', value: cs }, { key: 'COLLATE', value: coll }, ...rest];
+  return [{ key: 'ENGINE', value: 'InnoDB' }, { key: 'DEFAULT CHARSET', value: cs }, ...(showsCollate(cs, coll) ? [{ key: 'COLLATE', value: coll }] : []), ...rest];
 }
+
+// SHOW CREATE TABLE 은 utf8mb4 의 콜레이션은 늘 찍고 (기본 utf8mb4_0900_ai_ci 도), 그 밖의 문자셋은 그 문자셋의 기본 콜레이션이면 찍지 않는다 (MySQL 8.0.46·8.4.11 실측).
+// 안 찍은 옵션이 모델에 있으면 덤프를 읽은 모델과 달라 비교에서 CONVERT TO CHARACTER SET 변경으로 잡힌다
+const showsCollate = (charset: string, collation: string): boolean => charset === 'utf8mb4' || collation !== primaryCollation(charset);
 
 // DROP TABLE [IF EXISTS] a [, b …] [RESTRICT|CASCADE]. 하나라도 없으면(IF EXISTS 제외) 아무것도 지우지 않는다
 export function dropTable(st: State, c: Cursor): void {
