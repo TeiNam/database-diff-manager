@@ -1,0 +1,1 @@
+ALTER TABLE member ADD PRIMARY KEY (email);

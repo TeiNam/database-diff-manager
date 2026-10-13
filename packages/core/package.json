@@ -8,7 +8,7 @@
   },
   "scripts": {
     "test": "vitest run",
-    "test:mysql": "docker compose -f docker-compose.test.yml up -d --wait && MYSQL_IT=1 vitest run test/mysql.int.test.ts",
+    "test:mysql": "docker compose -f docker-compose.test.yml up -d --wait && MYSQL_IT=1 vitest run test/mysql.int.test.ts test/apply.int.test.ts",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.src.json"
   },
   "devDependencies": {

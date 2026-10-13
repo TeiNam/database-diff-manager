@@ -16,6 +16,7 @@ export interface VersionMeta {
   note: string | null;
   uploadedBy: string;
   uploadedAt: string;
+  derivedFrom?: { baseVersionNo: number; statementCount: number; defaults: { charset: string; collation: string } }; // ALTER 적용으로 만든 버전 (009)
 }
 
 export interface VersionSummary extends VersionMeta {
@@ -42,20 +43,26 @@ export interface VersionDetail {
 interface MetaRecord {
   id: number; schema_id: number; database_id: number; database_name: string; schema_name: string; version_no: number;
   source_format: SourceFormat; source_filename: string; note: string | null; uploaded_by: string; uploaded_at: string;
+  base_version_no: number | null; statement_count: number | null; default_charset: string | null; default_collation: string | null;
 }
 
 const META_SQL = `
   SELECT v.id, v.schema_id, s.database_id, d.name AS database_name, s.name AS schema_name, v.version_no,
-         v.source_format, v.source_filename, v.note, u.username AS uploaded_by, v.uploaded_at
+         v.source_format, v.source_filename, v.note, u.username AS uploaded_by, v.uploaded_at,
+         dv.base_version_no, dv.statement_count, dv.default_charset, dv.default_collation
     FROM schema_versions v
     JOIN schemas s ON s.id = v.schema_id
     JOIN databases d ON d.id = s.database_id
-    JOIN users u ON u.id = v.uploaded_by`;
+    JOIN users u ON u.id = v.uploaded_by
+    LEFT JOIN schema_version_derivations dv ON dv.version_id = v.id`;
 
 const toMeta = (r: MetaRecord): VersionMeta => ({
   id: Number(r.id), schemaId: Number(r.schema_id), databaseId: Number(r.database_id), databaseName: r.database_name,
   schemaName: r.schema_name, versionNo: Number(r.version_no), sourceFormat: r.source_format, sourceFilename: r.source_filename,
   note: r.note, uploadedBy: r.uploaded_by, uploadedAt: r.uploaded_at,
+  ...(r.base_version_no === null ? {} : {
+    derivedFrom: { baseVersionNo: Number(r.base_version_no), statementCount: Number(r.statement_count), defaults: { charset: r.default_charset!, collation: r.default_collation! } },
+  }),
 });
 
 const NOT_FOUND = () => new AppError(404, '버전을 찾을 수 없습니다');

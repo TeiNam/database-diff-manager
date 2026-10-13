@@ -1,0 +1,2 @@
+CREATE TABLE one_col (x INT);
+ALTER TABLE one_col DROP COLUMN x;

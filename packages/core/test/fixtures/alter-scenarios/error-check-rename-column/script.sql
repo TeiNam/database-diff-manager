@@ -1,0 +1,1 @@
+ALTER TABLE chk RENAME COLUMN qty TO amount;

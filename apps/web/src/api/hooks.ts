@@ -2,7 +2,7 @@ import type { RenameMapping } from '@tdm/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 import { api, ApiError } from './client';
-import type { DiffResponse, Me, MigrationFlowResponse, MigrationMeta, MigrationUploadInput, MigrationUploadResult, ObjectHistory, Role, SchemaInfo, TreeDatabase, UploadMeta, UploadResult, User, VersionDetail, VersionSummary } from './types';
+import type { AlterRequest, AlterResponse, Derivation, DiffResponse, Me, MigrationFlowResponse, MigrationMeta, MigrationUploadInput, MigrationUploadResult, ObjectHistory, Role, SchemaInfo, TreeDatabase, UploadMeta, UploadResult, User, VersionDetail, VersionSummary } from './types';
 
 export const queryKeys = {
   me: ['me'] as const,
@@ -112,7 +112,7 @@ export function useUpload() {
 }
 
 // 삭제된 id 는 SQLite 가 다시 쓸 수 있다 → id 로 캐시한 내용이 남으면 새 객체 자리에 옛 내용이 보인다
-const CATALOG_CACHE_KEYS = [['versions'], ['version'], ['schema'], ['object-history'], ['diff'], ['migration-flow'], ['migrations']] as const;
+const CATALOG_CACHE_KEYS = [['versions'], ['version'], ['schema'], ['object-history'], ['diff'], ['migration-flow'], ['migrations'], ['derivation']] as const;
 
 export function useDeleteVersion() {
   const client = useQueryClient();
@@ -126,6 +126,7 @@ export function useDeleteVersion() {
       client.removeQueries({ queryKey: ['object-history'] });
       client.removeQueries({ queryKey: ['diff'] });
       client.removeQueries({ queryKey: ['migration-flow'] });
+      client.removeQueries({ queryKey: ['derivation'] });
     },
   });
 }
@@ -199,3 +200,20 @@ export const useUploadMigration = () =>
 
 export const useDeleteMigration = () =>
   useMigrationMutation((id: number) => api<{ ok: true }>(`/migrations/${id}`, { method: 'DELETE' }));
+
+// ALTER 스크립트 적용 (미리보기는 저장하지 않으므로 캐시를 건드리지 않는다)
+export function useApplyAlter() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { baseId: number; body: AlterRequest }) => api<AlterResponse>(`/versions/${input.baseId}/alter`, { method: 'POST', json: input.body }),
+    onSuccess: (data) => {
+      if (data.status === 'preview') return;
+      client.invalidateQueries({ queryKey: queryKeys.tree });
+      client.invalidateQueries({ queryKey: ['versions'] });
+      client.invalidateQueries({ queryKey: ['object-history'] });
+    },
+  });
+}
+
+export const useDerivation = (id?: number) =>
+  useQuery({ queryKey: ['derivation', id] as const, queryFn: () => api<Derivation>(`/versions/${id}/derivation`), enabled: id !== undefined, staleTime: Infinity });

@@ -18,6 +18,7 @@
 ## 주요 기능
 
 - **버전 관리**: Database(물리 엔진 인스턴스) → Schema 단위로 정의서를 업로드해 버전을 쌓습니다. 내용이 직전 버전과 같으면 새 버전을 만들지 않습니다.
+- **ALTER 적용**: 저장된 SQL 버전에 ALTER 스크립트를 붙여 넣거나 올려, td-export를 다시 뽑지 않고 다음 버전을 만듭니다 (컬럼·인덱스·FK·테이블 옵션·CREATE/DROP/RENAME TABLE·루틴. 결과는 CI에서 실제 MySQL 8.0/8.4와 비교해 검증합니다). 범위와 한계는 [ALTER 적용](#alter-적용)을 참고하세요.
 - **비교**: 요약, 객체별 diff(SQL Split/Unified, Excel 같은 표 보기), 변경 객체만 거르는 트리.
 - **DDL 생성**: 테이블·컬럼·인덱스·FK·뷰·파티션·저장 함수/프로시저 변경을 ALTER/CREATE/DROP으로 만들고, 반대 방향(되돌리기) DDL도 함께 제공합니다. rename은 화면에서 매핑합니다. 맞바꾸기·연쇄(a↔b, a→b→c, 테이블 교체)는 한 `RENAME TABLE` 문장이나 한 ALTER 의 `RENAME COLUMN` 절로 만들고, 한 방향에 저장한 수동 rename 은 반대 방향 비교에 뒤집어 반영합니다.
 - **DB 전환 매핑**: As-Is → To-Be Schema 쌍에 AWS DMS table-mapping JSON 을 올리면, 전환 탭에 테이블·컬럼 대응과 상태를 보여 주고 같은 매핑을 rename 으로 객체 diff·DDL 에 반영합니다. 같은 대상에 대한 수동 rename 매핑이 우선합니다.
@@ -36,6 +37,25 @@
 | DMS 매핑 | AWS DMS table-mapping JSON: `selection` include/exclude(`%` 와일드카드), `transformation` 의 schema·table·column rename, `remove-column`. 그 밖의 action 은 경고로만 보여 주고 반영하지 않습니다. 룰 20,000개·20MB 까지 |
 
 td-export 사용법은 [table-define-exporter](https://github.com/TeiNam/table-define-exporter)를 참고하세요.
+
+## ALTER 적용
+
+ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑는 대신, 저장된 버전에 ALTER 스크립트를 적용합니다. admin이나 dba가 Schema의 버전 이력에서 **ALTER 적용**을 누르고 기준 버전을 고른 뒤, `.sql` 파일을 고르거나 스크립트를 붙여 넣습니다. **미리보기**는 적용한 문장 수와 바뀌는 객체를 보여 주고, 문장이 실패하면 대신 그 문장의 번호·줄·이유가 담긴 메시지를 보여 줍니다. **저장**하면 다음 버전이 만들어지고 이력에 `ALTER 적용 (기준 vN)` 배지가 붙으며, 배지를 누르면 스크립트를 볼 수 있습니다. 이 버전의 원본 파일 다운로드는 스크립트가 아니라 결과를 td-export 형식으로 출력한 덤프이고, 파일 이름은 올린 스크립트 파일의 이름입니다(붙여 넣었으면 `alter.sql`). 스크립트 안의 테이블·컬럼·인덱스 rename은 두 버전 사이의 rename 매핑으로 저장됩니다.
+
+적용은 `@tdm/core`가 저장된 스키마 모델 위에서 하며, 같은 문장을 MySQL 8.0/8.4가 처리하는 방식(타입·기본값 정규화, 자동 인덱스·제약 이름, 연쇄 변경)을 따릅니다. 서버에 MySQL이 필요 없고, 이 도구는 DDL을 실행하지 않습니다. 덤프에는 Schema의 기본 문자셋·콜레이션이 없는데 MySQL은 이를 문자셋 없는 `CREATE TABLE`과 문자열을 반환하는 함수에 쓰므로, 대화상자에서 입력받습니다(처음에는 `utf8mb4` / `utf8mb4_0900_ai_ci`, 그 뒤로는 마지막 ALTER 적용에 쓴 값).
+
+| 항목 | 내용 |
+|---|---|
+| 받는 문장 | `ALTER TABLE`(컬럼·인덱스·PK/FK·테이블 옵션·`RENAME`), `CREATE INDEX`, `DROP INDEX`, `CREATE`/`DROP`/`RENAME TABLE`, `CREATE`/`DROP FUNCTION`·`PROCEDURE`, `DROP VIEW`. `SET FOREIGN_KEY_CHECKS`·`SET SQL_MODE`는 반영합니다. 스키마를 바꾸지 않는 문장은 무시합니다: `SET NAMES`와 테이블 정의에 영향이 없는 그 밖의 세션 `SET`, 서버 변수 `SET GLOBAL`·`SET PERSIST`, 트랜잭션 제어(`START TRANSACTION`·`BEGIN`·`COMMIT`·`ROLLBACK`), `LOCK`·`UNLOCK TABLES`, 데이터 문장(`INSERT`·`UPDATE`·`DELETE`·`REPLACE`·`TRUNCATE`), `GRANT`·`REVOKE`, 주석, 현재 Schema의 `USE`. 이후 테이블 정의를 바꾸는 세션 변수(`default_storage_engine` 등)와 식으로 쓴 `SET SQL_MODE`는 거부합니다. 스크립트 하나에 1,000,000자까지 |
+| 기준 버전 | SQL 출처 버전만: 올린 td-export `.sql`이거나 앞선 ALTER 적용으로 만든 버전. `.md` 버전은 모델 정보가 부분적이고, 예전 파서로 저장된 버전(stale)은 모델이 현재 파서와 달라 둘 다 거부합니다 — stale이면 같은 덤프를 다시 올린 버전을 기준으로 쓰세요. 새 버전의 완전성 판정은 출력한 덤프에서 다시 하지 않고 기준 버전의 판정을 물려받습니다(위 입력 파일의 "완전성 확인" 참고) |
+| InnoDB만 | InnoDB가 아닌 `ENGINE`을 쓰는 `CREATE TABLE`·`ALTER TABLE`, 다른 엔진 테이블을 바꾸는 문장은 거부합니다. `DROP TABLE`·`RENAME TABLE`은 받습니다 |
+| 범위 밖 | "받는 문장"에 없는 문장은 모두 거부합니다. 특히 `CREATE`/`ALTER VIEW`(`DROP VIEW`는 받음), `CREATE TABLE … LIKE`·`CREATE TABLE … SELECT`, `CHECK` 추가, 생성 컬럼 정의(`GENERATED ALWAYS AS`, `AS (…)`), 식 기본값, 파티션 절, `CONVERT TO CHARACTER SET`과 테이블 `CHARACTER SET`·`COLLATE` 옵션, FK로 이어진 컬럼의 타입 변경, 트리거·이벤트, 다른 Schema를 붙인 이름, MySQL이 다시 써서 저장하는 기본값(표준이 아닌 날짜·시간 꼴, MySQL이 반올림하거나 지수 표기로 찍는 `FLOAT`·`DOUBLE` 값), 뒤 문장을 다르게 읽게 하는 SQL_MODE(`ANSI`·`TRADITIONAL`·`REAL_AS_FLOAT`·`ANSI_QUOTES`). 추측해서 적용하지 않고, 이유와 td-export로 다시 뽑아 올리라는 안내를 붙여 거부합니다 |
+| 테이블 한도 | MySQL 한도인 테이블당 키 64개(오류 1069)·컬럼 1,017개(오류 1117)를 그대로 적용합니다. FK가 64개를 넘는 테이블은 재추출 안내와 함께 거부합니다: MySQL에는 한도가 없지만 이 도구는 문장마다 테이블의 FK를 모두 다시 확인하므로, 요청 하나의 계산량을 묶으려는 한도입니다 |
+| FK 자동 인덱스 | 덤프에는 MySQL이 FK 때문에 자동으로 만든 인덱스가 표시되지 않아 이름으로 추정합니다. FK와 같은 이름의 인덱스는 자동으로 보고(직접 만든 `KEY f`를 `CONSTRAINT f`와 함께 쓴 경우도 이렇게 잘못 봅니다) 나머지는 직접 만든 것으로 봅니다. FK 이름이 `<테이블>_ibfk_N` 꼴이고 인덱스 이름이 FK의 첫 컬럼인 경우도 직접 만든 것으로 보므로, FK 컬럼으로 시작하는 복합 인덱스 추가나 FK 이름 정리를 그대로 적용합니다. 한계: 그 인덱스가 실제로는 MySQL이 FK와 함께 자동으로 만든 것이면(FK만 써서 만든 라이브 스키마), 같은 컬럼에 키나 FK를 더하는 문장에서 MySQL은 그 인덱스를 지우거나 바꾸지만 이 도구는 남깁니다. FK가 이미 지워져 남은 자동 인덱스와, 파생 버전 사이(한 번의 ALTER 적용에서 만든 자동 인덱스도 다음 적용에서는 이름으로 다시 추정)도 같습니다 |
+| MySQL 검사 | MySQL의 모든 검사를 재현하지는 않습니다(키 길이·행 크기 한도 등). 그래서 이 도구가 받은 스크립트도 실제 DB에서는 거부될 수 있습니다. 결과를 MySQL과 맞추려고, CI와 `npm run test:mysql -w @tdm/core`에서 시나리오 58개(MySQL 8.0은 8.4 전용 시나리오 하나를 빼고 57개)의 스크립트를 실제 MySQL 8.0.46과 8.4.11에 실행해 이 도구의 결과와 비교합니다 |
+| 저장 전 확인 | 저장(과 미리보기) 전에 서버가 출력한 덤프를 다시 읽어 적용 결과와 객체마다 비교합니다. 스크립트가 건드리지 않은 객체는 기준 버전과 비교하므로, 기준에 파싱하지 못한 객체가 있어도 그 객체를 건드리지 않는 ALTER 스크립트는 적용할 수 있습니다. 어긋나면 스크립트가 아니라 이 도구의 결함이라, 어긋난 객체와 요청 ID를 알려 주며 거부하고 서버 로그에도 남깁니다 |
+
+주요 규칙과 거부하는 문장은 [설계 문서](docs/superpowers/specs/2026-10-13-alter-apply-design.md)에 있습니다.
 
 ## Docker로 실행
 
@@ -81,7 +101,7 @@ npm run backup -w @tdm/server -- ./backup-$(date +%Y%m%d).db
 |---|---|---|---|
 | 조회·비교·DDL 복사/다운로드 | O | O | O |
 | rename 매핑 저장 (모든 사용자의 diff 결과에 반영) | O | O | — |
-| 업로드, Database 생성·수정·삭제, 버전·Schema 삭제 | O | O | — |
+| 업로드, ALTER 적용, Database 생성·수정·삭제, 버전·Schema 삭제 | O | O | — |
 | DMS 전환 매핑 올리기·삭제 | O | O | — |
 | 계정 관리 | O | — | — |
 
@@ -105,7 +125,7 @@ npm run dev:server   # API (127.0.0.1:3000, HTTP 개발용 쿠키)
 npm run dev:web      # Vite (http://localhost:5173, /api 는 3000으로 프록시)
 npm test             # 전체 테스트
 npm run typecheck
-npm run test:mysql -w @tdm/core   # 생성 DDL을 MySQL 8.0/8.4 컨테이너에서 실제로 적용해 검증 (Docker 필요)
+npm run test:mysql -w @tdm/core   # 생성 DDL과 ALTER 적용 결과를 MySQL 8.0/8.4 컨테이너에서 실제로 적용해 검증 (Docker 필요)
                                   #   (포트는 MYSQL80_PORT / MYSQL84_PORT 로 변경, 기본 33080 / 33084)
 ```
 

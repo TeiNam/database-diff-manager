@@ -30,7 +30,7 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-// 지금 앱으로 올린 뒤 증거 표를 지우고 user_version 을 5 로 내려, 006 이전 앱이 남긴 DB 처럼 만든다
+// 지금 앱으로 올린 뒤 증거 표(007)·파생 표(009)를 지우고 user_version 을 5 로 내려, 006 이전 앱이 남긴 DB 처럼 만든다
 function v5Db(uploads: { schema: string; text: string }[]): number[] {
   const db = openDb(path);
   const userId = createUser(db, { username: 'admin', passwordHash: 'h', role: 'admin' }).id;
@@ -38,7 +38,7 @@ function v5Db(uploads: { schema: string; text: string }[]): number[] {
     const r = ingest(db, { databaseName: 'db', schemaName: schema, filename: `${schema}.sql`, text, userId });
     return r.versionId;
   });
-  db.exec('DROP TABLE schema_version_evidence; PRAGMA user_version = 5');
+  db.exec('DROP TABLE schema_version_derivations; DROP TABLE schema_version_evidence; PRAGMA user_version = 5');
   db.close();
   return ids;
 }
@@ -51,7 +51,7 @@ describe('기동 시 재판정 (006 이전 버전)', () => {
       { schema: 'shop', text: SHOP_0152 }, { schema: 'shop', text: SHOP_NO_VIEW },
     ]);
     const db = openDb(path);
-    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')!.user_version).toBe(8);
+    expect(one<{ user_version: number }>(db, 'PRAGMA user_version')!.user_version).toBe(9);
     expect(evidenceRows(db)).toEqual([
       { version_id: full0130, level: 'complete', judged_by: 'backfill' },
       { version_id: cut0130, level: 'incomplete', judged_by: 'backfill' },

@@ -36,6 +36,7 @@ Behind a reverse proxy such as nginx or ALB, the socket address of every request
 - Migration 003 (schema v3) keeps user accounts (when two usernames differ only by case, the older one is kept), signs everyone out, and **clears uploaded data** (Databases, Schemas, versions, rename and DMS mappings) — upload the definition files again.
 - Migration 004 rebuilds `objects` to allow MySQL routines (`function`, `procedure`, td-export 0.1.52+). All data is kept.
 - Migration 005 adds `rename_mapping_sets`, which records the pairs whose manual renames were saved explicitly (including an empty list). Existing pairs with mappings are filled in.
+- Migration 009 adds `schema_version_derivations` (base version and script of versions created by an ALTER script). To go back to an image older than 009, restore a backup taken before the upgrade, or stop the server and run `DROP TABLE schema_version_derivations; PRAGMA user_version = 8;` on the database first (versions created by ALTER scripts stay as ordinary SQL versions).
 - If the database's `user_version` is newer than the latest migration the server knows (e.g. after rolling back to an older image), the server refuses to start. Restore a backup taken with that version.
 - Connection settings: WAL, `synchronous=NORMAL`, `journal_size_limit=64MB`, `busy_timeout=5000`, `foreign_keys=ON`; `PRAGMA optimize` runs on shutdown.
 
@@ -53,6 +54,8 @@ All paths are under `/api`. Requests that change state must include the `X-Reque
 | POST | `/uploads` (multipart: `meta` JSON + `files`) | admin, dba |
 | GET | `/versions/:id`, `/versions/:id/source` | logged in |
 | DELETE | `/versions/:id` | admin, dba |
+| POST | `/versions/:id/alter` (JSON: `script`, `filename?`, `note?`, `dryRun?`, `defaults?: { charset?, collation? }` — applies an ALTER script to a SQL-sourced version and saves the result as a new version; `dryRun` returns the change list without saving) | admin, dba |
+| GET | `/versions/:id/derivation` (base version and script of a version created by an ALTER script) | logged in |
 | GET | `/diff?base=&target=` | logged in |
 | PUT | `/diff/renames` | admin, dba |
 | GET | `/objects/:id/history` | logged in |

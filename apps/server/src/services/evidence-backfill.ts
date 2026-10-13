@@ -1,6 +1,7 @@
 import type { SchemaEvidence, SchemaModel, SourceFormat } from '@tdm/core';
 import { all, one, tx, type Db } from '../db/connection';
-import { JUDGE_REV, loadEvidence, saveEvidence } from '../repos/evidence';
+import { loadDerivation } from '../repos/derivations';
+import { JUDGE_REV, loadEvidence, loadStaleReason, saveEvidence } from '../repos/evidence';
 import { loadVersion } from '../repos/versions';
 import { modelHash, parseSource } from './ingest';
 
@@ -46,6 +47,19 @@ function judgeVersion(db: Db, versionId: number): void {
   }
   // 저장 모델과 다시 파싱한 모델을 객체 순서와 무관한 modelHash 로 비교한다 (같은 원문 재업로드의 duplicate 판정과 같은 기준)
   const staleReason = modelHash(parsed.model) === modelHash(stored) ? null : STALE_MODEL_REASON;
+  const derivation = loadDerivation(db, versionId);
+  if (derivation) {
+    // ALTER 적용 버전: 원문(출력한 덤프)에는 늘 헤더·트레일러가 있어 원문 판정은 항상 complete 다 — 기준 버전의 판정을 물려받는다.
+    // 기준이 stale 이면 이 버전도 stale 이다 (기준 모델에 스크립트를 적용했으므로). 기준이 지워졌으면 저장된 판정을 유지한다.
+    // 기준은 id 가 더 작아 먼저 판정된다
+    const baseId = derivation.baseVersionId;
+    const inherited = (baseId === null ? loadEvidence(db, versionId) : loadEvidence(db, baseId)) ?? NO_SOURCE;
+    const baseStale = baseId === null ? undefined : loadStaleReason(db, baseId);
+    // 기준이 지워졌으면 이미 붙은 사유를 이어받는다 — 풀릴 근거(기준의 재판정)가 사라졌으니 보수적으로 둔다
+    const kept = baseId === null ? loadStaleReason(db, versionId) : undefined;
+    saveEvidence(db, versionId, inherited, 'backfill', staleReason ?? kept ?? (baseStale ? `기준 버전 v${derivation.baseVersionNo} 이 ${STALE_MODEL_REASON}` : null));
+    return;
+  }
   saveEvidence(db, versionId, parsed.model.evidence ?? NO_SOURCE, 'backfill', staleReason);
 }
 

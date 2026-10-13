@@ -1,0 +1,6 @@
+ALTER TABLE member RENAME COLUMN name TO full_name, RENAME COLUMN age TO years;
+ALTER TABLE member RENAME COLUMN full_name TO years, RENAME COLUMN years TO full_name;
+ALTER TABLE member DROP COLUMN memo, DROP COLUMN years;
+ALTER TABLE member ALTER COLUMN full_name SET DEFAULT 7, ALTER COLUMN email SET INVISIBLE;
+ALTER TABLE member ALTER COLUMN full_name DROP DEFAULT;
+ALTER TABLE orders RENAME COLUMN member_id TO buyer_id;

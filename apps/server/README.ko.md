@@ -36,6 +36,7 @@ nginx·ALB 같은 리버스 프록시 뒤에 두면 모든 요청의 소켓 주�
 - 마이그레이션 003(스키마 v3)은 사용자 계정을 보존하고(대소문자만 다른 사용자명은 먼저 만든 것만 남김), 모든 세션을 끊으며, **업로드 데이터**(Database·Schema·버전·rename·DMS 매핑)를 **비웁니다**. 정의서를 다시 올리세요.
 - 마이그레이션 004 는 MySQL 루틴(`function`·`procedure`, td-export 0.1.52+)을 저장할 수 있도록 `objects` 를 다시 만듭니다. 데이터는 모두 보존합니다.
 - 마이그레이션 005 는 수동 rename 을 명시적으로 저장한 쌍(빈 목록 저장 포함)을 기록하는 `rename_mapping_sets` 를 추가합니다. 매핑이 있던 기존 쌍은 채워 둡니다.
+- 마이그레이션 009 는 ALTER 적용으로 만든 버전의 기준 버전·스크립트를 기록하는 `schema_version_derivations` 를 추가합니다. 009 이전 이미지로 내리려면 업그레이드 전에 받아 둔 백업으로 복원하거나, 서버를 멈추고 DB 에서 먼저 `DROP TABLE schema_version_derivations; PRAGMA user_version = 8;` 을 실행하세요(ALTER 적용으로 만든 버전은 보통 SQL 버전으로 남습니다).
 - DB 의 `user_version` 이 서버가 아는 최신 마이그레이션보다 크면(구 버전 이미지로 내려간 경우 등) 기동을 거부합니다. 그 버전에서 받아 둔 백업으로 복원하세요.
 - 연결 설정: WAL, `synchronous=NORMAL`, `journal_size_limit=64MB`, `busy_timeout=5000`, `foreign_keys=ON`. 종료 시 `PRAGMA optimize` 를 실행합니다.
 
@@ -53,6 +54,8 @@ nginx·ALB 같은 리버스 프록시 뒤에 두면 모든 요청의 소켓 주�
 | POST | `/uploads` (multipart: `meta` JSON + `files`) | admin, dba |
 | GET | `/versions/:id`, `/versions/:id/source` | 로그인 |
 | DELETE | `/versions/:id` | admin, dba |
+| POST | `/versions/:id/alter` (JSON: `script`, `filename?`, `note?`, `dryRun?`, `defaults?: { charset?, collation? }` — SQL 출처 버전에 ALTER 스크립트를 적용해 새 버전을 만든다. `dryRun` 은 저장하지 않고 변경 목록만) | admin, dba |
+| GET | `/versions/:id/derivation` (ALTER 적용으로 만든 버전의 기준 버전·스크립트) | 로그인 |
 | GET | `/diff?base=&target=` | 로그인 |
 | PUT | `/diff/renames` | admin, dba |
 | GET | `/objects/:id/history` | 로그인 |

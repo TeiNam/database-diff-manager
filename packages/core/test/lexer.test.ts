@@ -36,6 +36,19 @@ describe('tokenize', () => {
     expect(tokenize("'a\\nb\\\\c'")[0].v).toBe('a\nb\\c');
   });
 
+  // MySQL 8.0.46·8.4.11 실측: \% 와 \_ 는 LIKE 패턴 밖에서 백슬래시를 남긴 두 글자다 (SHOW CREATE 가 COMMENT 'rate 5\\% off' 로 찍는다). 그 밖의 모르는 이스케이프는 백슬래시만 버린다
+  it('\\% 와 \\_ 는 백슬래시를 남기고, 모르는 이스케이프는 백슬래시를 버린다', () => {
+    expect(tokenize("'rate 5\\% off'")[0].v).toBe('rate 5\\% off');
+    expect(tokenize("'a\\_b'")[0].v).toBe('a\\_b');
+    expect(tokenize('"a\\%b\\_c"')[0].v).toBe('a\\%b\\_c');
+    expect(tokenize("'a\\xb\\é'")[0].v).toBe('axbé');
+    expect(tokenize("'\\\\%'")[0].v).toBe('\\%'); // \\ 다음 % 는 이스케이프가 아니다: SHOW CREATE 가 \% 값을 찍는 꼴
+  });
+
+  it('NO_BACKSLASH_ESCAPES 에서는 \\% 도 글자 그대로다', () => {
+    expect(tokenize("'a\\%b'", { noBackslashEscapes: true })[0].v).toBe('a\\%b');
+  });
+
   it('토큰 오프셋으로 원문을 복원할 수 있다', () => {
     const src = "COMMENT '한글, 쉼표'";
     const str = tokenize(src)[1];
@@ -51,6 +64,11 @@ describe('quote', () => {
   it('MySQL SHOW CREATE 규칙으로 인용한다', () => {
     expect(quoteIdent('a`b')).toBe('`a``b`');
     expect(quoteString("it's\n\\")).toBe("'it''s\\n\\\\'");
+  });
+
+  it('백슬래시를 남긴 \\% 값은 \\\\% 로 인용해 다시 읽으면 같은 값이다', () => {
+    expect(quoteString('rate 5\\% off')).toBe("'rate 5\\\\% off'");
+    expect(tokenize(quoteString('a\\_b\\%c'))[0].v).toBe('a\\_b\\%c');
   });
 });
 

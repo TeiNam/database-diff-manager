@@ -12,3 +12,5 @@
 .row { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
 .input { height: 30px; padding: 0 var(--space-2); border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--bg); color: var(--fg); }
 .error { color: var(--del); font-size: var(--text-sm); }
+/* ALTER 스크립트 원문: 긴 줄은 접어서 표 너비를 밀어내지 않는다 */
+.script { margin: 0; font: var(--code)/var(--code-lh) var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }

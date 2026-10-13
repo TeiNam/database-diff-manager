@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mysql80:
-        image: mysql:8.0
+        image: mysql:8.0.46
         env:
           MYSQL_ROOT_PASSWORD: test
         ports: ['33080:3306']
@@ -56,7 +56,7 @@ jobs:
           --health-interval 2s
           --health-retries 60
       mysql84:
-        image: mysql:8.4
+        image: mysql:8.4.11
         env:
           MYSQL_ROOT_PASSWORD: test
         ports: ['33084:3306']
@@ -79,7 +79,7 @@ jobs:
           MYSQL_IT: '1'
           MYSQL80_PORT: '33080'
           MYSQL84_PORT: '33084'
-        run: npx vitest run test/mysql.int.test.ts
+        run: npx vitest run test/mysql.int.test.ts test/apply.int.test.ts
 
   # 계산만 한다 (태그는 이미지가 올라간 뒤 release 잡에서 만든다)
   version:

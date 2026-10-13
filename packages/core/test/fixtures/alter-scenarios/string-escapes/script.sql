@@ -1,0 +1,10 @@
+ALTER TABLE member
+  ADD COLUMN e1 VARCHAR(20) DEFAULT 'it\'s' COMMENT 'tab\there',
+  ADD COLUMN e2 VARCHAR(20) DEFAULT 'a\\b' COMMENT 'pct\%x\_y',
+  ADD COLUMN e3 VARCHAR(30) DEFAULT '한글 설명' COMMENT 'q''q',
+  ADD COLUMN e4 VARCHAR(20) DEFAULT "dq\"x" COMMENT 'nl\nx',
+  ADD COLUMN e5 VARCHAR(20) DEFAULT 'a\_b\%c' COMMENT 'z\Zz\0end',
+  ADD COLUMN e6 VARCHAR(20) DEFAULT '\\%' COMMENT '\\_',
+  ADD COLUMN e7 VARCHAR(20) DEFAULT 'unknown\qescape' COMMENT '',
+  ADD COLUMN e8 ENUM('a\%b', 'c') DEFAULT 'a\%b';
+ALTER TABLE member COMMENT = 'rate 5\% off';

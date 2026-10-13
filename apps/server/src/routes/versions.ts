@@ -1,9 +1,23 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import type { AppContext } from '../app';
 import { requireEditor, requireLogin } from '../auth/plugin';
+import { AppError } from '../errors';
 import { attachment } from '../http';
-import { deleteVersion, getSource, listVersions, loadVersion } from '../repos/versions';
-import { IdParams } from '../schemas';
+import { ALTER_BODY_LIMIT, MAX_ALTER_SCRIPT } from '../limits';
+import { loadDerivation } from '../repos/derivations';
+import { deleteVersion, getSource, getVersionMeta, listVersions, loadVersion } from '../repos/versions';
+import { IdParams, NoteSchema, SafeFilename } from '../schemas';
+import { applyAlter } from '../services/alter';
+
+const CharsetName = z.string().regex(/^\w{1,64}$/, '문자셋·콜레이션 이름은 영문·숫자·_ 만 쓸 수 있습니다');
+const AlterBody = z.object({
+  script: z.string().min(1, '스크립트가 비어 있습니다').max(MAX_ALTER_SCRIPT, `스크립트는 ${MAX_ALTER_SCRIPT}자 이하여야 합니다`),
+  filename: SafeFilename.optional(),
+  note: NoteSchema.optional(),
+  dryRun: z.boolean().optional(),
+  defaults: z.object({ charset: CharsetName.optional(), collation: CharsetName.optional() }).optional(),
+});
 
 export function versionRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get('/schemas/:id/versions', { onRequest: requireLogin }, async (req) => listVersions(ctx.db, IdParams.parse(req.params).id));
@@ -16,6 +30,20 @@ export function versionRoutes(app: FastifyInstance, ctx: AppContext): void {
       .header('content-type', 'text/plain; charset=utf-8')
       .header('content-disposition', attachment(filename))
       .send(text);
+  });
+
+  // 권한은 본문을 읽기 전(onRequest)에 확인한다. 익명 요청이 큰 본문을 보내 파싱까지 가지 않도록
+  app.post('/versions/:id/alter', { onRequest: requireEditor, bodyLimit: ALTER_BODY_LIMIT }, async (req) => {
+    const { id } = IdParams.parse(req.params);
+    return applyAlter(ctx.db, { baseId: id, ...AlterBody.parse(req.body), userId: req.user!.id, requestId: req.id, log: req.log });
+  });
+
+  app.get('/versions/:id/derivation', { onRequest: requireLogin }, async (req) => {
+    const { id } = IdParams.parse(req.params);
+    getVersionMeta(ctx.db, id); // 없는 버전은 404
+    const derivation = loadDerivation(ctx.db, id);
+    if (!derivation) throw new AppError(404, 'ALTER 적용으로 만든 버전이 아닙니다');
+    return derivation;
   });
 
   app.delete('/versions/:id', { onRequest: requireEditor }, async (req) => {

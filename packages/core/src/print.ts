@@ -1,7 +1,8 @@
 // 모델 → MySQL SHOW CREATE 형식 DDL (세미콜론 없음)
 import { quoteIdent as q, quoteString } from './lexer';
-import type { Check, Column, ForeignKey, Index, IndexKind, IndexPart, Routine, Table, TableOption, View } from './model';
+import type { Check, Column, ForeignKey, Index, IndexKind, IndexPart, Routine, RoutineCharacteristics, Table, TableOption, View } from './model';
 import { normalizeDdl, routineLexMode } from './normalize';
+import { isDefaultCharacteristic } from './routine-defaults';
 
 const KEY_PREFIX: Record<IndexKind, string> = {
   PRIMARY: 'PRIMARY KEY', UNIQUE: 'UNIQUE KEY', INDEX: 'KEY', FULLTEXT: 'FULLTEXT KEY', SPATIAL: 'SPATIAL KEY',
@@ -86,19 +87,20 @@ export function printView(v: View, opts: { orReplace?: boolean } = {}): string {
   return s;
 }
 
-// SHOW CREATE FUNCTION/PROCEDURE 형식 (DEFINER 없이). 특성 순서는 MySQL sp.cc 와 같고 기본값 특성은 찍지 않는다.
+// SHOW CREATE FUNCTION/PROCEDURE 형식 (DEFINER 없이). 특성 순서는 MySQL sp.cc 와 같고 기본값 특성은 찍지 않는다 (routine-defaults.ts).
 // executable: 루틴의 SQL_MODE 로 실행할 생성 문장. NO_BACKSLASH_ESCAPES 면 COMMENT 의 백슬래시를 이스케이프하지 않고 ' 만 두 배로 쓴다
 // (SHOW CREATE 처럼 'C:\\new' 로 쓰면 그 모드에서는 백슬래시 두 개로 저장된다)
 export function printRoutine(r: Routine, opts: { executable?: boolean } = {}): string {
   if (r.parseError && r.rawDdl) return normalizeDdl(r.rawDdl);
   const ch = r.characteristics;
+  const shown = (name: keyof RoutineCharacteristics): boolean => !isDefaultCharacteristic(name, ch[name]);
   let s = `CREATE ${r.kind.toUpperCase()} ${q(r.name)}(${r.params})`;
   if (r.kind === 'function' && r.returns !== undefined) s += ` RETURNS ${r.returns}`;
   s += '\n';
-  if (ch.dataAccess && ch.dataAccess !== 'CONTAINS SQL') s += `    ${ch.dataAccess}\n`;
-  if (ch.deterministic) s += '    DETERMINISTIC\n';
-  if (ch.security === 'INVOKER') s += '    SQL SECURITY INVOKER\n';
-  if (ch.comment) s += `    COMMENT ${quoteRoutineComment(ch.comment, opts.executable === true && routineLexMode(r.sqlMode).noBackslashEscapes === true)}\n`;
+  if (shown('dataAccess')) s += `    ${ch.dataAccess}\n`;
+  if (shown('deterministic')) s += '    DETERMINISTIC\n';
+  if (shown('security')) s += `    SQL SECURITY ${ch.security}\n`;
+  if (shown('comment')) s += `    COMMENT ${quoteRoutineComment(ch.comment!, opts.executable === true && routineLexMode(r.sqlMode).noBackslashEscapes === true)}\n`;
   return s + r.body;
 }
 

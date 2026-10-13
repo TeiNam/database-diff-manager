@@ -1,0 +1,68 @@
+SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0;
+SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;
+SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+
+USE `__DB__` ;
+
+-- MySQL Workbench 가 내보내는 꼴: ASC·VISIBLE, ENGINE = InnoDB, ON DELETE NO ACTION
+CREATE TABLE IF NOT EXISTS `__DB__`.`customer_group` (
+  `id` INT NOT NULL AUTO_INCREMENT,
+  `title` VARCHAR(45) NOT NULL,
+  PRIMARY KEY (`id`))
+ENGINE = InnoDB;
+
+CREATE TABLE IF NOT EXISTS `__DB__`.`customer` (
+  `id` INT NOT NULL AUTO_INCREMENT,
+  `group_id` INT NOT NULL,
+  `name` VARCHAR(45) NOT NULL,
+  `email` VARCHAR(100) NULL DEFAULT NULL,
+  `created` DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE INDEX `email_UNIQUE` (`email` ASC) VISIBLE,
+  INDEX `fk_customer_group_idx` (`group_id` ASC) VISIBLE,
+  CONSTRAINT `fk_customer_group`
+    FOREIGN KEY (`group_id`)
+    REFERENCES `__DB__`.`customer_group` (`id`)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION)
+ENGINE = InnoDB
+DEFAULT CHARACTER SET = utf8mb4
+COLLATE = utf8mb4_0900_ai_ci;
+
+ALTER TABLE `__DB__`.`member`
+ADD COLUMN `phone` VARCHAR(20) NULL AFTER `email`,
+ADD INDEX `idx_phone` (`phone` ASC) VISIBLE,
+CHANGE COLUMN `name` `name` VARCHAR(80) NOT NULL ;
+
+-- Navicat 이 내보내는 꼴: 문자셋 따로 쓰기, datetime(0), USING BTREE, Dynamic
+DROP TABLE IF EXISTS `note`;
+CREATE TABLE `note`  (
+  `id` int(11) NOT NULL AUTO_INCREMENT COMMENT '번호',
+  `title` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '제목',
+  `body` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL,
+  `created_at` datetime(0) NOT NULL DEFAULT CURRENT_TIMESTAMP(0),
+  `price` decimal(10, 2) NULL DEFAULT 0.00,
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_title`(`title`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 5 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '메모' ROW_FORMAT = Dynamic;
+
+-- 예전 MySQL 5.x 스크립트의 꼴: int(11), DEFAULT CHARSET=utf8, utf8_unicode_ci
+CREATE TABLE `legacy_a` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) COLLATE utf8_unicode_ci NOT NULL DEFAULT '',
+  `flag` tinyint(4) NOT NULL DEFAULT '0',
+  `created` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_name` (`name`) USING BTREE
+) ENGINE=InnoDB AUTO_INCREMENT=100 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci COMMENT='legacy';
+CREATE TABLE `legacy_b` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `a_id` int(11) NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `a_id` (`a_id`),
+  CONSTRAINT `legacy_b_ibfk_1` FOREIGN KEY (`a_id`) REFERENCES `legacy_a` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+SET SQL_MODE=@OLD_SQL_MODE;
+SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;
+SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS;

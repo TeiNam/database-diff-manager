@@ -74,9 +74,10 @@ function scan(text: string, lenient: boolean): DumpScan {
   let start: Token | undefined;
   let delimiter = ';';
   let skipUntil = 0; // DELIMITER 줄·구분자를 건너뛸 끝 오프셋
+  const lineAt = lineCounter(text);
   const emit = (end: number, terminated: boolean) => {
     const ddl = text.slice(start!.s, end).trim();
-    out.push({ ddl, line: lineOf(text, start!.s), noBackslashEscapes: mode.noBackslashEscapes === true, terminated });
+    out.push({ ddl, line: lineAt(start!.s), noBackslashEscapes: mode.noBackslashEscapes === true, terminated });
     session.apply(ddl);
     mode.noBackslashEscapes = session.noBackslashEscapes;
   };
@@ -107,6 +108,18 @@ function scan(text: string, lenient: boolean): DumpScan {
   }
   if (start) emit(text.length, false);
   return { statements: out, truncated: false };
+}
+
+// 위치 → 줄 번호. 문장 시작 위치는 앞으로만 가므로 지난 위치부터 줄바꿈만 더 센다 (lineOf 는 매번 파일 처음부터 세어 문장 수 × 파일 길이가 든다 —
+// 1,000,000자에 작은 문장 8만 개면 80 초)
+function lineCounter(text: string): (pos: number) => number {
+  let at = 0;
+  let line = 1;
+  return (pos) => {
+    if (pos < at) return lineOf(text, pos);
+    for (; at < pos; at++) if (text.charCodeAt(at) === 0x0a) line++;
+    return line;
+  };
 }
 
 // 토큰 시작(';;' 처럼 여러 토큰에 걸칠 수 있음) 또는 단어·숫자 토큰 안의 구분자 위치. 없으면 -1

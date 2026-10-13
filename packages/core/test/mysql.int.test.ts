@@ -4,28 +4,14 @@ import mysql, { type Connection, type RowDataPacket } from 'mysql2/promise';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateDdl, objectStatements, renderDdl, type Statement } from '../src/ddl';
 import { diffSchemas, type SchemaDiff } from '../src/diff';
-import type { Routine, SchemaModel, Table, View } from '../src/model';
+import type { SchemaModel } from '../src/model';
 import { parseSqlDump, splitStatements } from '../src/parse-dump';
 import { parseMdDump } from '../src/parse-md';
-import { parseCreateTable } from '../src/parse-table';
-import { parseCreateView } from '../src/parse-view';
-import { parseRoutine } from '../src/parse-routine';
-import { routineLexMode } from '../src/normalize';
 import { commentPart, fixture, scenario, scenarioManual, scenarioManualObjects, SCENARIOS, scenarioValues } from './helpers';
 import { BOUNDARY_CASES, MD_INJECTIONS, MD_OK, MD_VIEW_INJECTIONS, mdDump, PRECIOUS, SQL_INJECTION } from './injection-fixtures';
 import { tokenize } from '../src/lexer';
+import { dumpSchema, MYSQL_TARGETS } from './mysql-dump';
 
-// 포트는 MYSQL80_PORT / MYSQL84_PORT 로 바꿀 수 있다 (기본 33080 / 33084 — docker-compose.test.yml)
-function portOf(env: string | undefined, fallback: number): number {
-  if (env === undefined || env === '') return fallback;
-  const port = Number(env);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`잘못된 MySQL 포트: ${env}`);
-  return port;
-}
-const TARGETS = [
-  { name: 'MySQL 8.0', port: portOf(process.env.MYSQL80_PORT, 33080) },
-  { name: 'MySQL 8.4', port: portOf(process.env.MYSQL84_PORT, 33084) },
-];
 const suite = process.env.MYSQL_IT === '1' ? describe : describe.skip;
 
 // mysql 클라이언트(DELIMITER·주석·'\\g' 를 클라이언트가 해석한다)가 있으면 렌더한 DDL 을 그대로 흘려 넣는다
@@ -56,7 +42,7 @@ function changedObjects(dumped: SchemaModel, target: SchemaModel): Set<string> {
   return new Set([...after.tables.map((t) => `relation ${t.name}`), ...after.views.map((v) => `relation ${v.name}`), ...after.routines.map((r) => `${r.kind} ${r.name}`)]);
 }
 
-suite.each(TARGETS)('$name', ({ port }) => {
+suite.each(MYSQL_TARGETS)('$name', ({ port }) => {
   let conn: Connection;
 
   beforeAll(async () => {
@@ -235,32 +221,4 @@ function sentStatements(out: string): number {
       return true;
     }
   }).length;
-}
-
-async function dumpSchema(conn: Connection, db: string): Promise<SchemaModel> {
-  const [rows] = await conn.query<RowDataPacket[]>('SHOW FULL TABLES');
-  const tables: Table[] = [];
-  const views: View[] = [];
-  for (const row of rows) {
-    const name = String(Object.values(row)[0]);
-    const [created] = await conn.query<RowDataPacket[]>(`SHOW CREATE TABLE \`${name}\``);
-    if (row.Table_type === 'VIEW') views.push(parseCreateView(String(created[0]['Create View'])));
-    else tables.push(parseCreateTable(String(created[0]['Create Table'])));
-  }
-  return { name: db, tables, views, routines: await dumpRoutines(conn, db) };
-}
-
-// SHOW CREATE FUNCTION/PROCEDURE 와 그 sql_mode 로 루틴을 읽는다
-async function dumpRoutines(conn: Connection, db: string): Promise<Routine[]> {
-  const out: Routine[] = [];
-  for (const kind of ['FUNCTION', 'PROCEDURE'] as const) {
-    const [rows] = await conn.query<RowDataPacket[]>(`SHOW ${kind} STATUS WHERE Db = ?`, [db]);
-    for (const row of rows) {
-      const [created] = await conn.query<RowDataPacket[]>(`SHOW CREATE ${kind} \`${String(row.Name)}\``);
-      const ddl = String(created[0][kind === 'FUNCTION' ? 'Create Function' : 'Create Procedure']);
-      const sqlMode = String(created[0].sql_mode);
-      out.push({ ...parseRoutine(ddl, routineLexMode(sqlMode)), sqlMode });
-    }
-  }
-  return out;
 }

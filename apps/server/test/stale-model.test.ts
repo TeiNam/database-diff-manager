@@ -41,7 +41,7 @@ function v6Db(uploads: { schema: string; filename: string; text: string }[]): nu
   const userId = createUser(db, { username: 'admin', passwordHash: 'h', role: 'admin' }).id;
   const ids = uploads.map((u) => ingest(db, { databaseName: 'db', schemaName: u.schema, filename: u.filename, text: u.text, userId }).versionId);
   toOldModel(db);
-  db.exec('DROP TABLE schema_version_evidence; PRAGMA user_version = 5');
+  db.exec('DROP TABLE schema_version_derivations; DROP TABLE schema_version_evidence; PRAGMA user_version = 5');
   db.close();
   const raw = new DatabaseSync(path);
   raw.exec('PRAGMA foreign_keys = ON');
@@ -82,7 +82,7 @@ describe('예전 파서로 저장된 모델 (stale-model)', () => {
     const userId = createUser(db0, { username: 'admin', passwordHash: 'h', role: 'admin' }).id;
     const { versionId } = ingest(db0, { databaseName: 'db', schemaName: 'tdm_md', filename: 'escapes.md', text: ESCAPES_MD, userId });
     toOldModel(db0);
-    db0.exec("UPDATE schema_version_evidence SET judged_by = 'backfill'; ALTER TABLE schema_version_evidence DROP COLUMN judge_rev; ALTER TABLE schema_version_evidence DROP COLUMN stale_reason; PRAGMA user_version = 7");
+    db0.exec("UPDATE schema_version_evidence SET judged_by = 'backfill'; ALTER TABLE schema_version_evidence DROP COLUMN judge_rev; ALTER TABLE schema_version_evidence DROP COLUMN stale_reason; DROP TABLE schema_version_derivations; PRAGMA user_version = 7");
     db0.close();
     const db = openDb(path);
     expect(staleRows(db)).toEqual([[versionId, 1]]);
