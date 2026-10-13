@@ -6,7 +6,7 @@ import type { SchemaModel } from '../model';
 import { splitDump } from '../parse-dump';
 import { UnsafeValueError } from '../sql-safety';
 import { alterTable, createIndex, dropIndexOn } from './alter-table';
-import { canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
+import { assertBmpText, canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
 import { createRoutine, dropRoutine, dropView, isCreateRoutine } from './object-stmt';
 import { applySet } from './session';
 import { initialState, type State } from './state';
@@ -71,6 +71,7 @@ function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): bo
     if (db !== st.schemaName || !c.done) fail(`다른 스키마로 USE 할 수 없습니다: ${db}`);
     return false;
   }
+  if (!isCreateRoutine(ddl)) assertBmpStrings(c.toks);
   if (c.acceptWord('ALTER', 'TABLE')) alterTable(st, c);
   else if (c.acceptWord('DROP', 'INDEX')) dropIndexOn(st, c);
   else if (c.isWord('CREATE', 'INDEX') || ['UNIQUE', 'FULLTEXT', 'SPATIAL'].some((w) => c.isWord('CREATE', w, 'INDEX'))) {
@@ -87,6 +88,11 @@ function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): bo
   } else if (isCreateRoutine(ddl)) createRoutine(st, ddl, noBackslashEscapes);
   else return fail(unsupported(ddl));
   return true;
+}
+
+// 문장의 문자열 리터럴에 4바이트 문자가 있으면 거부한다 (DEFAULT·COMMENT·ENUM 값). 루틴은 본문이 쓴 그대로 찍히므로 COMMENT 만 object-stmt 가 본다
+function assertBmpStrings(toks: readonly Token[]): void {
+  for (const t of toks) if (t.t === 'string') assertBmpText(t.v, '문자열');
 }
 
 // 실행 주석(/*!NNNNN … */)으로 감싼 문장 ('/*!40101 SET … */;' — mysqldump 머리·꼬리): 문장 나누기가 여는 표지만 떼고 닫는 '*/' 를 문장 끝에 남긴다.

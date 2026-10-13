@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { applyScript, MYSQL_DEFAULTS, resolveDefaults } from '../../src/apply';
-import { ApplyFailure } from '../../src/apply/types';
+import { ApplyFailure, RE_EXPORT } from '../../src/apply/types';
 import { parseSqlDump } from '../../src/parse-dump';
 import { tdExport } from '../helpers';
 
@@ -55,6 +55,36 @@ describe('applyScript — 실행 주석(/*!NNNNN … */)으로 감싼 문장', (
   it('문장 끝의 일반 주석 */ 는 건드리지 않는다', () => {
     expect(run('ALTER TABLE t ADD COLUMN x INT /* note */;')).toMatchObject({ ok: true, applied: 1 });
     expect(run('ALTER TABLE t ADD COLUMN x INT COMMENT \'a */\';')).toMatchObject({ ok: true, applied: 1 });
+  });
+});
+
+// 4바이트 문자(이모지 등, U+10000 이상): MySQL 8.0.46·8.4.11 의 SHOW CREATE 는 COMMENT·ENUM·SET 값의 그 문자를 '?' 로, 문자열 DEFAULT 는 통째로 16진수(0xF09F9880)로 바꿔 찍는다.
+// 그대로 저장하면 재추출한 덤프와 달라지므로 RE_EXPORT 로 거부한다. 루틴 본문은 쓴 그대로 찍히니 상관없고, 루틴 COMMENT 는 '?' 로 찍힌다
+describe('applyScript — 4바이트 문자', () => {
+  it.each([
+    ["ALTER TABLE t ADD COLUMN c VARCHAR(10) DEFAULT '😀';"],
+    ["ALTER TABLE t ADD COLUMN c VARCHAR(10) DEFAULT '한글😀';"],
+    ["ALTER TABLE t ADD COLUMN c INT COMMENT '😀 상태';"],
+    ["ALTER TABLE t COMMENT = '😀';"],
+    ["ALTER TABLE t ADD COLUMN c ENUM('a','😀');"],
+    ["ALTER TABLE t ADD INDEX ix (id) COMMENT '😀';"],
+    ["CREATE TABLE u (id INT) COMMENT='😀';"],
+    ["CREATE TABLE u (id INT COMMENT '😀');"],
+    ["CREATE FUNCTION f() RETURNS INT DETERMINISTIC COMMENT '😀' RETURN 1;"],
+  ])('%s 는 RE_EXPORT 로 끝나는 안내로 거부', (script) => {
+    const r = run(script);
+    expect(r).toMatchObject({ ok: false, error: { index: 1 } });
+    if (!r.ok) {
+      expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+      expect(r.error.reason).toContain('4바이트');
+    }
+  });
+
+  it('BMP 문자(한글·유럽 문자·€·U+FFFF)와 루틴 본문 속 이모지는 받는다', () => {
+    expect(run("ALTER TABLE t ADD COLUMN c VARCHAR(10) DEFAULT 'é한€\uffff' COMMENT 'ǆ 설명';")).toMatchObject({ ok: true, applied: 1 });
+    const r = run("CREATE FUNCTION g() RETURNS VARCHAR(5) DETERMINISTIC RETURN '😀';");
+    expect(r).toMatchObject({ ok: true, applied: 1 });
+    if (r.ok) expect(r.model.routines[0].body).toBe("RETURN '😀'");
   });
 });
 

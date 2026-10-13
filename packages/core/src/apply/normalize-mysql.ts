@@ -184,6 +184,7 @@ export function nowText(type: string, now: NowSpec, what: string, errno = ER_INV
 export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | 'type' | 'nullable'>): string | undefined {
   const base = baseType(col.type);
   const bad = (why: string): never => fail(`컬럼 \`${col.name}\` 의 기본값이 올바르지 않습니다: ${why} (MySQL 1067)`);
+  const reExport = (why: string): never => fail(`컬럼 \`${col.name}\` 의 기본값 ${why} — ${RE_EXPORT}`);
   if (spec.kind === 'null') {
     if (!col.nullable) return bad('NOT NULL 컬럼에 NULL');
     return BLOB_TYPES.has(base) ? undefined : 'NULL';
@@ -193,7 +194,8 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   if (base === 'bit') return spec.kind === 'bit' ? spec.value : /^\d+$/.test(spec.value) ? `b'${BigInt(spec.value).toString(2)}'` : bad(spec.value);
   if (spec.kind === 'bit') return bad(spec.value);
   if (TEMPORAL_TYPES.has(base)) return temporalText(spec, col, base as TemporalType, bad);
-  if (NUMERIC.has(base) || base === 'year') return quoteString(numericDefault(spec.value, col.type, bad));
+  if (base === 'year') return quoteString(yearDefault(spec.value, bad, reExport));
+  if (NUMERIC.has(base)) return quoteString(numericDefault(spec.value, col.type, bad, reExport));
   if (base === 'enum') {
     const wanted = trimTrailingSpaces(spec.value).toLowerCase();
     return quoteString(enumMembers(col.type).find((m) => m.toLowerCase() === wanted) ?? bad(`'${spec.value}' 은 ENUM 값이 아닙니다`));
@@ -216,15 +218,75 @@ function temporalText(spec: DefaultSpec, col: Pick<Column, 'name' | 'type'>, typ
 // \d+\.?\d* 처럼 '.' 를 선택으로 두면 \d+ 와 \d* 가 같은 자리를 나눠 가져 실패할 때 O(n^2) (20만 자 ≈ 30 초)
 const NUMERIC_LITERAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
 
-// ponytail: 정수 범위·DECIMAL 자릿수 초과(MySQL 1067)는 검사하지 않는다 — 필요해지면 타입별 범위표를 둔다
-function numericDefault(text: string, type: string, bad: (why: string) => never): string {
+// ponytail: 정수 범위(MySQL 1067)는 검사하지 않는다 — 필요해지면 타입별 범위표를 둔다. FLOAT·DOUBLE 은 MySQL 이 FLOAT 를 유효숫자 6자리로, 아주 크거나 작은 DOUBLE 을
+// 지수 표기로 다시 쓰지만 재현하지 않는다 (스펙 4장)
+function numericDefault(text: string, type: string, bad: (why: string) => never, reExport: (why: string) => never): string {
   const t = text.trim();
   if (!NUMERIC_LITERAL.test(t)) return bad(`'${text}' 은 숫자가 아닙니다`);
   const base = baseType(type);
   if (/ unsigned$/.test(type) && t.startsWith('-') && Number(t) !== 0) return bad('UNSIGNED 컬럼에 음수');
-  if (INT_TYPES.has(base) || base === 'year') return /^[+-]?\d+$/.test(t) ? BigInt(t).toString() : bad(`정수 컬럼에 '${text}'`);
-  if (base === 'decimal') return Number(t).toFixed(Number(/^decimal\(\d+,(\d+)\)/.exec(type)![1]));
+  if (INT_TYPES.has(base)) return /^[+-]?\d+$/.test(t) ? BigInt(t).toString() : bad(`정수 컬럼에 '${text}'`);
+  if (base === 'decimal') return decimalDefault(t, type, bad, reExport);
   return String(Number(t)); // float·double
+}
+
+// YEAR 기본값 (MySQL 8.0.46·8.4.11 실측): 네 자리 연도(1901~2155)와 0000 만 그대로 저장한다. 한두 자리는 MySQL 이 세기를 붙여 바꾸고
+// (20 → '2020', 69 → '2069', 70 → '1970', 숫자 0 → '0000' 인데 문자열 '0' → '2000'), '+2020'·'2020.5'·' 2020' 같은 숫자 꼴도 값을 다시 써서 저장하므로 재현하지 않는다
+function yearDefault(text: string, bad: (why: string) => never, reExport: (why: string) => never): string {
+  const rewritten = (why: string) => reExport(`${JSON.stringify(text)} 은(는) ${why} (YEAR 는 네 자리 연도로 쓰세요)`);
+  if (/^\d+$/.test(text)) {
+    const year = text.replace(/^0+/, ''); // 0 으로 채운 꼴(0001)도 숫자 1 과 같다
+    if (text === '0000') return text;
+    if (year.length <= 2) return rewritten('MySQL 이 세기를 붙여 바꿔 저장합니다');
+    return year.length === 4 && year >= '1901' && year <= '2155' ? year : bad('YEAR 는 1901~2155 와 0000 만 받습니다');
+  }
+  if (/^\s*[+-]?\d+(?:\.\d+)?\s*$/.test(text)) return rewritten('MySQL 이 값을 다시 써서 저장합니다');
+  return bad(`'${text}' 은 YEAR 값이 아닙니다`);
+}
+
+// DECIMAL 기본값 (MySQL 8.0.46·8.4.11 실측): 정확한 십진수로 scale 자리에 맞춘다. Number 를 거치면 15자리가 넘는 값과 소수 17자리 이상이 틀리고
+// (0.1.toFixed(20) = '0.10000000000000000555') 반올림도 어긋난다 (1.005.toFixed(2) = '1.00', MySQL 은 '1.01'). 반올림은 0 에서 먼 쪽이고 (2.5 → 3, -2.5 → -3, -0.001 → '0.00'),
+// 정밀도를 넘으면 반올림한 뒤에 1067 이다. 지수 표기(1e2)는 MySQL 이 DOUBLE 을 거쳐 바꾸므로 가수 15자리 이하·지수 70 이하만 받는다
+const DECIMAL_LITERAL = /^([+-]?)(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i;
+const MAX_EXPONENT = 70;
+const MAX_EXPONENT_DIGITS = 15;
+
+function decimalDefault(t: string, type: string, bad: (why: string) => never, reExport: (why: string) => never): string {
+  const [precision, scale] = decimalSize(type);
+  const [, sign, intDigits, fracDigits = '', expText] = DECIMAL_LITERAL.exec(t)!; // numericDefault 가 NUMERIC_LITERAL 로 모양을 이미 확인했다
+  const exponent = expText === undefined ? 0 : Number(expText);
+  const digits = intDigits + fracDigits;
+  if (expText !== undefined && (Math.abs(exponent) > MAX_EXPONENT || digits.replace(/^0+/, '').length > MAX_EXPONENT_DIGITS)) {
+    return reExport(`${t} 의 지수 표기는 MySQL 이 DOUBLE 을 거쳐 바꿔 가수 ${MAX_EXPONENT_DIGITS}자리·지수 ${MAX_EXPONENT} 이하만 받습니다`);
+  }
+  const point = intDigits.length + exponent; // digits 안에서 소수점이 놓이는 자리
+  const whole = (point <= 0 ? '' : digits.slice(0, point).padEnd(point, '0')).replace(/^0+/, '');
+  const frac = point >= digits.length ? '' : point <= 0 ? '0'.repeat(-point) + digits : digits.slice(point);
+  const overflow = () => bad(`DECIMAL(${precision},${scale}) 의 범위를 넘습니다`);
+  if (whole.length > precision - scale) return overflow(); // 긴 숫자를 BigInt 로 읽기 전에 거른다
+  const scaled = BigInt(`${whole || '0'}${frac.slice(0, scale).padEnd(scale, '0')}`) + ((frac[scale] ?? '0') >= '5' ? 1n : 0n);
+  if (scaled >= 10n ** BigInt(precision)) return overflow();
+  const body = scaled.toString().padStart(scale + 1, '0');
+  const text = scale === 0 ? body : `${body.slice(0, -scale)}.${body.slice(-scale)}`;
+  return sign === '-' && scaled !== 0n ? `-${text}` : text;
+}
+
+// decimal(M,D) 의 M·D. MySQL 이 받지 않는 크기는 거부한다
+function decimalSize(type: string): [number, number] {
+  const m = /^decimal\((\d+),(\d+)\)/.exec(type)!;
+  const [precision, scale] = [Number(m[1]), Number(m[2])];
+  if (precision > 65) fail(`DECIMAL 의 전체 자릿수는 65 이하여야 합니다: ${precision} (MySQL 1426)`);
+  if (scale > 30) fail(`DECIMAL 의 소수 자릿수는 30 이하여야 합니다: ${scale} (MySQL 1425)`);
+  if (scale > precision) fail(`DECIMAL(${precision},${scale}) 은 전체 자릿수가 소수 자릿수 이상이어야 합니다 (MySQL 1427)`);
+  return [precision, scale];
+}
+
+// 4바이트 문자(이모지 등, U+10000 이상): SHOW CREATE 는 COMMENT·ENUM·SET 값의 그 문자를 '?' 로, 문자열 DEFAULT 는 통째로 16진수(0xF09F9880)로 바꿔 찍는다 (MySQL 8.0.46·8.4.11 실측).
+// 그대로 저장하면 재추출한 덤프와 달라 1차에서는 거부한다. 루틴 본문은 쓴 그대로 찍히므로 상관없다 (루틴 COMMENT 는 '?')
+const NON_BMP = /[\u{10000}-\u{10FFFF}]/u;
+
+export function assertBmpText(text: string, where: string): void {
+  if (NON_BMP.test(text)) fail(`${where}에 4바이트 문자(이모지 등)가 있습니다 — MySQL 이 SHOW CREATE 에서 '?' 나 16진수로 바꿔 찍어 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
 }
 
 // SET 기본값: 값마다 멤버여야 하고, 정의 순서로 다시 쓴다

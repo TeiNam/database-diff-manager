@@ -5,7 +5,7 @@ import { tokenize } from '../lexer';
 import type { Routine, RoutineCharacteristics, RoutineKind } from '../model';
 import { parseRoutine } from '../parse-routine';
 import { isDefaultCharacteristic } from '../routine-defaults';
-import { routineReturns } from './normalize-mysql';
+import { assertBmpText, routineReturns } from './normalize-mysql';
 import { objectName, objectNameList, type State } from './state';
 import { fail, RE_EXPORT } from './types';
 
@@ -42,6 +42,7 @@ function readRoutine(ddl: string, noBackslashEscapes: boolean): Routine {
   if (QUALIFIED_NAME_RE.test(ddl)) fail(`스키마를 붙인 루틴 이름은 받을 수 없습니다 — ${RE_EXPORT}`);
   const parsed = parseOrFail(ddl, noBackslashEscapes);
   const r: Routine = { ...parsed, characteristics: withoutDefaultCharacteristics(parsed.characteristics) };
+  if (r.characteristics.comment !== undefined) assertBmpText(r.characteristics.comment, '루틴 COMMENT');
   // parseRoutine 은 SHOW CREATE 출력을 읽도록 만들어져 COMMENT 를 SQL_MODE 와 상관없이 일반 이스케이프 규칙으로 다시 읽는다.
   // NO_BACKSLASH_ESCAPES 세션에서 직접 쓴 COMMENT 의 백슬래시는 값이 달라지므로 받지 않는다
   if (noBackslashEscapes && r.characteristics.comment !== undefined && ddl.includes('\\')) {
