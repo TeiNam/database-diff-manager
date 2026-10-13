@@ -721,7 +721,7 @@ import { normalizeUserType } from './normalize-mysql';
 import { fail, type ColumnSpec, type ConstraintItem, type DefaultSpec, type NowSpec, type Position, type TableItem } from './types';
 
 const OUT_OF_SCOPE = '은(는) 1차 지원 범위가 아닙니다 (MySQL 이 식을 다시 써서 저장합니다) — td-export 로 다시 뽑아 올려 주세요';
-const TYPE_MODIFIERS: ReadonlySet<string> = new Set(['UNSIGNED', 'SIGNED', 'ZEROFILL', 'PRECISION']);
+const TYPE_MODIFIERS: ReadonlySet<string> = new Set(['UNSIGNED', 'SIGNED', 'ZEROFILL', 'PRECISION', 'VARYING']);
 const CONSTRAINT_START: ReadonlySet<string> = new Set(['PRIMARY', 'KEY', 'INDEX', 'UNIQUE', 'FULLTEXT', 'SPATIAL', 'CONSTRAINT', 'FOREIGN', 'CHECK']);
 const NOW_WORDS: ReadonlySet<string> = new Set(['CURRENT_TIMESTAMP', 'NOW', 'LOCALTIME', 'LOCALTIMESTAMP']);
 
@@ -1841,7 +1841,7 @@ import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, startsConstraint } from './def-parser';
 import { addKeys, checkTable, dropKeys, exprUses, remapKeys, renameIndex, setIndexVisibility, sortIndexes, type KeyDrop } from './keys';
-import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
+import { baseType, BLOB_TYPES, effectiveCollation, finalizeColumn, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { engineName, optionValue, parseCommonOption, setOption } from './options';
 import { findColumn, needTable, objectName, replaceTable, sameName, type State } from './state';
 import { renameTable } from './table-stmt';
@@ -1998,11 +1998,11 @@ function parseAlter(c: Cursor): Clause {
   return fail(`알 수 없는 ALTER COLUMN 절입니다: ${c.peek()?.v ?? '(끝)'}`);
 }
 
-// DROP DEFAULT: 기본값이 없어진다. NULL 허용 컬럼은 SHOW CREATE 에 DEFAULT NULL 로 보인다
+// DROP DEFAULT: 기본값이 없어진다. NULL 허용 컬럼은 SHOW CREATE 에 DEFAULT NULL 로 보인다 (TEXT·BLOB 계열은 DEFAULT 가 보이지 않는다)
 function dropDefault(col: Column): Column {
   const next: Column = { ...col };
   delete next.default;
-  return col.nullable && !col.autoIncrement && !NO_LITERAL_DEFAULT.has(baseType(col.type)) ? { ...next, default: 'NULL' } : next;
+  return col.nullable && !col.autoIncrement && !BLOB_TYPES.has(baseType(col.type)) ? { ...next, default: 'NULL' } : next;
 }
 
 // 테이블 옵션 (쉼표 없이 이어 쓸 수 있다). ROW_FORMAT=DEFAULT·KEY_BLOCK_SIZE=0·COMMENT='' 는 옵션을 지운다
