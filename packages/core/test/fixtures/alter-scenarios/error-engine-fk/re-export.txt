@@ -1,0 +1,1 @@
+InnoDB 만 지원하므로 MySQL 3776 대신 1차 범위 밖 안내(RE_EXPORT)로 거부한다
