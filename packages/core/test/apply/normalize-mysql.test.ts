@@ -86,6 +86,11 @@ describe('normalizeDefault', () => {
     [{ kind: 'string', value: 'B' }, "enum('a','b')", "'b'"],
     [{ kind: 'string', value: 'y,x' }, "set('x','y')", "'x,y'"],
     [{ kind: 'number', value: '1' }, 'bit(1)', "b'1'"],
+    // BIT 값의 앞쪽 0 은 MySQL 이 떼고 찍는다 (8.0.46·8.4.11 실측: b'00000101' → b'101', b'00000000' → b'0')
+    [{ kind: 'bit', value: "b'00000101'" }, 'bit(8)', "b'101'"],
+    [{ kind: 'bit', value: "b'00000000'" }, 'bit(8)', "b'0'"],
+    [{ kind: 'bit', value: "b'0'" }, 'bit(8)', "b'0'"],
+    [{ kind: 'number', value: '0' }, 'bit(8)', "b'0'"],
     [{ kind: 'null' }, 'int', 'NULL'],
     [{ kind: 'null' }, 'json', 'NULL'],
     [{ kind: 'null' }, 'point', 'NULL'],

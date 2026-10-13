@@ -192,7 +192,7 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   }
   if (NO_LITERAL_DEFAULT.has(base)) return fail(`${base.toUpperCase()} 컬럼에는 리터럴 기본값을 쓸 수 없습니다 (MySQL 1101)`);
   if (spec.kind === 'now') return nowText(col.type, spec, `컬럼 \`${col.name}\` 의 기본값`);
-  if (base === 'bit') return spec.kind === 'bit' ? spec.value : /^\d+$/.test(spec.value) ? `b'${BigInt(spec.value).toString(2)}'` : bad(spec.value);
+  if (base === 'bit') return spec.kind === 'bit' ? bitText(spec.value.slice(2, -1)) : /^\d+$/.test(spec.value) ? bitText(BigInt(spec.value).toString(2)) : bad(spec.value);
   if (spec.kind === 'bit') return bad(spec.value);
   if (TEMPORAL_TYPES.has(base)) return temporalText(spec, col, base as TemporalType, bad);
   if (base === 'year') return quoteString(yearDefault(spec.value, bad, reExport));
@@ -204,6 +204,9 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   if (base === 'set') return quoteString(setDefault(spec.value, col.type, bad));
   return quoteString(spec.value);
 }
+
+// BIT 기본값: MySQL 은 앞쪽 0 을 떼고 찍는다 (8.0.46·8.4.11 실측: b'00000101' → b'101', b'00000000' → b'0')
+const bitText = (digits: string): string => `b'${digits.replace(/^0+/, '') || '0'}'`;
 
 // 날짜·시간 컬럼의 문자열 기본값: MySQL 이 다시 쓰는 꼴로 맞춘다 (temporal-default.ts). 숫자 리터럴(20200101)과 표준이 아닌 꼴은 1차에서 받지 않는다
 const TEMPORAL_SHAPE: Readonly<Record<TemporalType, string>> = { date: 'YYYY-MM-DD', datetime: 'YYYY-MM-DD HH:MM:SS', timestamp: 'YYYY-MM-DD HH:MM:SS', time: 'HH:MM:SS' };
