@@ -1,0 +1,1 @@
+ALTER TABLE member MODIFY nope INT;
