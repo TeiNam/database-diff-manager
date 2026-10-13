@@ -3,7 +3,7 @@
 // 읽으므로 따로 두고, 키 파트·인덱스 옵션·FK 본문은 그 파서를 그대로 쓴다
 import type { Cursor } from '../cursor';
 import type { Token } from '../lexer';
-import type { ColumnFormat, ColumnStorage, Index, IndexKind } from '../model';
+import type { ColumnFormat, ColumnStorage, ForeignKey, Index, IndexKind } from '../model';
 import { indexKind, parseForeignKey, parseIndex, refAction } from '../parse-table';
 import { splitList } from './lists';
 import { ER_INVALID_DEFAULT, ER_INVALID_ON_UPDATE, normalizeUserType } from './normalize-mysql';
@@ -164,14 +164,21 @@ export function parseConstraint(c: Cursor): ConstraintItem {
   if (c.isWord('CHECK')) return fail(`CHECK 제약 추가${OUT_OF_SCOPE}`);
   if (c.acceptWord('PRIMARY', 'KEY')) return { kind: 'index', index: { ...parseIndexBody(c, 'PRIMARY'), name: 'PRIMARY' }, named: true };
   if (c.acceptWord('FOREIGN', 'KEY')) {
+    if (c.toks.slice(c.i).some((t) => t.t === 'word' && t.v.toUpperCase() === 'MATCH')) fail(`FK 의 MATCH 절은 1차 지원 범위가 아닙니다 (MySQL 은 읽고 무시합니다) — ${RE_EXPORT}`);
     const indexName = c.isOp('(') ? undefined : c.ident();
     topLevelLists(c).slice(0, FK_LISTS.length).forEach((inner, k) => checkList(inner, FK_LISTS[k]));
-    return { kind: 'fk', fk: parseForeignKey(c, symbol ?? ''), ...(indexName !== undefined ? { indexName } : {}), named: symbol !== undefined };
+    return { kind: 'fk', fk: withoutNoAction(parseForeignKey(c, symbol ?? '')), ...(indexName !== undefined ? { indexName } : {}), named: symbol !== undefined };
   }
   const kind = indexKind(c) ?? fail(`알 수 없는 정의입니다: ${c.peek()?.v ?? '(끝)'}`);
   if (symbol !== undefined && kind !== 'UNIQUE') fail('CONSTRAINT 이름은 PRIMARY KEY·UNIQUE·FOREIGN KEY 에만 붙일 수 있습니다');
   const name = c.isOp('(') || c.isWord('USING') ? symbol : c.ident();
   return { kind: 'index', index: parseIndexBody(c, kind, name ?? ''), named: name !== undefined };
+}
+
+// SHOW CREATE 는 ON DELETE·ON UPDATE NO ACTION 을 찍지 않는다 (RESTRICT 는 찍는다 — MySQL 8.0.46·8.4.11 실측). 덤프를 읽은 모델과 같게 NO ACTION 은 저장하지 않는다
+function withoutNoAction(fk: ForeignKey): ForeignKey {
+  const { onDelete, onUpdate, ...rest } = fk;
+  return { ...rest, ...(onDelete !== undefined && onDelete !== 'NO ACTION' ? { onDelete } : {}), ...(onUpdate !== undefined && onUpdate !== 'NO ACTION' ? { onUpdate } : {}) };
 }
 
 // [USING x] (키 파트) [옵션…]. PRIMARY KEY 뒤의 이름은 MySQL 이 무시한다. 함수 인덱스는 1차 범위 밖.
@@ -184,6 +191,8 @@ export function parseIndexBody(c: Cursor, kind: IndexKind, name = ''): Index {
   const index = parseIndex(c, kind, name);
   if (index.using !== undefined && !INDEX_TYPES.has(index.using)) badIndexType(index.using); // 키 파트 뒤에 쓴 USING (parse-table 은 \w+ 만 본다)
   if (index.keyBlockSize !== undefined && !Number.isSafeInteger(index.keyBlockSize)) fail('KEY_BLOCK_SIZE 는 정수여야 합니다 (MySQL 1064)');
+  // MySQL 은 인덱스의 KEY_BLOCK_SIZE 를 테이블에 KEY_BLOCK_SIZE 가 있을 때만 저장하고 (그때도 테이블 값과 다를 때만 SHOW CREATE 에 찍는다 — 8.0.46·8.4.11 실측), 문장 순서에 따라 달라진다
+  if (index.keyBlockSize !== undefined) fail(`인덱스의 KEY_BLOCK_SIZE 는 1차 지원 범위가 아닙니다 (MySQL 은 테이블 KEY_BLOCK_SIZE 가 있을 때만 저장합니다) — ${RE_EXPORT}`);
   if (index.parts.some((p) => p.expr !== undefined)) fail(`함수 인덱스${OUT_OF_SCOPE}`);
   return using && !index.using ? { ...index, using } : index;
 }

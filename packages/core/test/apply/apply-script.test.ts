@@ -30,6 +30,34 @@ describe('applyScript — 문장 처리', () => {
   });
 });
 
+// mysqldump 머리·꼬리의 '/*!40101 SET … */;' 꼴: 문장 나누기가 여는 표지(/*!40101)만 떼고 닫는 '*/' 를 문장 끝에 남긴다. 실행 주석 안의 문장은 MySQL 이 그대로 실행하므로
+// 닫는 '*/' 를 떼고 읽는다 (SET 이면 무시/세션 값, 그 밖의 문장이면 그 문장)
+describe('applyScript — 실행 주석(/*!NNNNN … */)으로 감싼 문장', () => {
+  it('mysqldump 의 SET 머리·꼬리는 SET 처럼 읽고, FOREIGN_KEY_CHECKS 는 따라간다', () => {
+    const script = [
+      '/*!40101 SET @saved_cs_client     = @@character_set_client */;', '/*!50503 SET character_set_client = utf8mb4 */;',
+      '/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;',
+      'CREATE TABLE u (id INT, ref INT, FOREIGN KEY (ref) REFERENCES missing (id));', // FOREIGN_KEY_CHECKS=0 이라 부모가 없어도 된다
+      '/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;', '/*!40101 SET character_set_client = @saved_cs_client */;',
+    ].join('\n');
+    const r = run(script);
+    expect(r).toMatchObject({ ok: true, applied: 1 });
+    if (r.ok) expect(r.model.tables.map((t) => t.name)).toEqual(['t', 'u']);
+    expect(run('/*!40014 SET FOREIGN_KEY_CHECKS=0 */;\n/*!40014 SET FOREIGN_KEY_CHECKS=1 */;\nCREATE TABLE v (id INT, ref INT, FOREIGN KEY (ref) REFERENCES missing (id));')).toMatchObject({ ok: false, error: { index: 3 } });
+  });
+
+  it('SET 이 아닌 문장도 실행 주석 안이면 그 문장으로 적용한다 (번호가 없는 /*! 도 같다)', () => {
+    const r = run('/*!40000 ALTER TABLE t ADD COLUMN x INT */;\n/*! ALTER TABLE t ADD COLUMN y INT */;');
+    expect(r).toMatchObject({ ok: true, applied: 2 });
+    if (r.ok) expect(r.model.tables[0].columns.map((c) => c.name)).toEqual(['id', 'x', 'y']);
+  });
+
+  it('문장 끝의 일반 주석 */ 는 건드리지 않는다', () => {
+    expect(run('ALTER TABLE t ADD COLUMN x INT /* note */;')).toMatchObject({ ok: true, applied: 1 });
+    expect(run('ALTER TABLE t ADD COLUMN x INT COMMENT \'a */\';')).toMatchObject({ ok: true, applied: 1 });
+  });
+});
+
 const NO_STATEMENT = { ok: false, error: { index: 0, line: 1, statement: '', reason: '적용할 DDL 문장이 없습니다' } };
 
 describe('resolveDefaults — 스키마 기본 문자셋·콜레이션', () => {

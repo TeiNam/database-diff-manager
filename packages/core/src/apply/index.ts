@@ -1,7 +1,7 @@
 // ALTER 스크립트 → 새 모델. 문장마다 MySQL 과 같은 결과를 만들고, 받을 수 없는 문장에서 멈춘다 (부분 적용하지 않는다)
 import { Cursor, ParseError } from '../cursor';
 import type { RenameMapping } from '../diff';
-import { LexError, tokenize } from '../lexer';
+import { LexError, tokenize, type Token } from '../lexer';
 import type { SchemaModel } from '../model';
 import { splitDump } from '../parse-dump';
 import { UnsafeValueError } from '../sql-safety';
@@ -60,7 +60,7 @@ export function resolveDefaults(given: Partial<ApplyDefaults> = {}): ApplyDefaul
 
 // DDL 을 적용했으면 true, 세션 문장(SET·USE)이면 false
 function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): boolean {
-  const c = new Cursor(tokenize(ddl, { noBackslashEscapes }), ddl);
+  const c = new Cursor(withoutCommentEnd(tokenize(ddl, { noBackslashEscapes })), ddl);
   if (c.isWord('SET')) {
     applySet(st, c);
     return false;
@@ -86,6 +86,14 @@ function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): bo
   } else if (isCreateRoutine(ddl)) createRoutine(st, ddl, noBackslashEscapes);
   else return fail(unsupported(ddl));
   return true;
+}
+
+// 실행 주석(/*!NNNNN … */)으로 감싼 문장 ('/*!40101 SET … */;' — mysqldump 머리·꼬리): 문장 나누기가 여는 표지만 떼고 닫는 '*/' 를 문장 끝에 남긴다.
+// 문장 끝에 붙은 '*' '/' 는 올바른 문장에 있을 수 없으므로 실행 주석의 끝으로 보고 뗀다. 안의 문장은 MySQL 이 그대로 실행한다
+function withoutCommentEnd(toks: Token[]): Token[] {
+  const [star, slash] = toks.slice(-2);
+  const closes = star?.t === 'op' && star.v === '*' && slash?.t === 'op' && slash.v === '/' && star.e === slash.s;
+  return closes ? toks.slice(0, -2) : toks;
 }
 
 function unsupported(ddl: string): string {

@@ -223,8 +223,29 @@ describe('빈 목록·끝 쉼표·정수가 아닌 KEY_BLOCK_SIZE', () => {
     expect(parseColumnSpec(cur(src))).toMatchObject({ name: 'a', type: 'int' });
   });
 
+  // MySQL 은 인덱스의 KEY_BLOCK_SIZE 를 테이블에 KEY_BLOCK_SIZE 가 있을 때만 저장하고 (그때도 테이블 값과 다를 때만 SHOW CREATE 에 찍는다 — 8.0.46·8.4.11 실측)
+  // 문장 순서에 따라 달라져 1차에서는 받지 않는다. FK 의 MATCH 절은 MySQL 이 읽고 무시하지만 table 수준 FK 에서는 받지 않는다
+  it.each([
+    ['INDEX ix (a) KEY_BLOCK_SIZE=4'], ['UNIQUE KEY ux (a, b) KEY_BLOCK_SIZE = 8 COMMENT \'c\''], ['PRIMARY KEY (id) KEY_BLOCK_SIZE=2'],
+    ['FOREIGN KEY (a) REFERENCES p (id) MATCH FULL'], ['CONSTRAINT fk FOREIGN KEY (a) REFERENCES p (id) match simple ON DELETE CASCADE'],
+  ])('%s 는 RE_EXPORT 로 끝나는 안내로 거부', (src) => {
+    const message = messageOf(() => parseConstraint(cur(src)));
+    expect(message.endsWith(RE_EXPORT), message).toBe(true);
+  });
+
+  // MySQL 8.0.46·8.4.11 실측: SHOW CREATE 는 ON DELETE·ON UPDATE NO ACTION 을 찍지 않는다 (RESTRICT 는 찍는다). ERD 도구가 늘 쓰는 꼴이라 덤프를 읽은 모델과 같게 저장하지 않는다
+  it('FK 의 NO ACTION 은 저장하지 않고 RESTRICT·CASCADE 는 남긴다', () => {
+    const fk = (clause: string) => (parseConstraint(cur(`FOREIGN KEY (a) REFERENCES p (id) ${clause}`)) as { fk: object }).fk;
+    expect(fk('ON DELETE NO ACTION ON UPDATE NO ACTION')).toEqual({ name: '', columns: ['a'], refTable: 'p', refColumns: ['id'] });
+    expect(fk('ON UPDATE no action')).toEqual({ name: '', columns: ['a'], refTable: 'p', refColumns: ['id'] });
+    expect(fk('ON DELETE NO ACTION ON UPDATE RESTRICT')).toMatchObject({ onUpdate: 'RESTRICT' });
+    expect(fk('ON DELETE NO ACTION ON UPDATE RESTRICT')).not.toHaveProperty('onDelete');
+    expect(fk('ON DELETE RESTRICT ON UPDATE CASCADE')).toMatchObject({ onDelete: 'RESTRICT', onUpdate: 'CASCADE' });
+    expect(fk('ON DELETE SET DEFAULT')).toMatchObject({ onDelete: 'SET DEFAULT' });
+  });
+
   it('올바른 목록·옵션은 그대로 받는다', () => {
-    expect(parseConstraint(cur('INDEX ix (a, b(5) DESC) KEY_BLOCK_SIZE=8'))).toMatchObject({ index: { parts: [{ column: 'a' }, { column: 'b', length: 5, desc: true }], keyBlockSize: 8 } });
+    expect(parseConstraint(cur("INDEX ix (a, b(5) DESC) COMMENT 'c'"))).toMatchObject({ index: { parts: [{ column: 'a' }, { column: 'b', length: 5, desc: true }], comment: 'c' } });
     expect(parseConstraint(cur('FOREIGN KEY (a, b) REFERENCES db.p (x, y) ON DELETE CASCADE'))).toMatchObject({ fk: { columns: ['a', 'b'], refSchema: 'db', refColumns: ['x', 'y'], onDelete: 'CASCADE' } });
   });
 });
