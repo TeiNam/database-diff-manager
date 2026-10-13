@@ -199,11 +199,12 @@ describe('정규식 역추적', () => {
   });
 });
 
-// splitTopLevel 은 끝 쉼표를 조용히 버리고 빈 괄호는 항목 0개로 읽는다. MySQL 은 둘 다 1064
+// splitTopLevel 은 끝 쉼표를 조용히 버리고 빈 괄호는 항목 0개로 읽는다. MySQL 은 둘 다 1064 (빈 항목 `a,,b` 도 같다 — splitList)
 describe('빈 목록·끝 쉼표·정수가 아닌 KEY_BLOCK_SIZE', () => {
   it.each([
     ['INDEX ix ()'], ['PRIMARY KEY ()'], ['UNIQUE KEY ux ()'],
     ['INDEX ix (a,)'], ['PRIMARY KEY (id,)'], ['UNIQUE KEY (a, b,)'], ['KEY ix (a(10) DESC,)'],
+    ['INDEX ix (a,,b)'], ['INDEX ix (,a)'], ['FOREIGN KEY (a,,b) REFERENCES p (x, y)'], ['FOREIGN KEY (a, b) REFERENCES p (,y)'],
     ['FOREIGN KEY () REFERENCES p (id)'], ['FOREIGN KEY (a) REFERENCES p ()'],
     ['FOREIGN KEY (a,) REFERENCES p (id)'], ['FOREIGN KEY (a) REFERENCES p (id,)'], ['CONSTRAINT fk FOREIGN KEY ix (a, b,) REFERENCES db.p (x, y)'],
     ['INDEX ix (a) KEY_BLOCK_SIZE=abc'], ['INDEX ix (a) KEY_BLOCK_SIZE = 1.5'],

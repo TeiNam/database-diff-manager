@@ -5,6 +5,7 @@ import type { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import type { ColumnFormat, ColumnStorage, Index, IndexKind } from '../model';
 import { indexKind, parseForeignKey, parseIndex, refAction } from '../parse-table';
+import { splitList } from './lists';
 import { ER_INVALID_DEFAULT, ER_INVALID_ON_UPDATE, normalizeUserType } from './normalize-mysql';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type DefaultSpec, type NowSpec, type Position, type TableItem } from './types';
 
@@ -213,10 +214,7 @@ function topLevelLists(c: Cursor): Token[][] {
   return lists;
 }
 
-// 키 파트·FK 컬럼 목록은 비어 있거나 쉼표로 끝나면 안 된다. splitTopLevel 이 끝 쉼표를 조용히 버려 `(a,)` 가 `(a)` 가 되고
-// 빈 괄호는 항목 0개가 된다 — MySQL 은 둘 다 1064
+// 키 파트·FK 컬럼 목록의 모양만 본다 (빈 목록·빈 항목·끝 쉼표는 MySQL 처럼 1064). 항목을 읽는 일은 parse-table 이 하므로 나눈 결과는 쓰지 않는다
 function checkList(inner: readonly Token[], what: string): void {
-  if (!inner.length) fail(`${what} 목록이 비었습니다 (MySQL 1064)`);
-  const last = inner[inner.length - 1];
-  if (last.t === 'op' && last.v === ',') fail(`${what} 목록이 쉼표로 끝납니다 (MySQL 1064)`);
+  splitList(inner, what);
 }

@@ -1,9 +1,10 @@
 // 사람이 쓴 타입·기본값·문자셋을 MySQL SHOW CREATE 모양으로 맞춘다 (8.0/8.4).
 // 규칙마다 test:mysql 의 ALTER 시나리오(test/apply.int.test.ts)가 실제 MySQL 결과와 비교한다
-import { Cursor, splitTopLevel } from '../cursor';
+import { Cursor } from '../cursor';
 import { quoteString, tokenize, type Token } from '../lexer';
 import type { Column, TableOption } from '../model';
 import { normalizeType } from '../normalize';
+import { splitList } from './lists';
 import { fail, RE_EXPORT, type ColumnSpec, type DefaultSpec, type NowSpec } from './types';
 
 export const INT_TYPES: ReadonlySet<string> = new Set(['tinyint', 'smallint', 'mediumint', 'int', 'bigint']);
@@ -58,8 +59,8 @@ export function normalizeUserType(src: string): string {
 
 function withArgs(name: string, inner: Token[] | undefined, src: string): string {
   if (name === 'enum' || name === 'set') return `${name}(${enumValues(inner, src).map(quoteString).join(',')})`;
-  const args = inner && splitTopLevel(inner).map((part) => (part.length === 1 && part[0].t === 'number' && /^\d+$/.test(part[0].v) ? String(Number(part[0].v)) : fail(`타입 인자가 올바르지 않습니다: ${src}`)));
-  if (args && !args.length) fail(`타입 인자가 비었습니다: ${src} (MySQL 1064)`);
+  if (inner && !inner.length) fail(`타입 인자가 비었습니다: ${src} (MySQL 1064)`); // 빈 괄호는 splitList 보다 먼저 봐서 어느 타입인지 메시지에 남긴다
+  const args = inner && splitList(inner, '타입 인자').map((part) => (part.length === 1 && part[0].t === 'number' && /^\d+$/.test(part[0].v) ? String(Number(part[0].v)) : fail(`타입 인자가 올바르지 않습니다: ${src}`)));
   if (args && args.length > (TWO_ARGS.has(name) ? 2 : 1)) fail(`타입 인자가 너무 많습니다: ${src}`);
   switch (name) {
     case 'decimal': return `decimal(${args?.[0] ?? 10},${args?.[1] ?? 0})`;
@@ -79,7 +80,7 @@ function withArgs(name: string, inner: Token[] | undefined, src: string): string
 
 // MySQL 은 ENUM·SET 값 끝 공백을 지운다. 대소문자만 다른 같은 값이면 1291
 function enumValues(inner: Token[] | undefined, src: string): string[] {
-  const values = (inner ? splitTopLevel(inner) : []).map((part) => (part.length === 1 && part[0].t === 'string' ? part[0].v.replace(/ +$/, '') : fail(`ENUM·SET 값은 문자열이어야 합니다: ${src}`)));
+  const values = (inner ? splitList(inner, 'ENUM·SET 값') : []).map((part) => (part.length === 1 && part[0].t === 'string' ? part[0].v.replace(/ +$/, '') : fail(`ENUM·SET 값은 문자열이어야 합니다: ${src}`)));
   if (!values.length) fail(`ENUM·SET 값이 없습니다: ${src}`);
   const seen = new Set<string>();
   for (const v of values) {
@@ -185,10 +186,14 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   return quoteString(spec.value);
 }
 
+// 숫자 모양 (부호, 정수부[.소수부] 또는 .소수부, 지수). 정수부와 소수부를 '.' 이 갈라 놓아 숫자가 아닌 긴 문자열에서도 선형이다 —
+// \d+\.?\d* 처럼 '.' 를 선택으로 두면 \d+ 와 \d* 가 같은 자리를 나눠 가져 실패할 때 O(n^2) (20만 자 ≈ 30 초)
+const NUMERIC_LITERAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
+
 // ponytail: 정수 범위·DECIMAL 자릿수 초과(MySQL 1067)는 검사하지 않는다 — 필요해지면 타입별 범위표를 둔다
 function numericDefault(text: string, type: string, bad: (why: string) => never): string {
   const t = text.trim();
-  if (!/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(t)) return bad(`'${text}' 은 숫자가 아닙니다`);
+  if (!NUMERIC_LITERAL.test(t)) return bad(`'${text}' 은 숫자가 아닙니다`);
   const base = baseType(type);
   if (/ unsigned$/.test(type) && t.startsWith('-') && Number(t) !== 0) return bad('UNSIGNED 컬럼에 음수');
   if (INT_TYPES.has(base) || base === 'year') return /^[+-]?\d+$/.test(t) ? BigInt(t).toString() : bad(`정수 컬럼에 '${text}'`);

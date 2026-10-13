@@ -35,6 +35,15 @@ describe('normalizeUserType', () => {
     expect(() => normalizeUserType(src)).toThrow(/타입 인자가 비었습니다.*\(MySQL 1064\)/);
   });
 
+  // 쉼표 목록은 splitList 로 나눈다: splitTopLevel 은 끝 쉼표를 조용히 버려 `(10,)` 가 `(10)` 이 되었다 (MySQL 은 1064)
+  it.each([
+    ["ENUM('a','b',)"], ["SET('a',)"], ["ENUM(,'a')"], ["ENUM('a',,'b')"], ['ENUM()'], ['SET()'],
+    ['DECIMAL(10,)'], ['DECIMAL(,2)'], ['DECIMAL(10,,2)'], ['VARCHAR(20,)'], ['FLOAT(7,)'], ['DATETIME(3,)'],
+  ])('%s: 끝 쉼표·빈 항목·빈 목록은 1064', (src) => {
+    expect(() => normalizeUserType(src)).toThrow(ApplyFailure);
+    expect(() => normalizeUserType(src)).toThrow(/\(MySQL 1064\)/);
+  });
+
   it.each([['CHARACTER VARYING'], ['CHAR VARYING'], ['CHAR VARYING(5) UNSIGNED']])('%s: VARCHAR 와 같게 길이가 없거나 UNSIGNED 면 거부', (src) => {
     expect(() => normalizeUserType(src)).toThrow(ApplyFailure);
   });
@@ -102,6 +111,21 @@ describe('normalizeDefault', () => {
     [{ kind: 'string', value: 'x' }, col('text')], [{ kind: 'string', value: 'x' }, col('blob')], [{ kind: 'string', value: 'x' }, col('json')],
     [{ kind: 'number', value: '1' }, col('point')], [{ kind: 'string', value: 'x' }, col('geometry')], [{ kind: 'now' }, col('json')],
   ] as const)('%j 는 리터럴 기본값이라 거부 (1101)', (s, c) => expect(() => normalizeDefault(s as DefaultSpec, c)).toThrow(/1101/));
+
+  // 숫자 판정 정규식은 선형이어야 한다: 앞쪽 \d+ 와 \d* 가 같은 자리를 나눠 갖는 모양은 숫자 아닌 긴 문자열에서 O(n^2) (20만 자 ≈ 30 초)
+  it('숫자 판정이 선형이다: 숫자가 아닌 긴 문자열 기본값도 바로 거부한다', () => {
+    const started = performance.now();
+    expect(() => normalizeDefault({ kind: 'string', value: `${'1'.repeat(200000)}x` }, col('int'))).toThrow(ApplyFailure);
+    expect(() => normalizeDefault({ kind: 'string', value: `${'1'.repeat(100000)}.${'1'.repeat(100000)}x` }, col('double'))).toThrow(ApplyFailure);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it.each([['5', 'int', "'5'"], ['+5', 'int', "'5'"], ['-0', 'int unsigned', "'0'"], ['1.', 'double', "'1'"], ['.5', 'double', "'0.5'"], ['1e2', 'double', "'100'"], ['1.5E+1', 'double', "'15'"], [' 7 ', 'int', "'7'"]])(
+    '숫자 모양 문자열 %j (%s) → %s', (value, type, out) => expect(normalizeDefault({ kind: 'string', value }, col(type))).toBe(out));
+
+  it.each([[''], ['.'], ['+'], ['e5'], ['1e'], ['1e+'], ['1..2'], ['1.2.3'], ['0x10'], ['1 2']])('숫자가 아닌 문자열 %j 은 거부 (1067)', (value) => {
+    expect(() => normalizeDefault({ kind: 'string', value }, col('double'))).toThrow(/\(MySQL 1067\)/);
+  });
 
   it('DEFAULT CURRENT_TIMESTAMP 가 잘못되면 1067', () => {
     expect(() => normalizeDefault({ kind: 'now' }, col('date'))).toThrow(/1067/);
