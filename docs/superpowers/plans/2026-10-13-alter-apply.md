@@ -1990,7 +1990,7 @@ function parseAlter(c: Cursor): Clause {
   if (c.acceptWord('SET', 'DEFAULT')) {
     if (c.isOp('(')) return fail('식 기본값 SET DEFAULT (…) 은 1차 지원 범위가 아닙니다 — td-export 로 다시 뽑아 올려 주세요');
     const value = parseDefault(c);
-    return { k: 'alterColumn', old, set: (col) => ({ ...col, default: normalizeDefault(value, col) }) };
+    return { k: 'alterColumn', old, set: (col) => withDefault(col, normalizeDefault(value, col)) };
   }
   if (c.acceptWord('DROP', 'DEFAULT')) return { k: 'alterColumn', old, set: dropDefault };
   if (c.acceptWord('SET', 'VISIBLE')) return { k: 'alterColumn', old, set: (col) => ({ ...col, invisible: false }) };
@@ -1998,12 +1998,16 @@ function parseAlter(c: Cursor): Clause {
   return fail(`알 수 없는 ALTER COLUMN 절입니다: ${c.peek()?.v ?? '(끝)'}`);
 }
 
-// DROP DEFAULT: 기본값이 없어진다. NULL 허용 컬럼은 SHOW CREATE 에 DEFAULT NULL 로 보인다 (TEXT·BLOB 계열은 DEFAULT 가 보이지 않는다)
-function dropDefault(col: Column): Column {
+// 기본값을 바꾼다 (undefined 면 DEFAULT 절이 없다 — 키를 남기지 않는다: 모델 해시·왕복 비교가 키 유무를 본다)
+function withDefault(col: Column, value: string | undefined): Column {
   const next: Column = { ...col };
   delete next.default;
-  return col.nullable && !col.autoIncrement && !BLOB_TYPES.has(baseType(col.type)) ? { ...next, default: 'NULL' } : next;
+  return value === undefined ? next : { ...next, default: value };
 }
+
+// DROP DEFAULT: 기본값이 없어진다. NULL 허용 컬럼은 SHOW CREATE 에 DEFAULT NULL 로 보인다 (TEXT·BLOB 계열은 DEFAULT 가 보이지 않는다)
+const dropDefault = (col: Column): Column =>
+  withDefault(col, col.nullable && !col.autoIncrement && !BLOB_TYPES.has(baseType(col.type)) ? 'NULL' : undefined);
 
 // 테이블 옵션 (쉼표 없이 이어 쓸 수 있다). ROW_FORMAT=DEFAULT·KEY_BLOCK_SIZE=0·COMMENT='' 는 옵션을 지운다
 function parseOptions(c: Cursor): Clause[] {
