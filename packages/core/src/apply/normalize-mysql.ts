@@ -4,6 +4,7 @@ import { Cursor } from '../cursor';
 import { quoteString, tokenize, type Token } from '../lexer';
 import type { Column, TableOption } from '../model';
 import { normalizeType } from '../normalize';
+import { floatDefault } from './float-default';
 import { splitList } from './lists';
 import { TEMPORAL_TYPES, temporalDefault, type TemporalType } from './temporal-default';
 import { fail, RE_EXPORT, type ColumnSpec, type DefaultSpec, type NowSpec } from './types';
@@ -218,8 +219,7 @@ function temporalText(spec: DefaultSpec, col: Pick<Column, 'name' | 'type'>, typ
 // \d+\.?\d* 처럼 '.' 를 선택으로 두면 \d+ 와 \d* 가 같은 자리를 나눠 가져 실패할 때 O(n^2) (20만 자 ≈ 30 초)
 const NUMERIC_LITERAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
 
-// ponytail: 정수 범위(MySQL 1067)는 검사하지 않는다 — 필요해지면 타입별 범위표를 둔다. FLOAT·DOUBLE 은 MySQL 이 FLOAT 를 유효숫자 6자리로, 아주 크거나 작은 DOUBLE 을
-// 지수 표기로 다시 쓰지만 재현하지 않는다 (스펙 4장)
+// ponytail: 정수 범위(MySQL 1067)는 검사하지 않는다 — 필요해지면 타입별 범위표를 둔다. FLOAT·DOUBLE 은 MySQL 이 다시 쓰는 꼴을 float-default.ts 가 맞춘다
 function numericDefault(text: string, type: string, bad: (why: string) => never, reExport: (why: string) => never): string {
   const t = text.trim();
   if (!NUMERIC_LITERAL.test(t)) return bad(`'${text}' 은 숫자가 아닙니다`);
@@ -227,7 +227,7 @@ function numericDefault(text: string, type: string, bad: (why: string) => never,
   if (/ unsigned$/.test(type) && t.startsWith('-') && Number(t) !== 0) return bad('UNSIGNED 컬럼에 음수');
   if (INT_TYPES.has(base)) return /^[+-]?\d+$/.test(t) ? BigInt(t).toString() : bad(`정수 컬럼에 '${text}'`);
   if (base === 'decimal') return decimalDefault(t, type, bad, reExport);
-  return String(Number(t)); // float·double
+  return floatDefault(t, type, bad, reExport);
 }
 
 // YEAR 기본값 (MySQL 8.0.46·8.4.11 실측): 네 자리 연도(1901~2155)와 0000 만 그대로 저장한다. 한두 자리는 MySQL 이 세기를 붙여 바꾸고
