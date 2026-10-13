@@ -1,5 +1,6 @@
 // SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 만 추적한다. 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수(default_storage_engine 등)는
 // 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, time_zone, unique_checks 등)는 스키마에 영향이 없어 무시한다.
+// 서버 변수(SET GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)는 이 스크립트의 세션을 바꾸지 않아 무시한다.
 // td-export·마이그레이션 스크립트의 'SET @OLD_X = @@X, X = 0' 저장과 'SET X = @OLD_X' 복원을 따른다
 import { Cursor } from '../cursor';
 import { splitList } from './lists';
@@ -28,16 +29,32 @@ const DDL_SQL_MODES: ReadonlySet<string> = new Set(['REAL_AS_FLOAT', 'ANSI_QUOTE
 const FK_CHECKS_OFF: ReadonlySet<string> = new Set(['0', 'OFF', 'FALSE']);
 const FK_CHECKS_ON: ReadonlySet<string> = new Set(['1', 'ON', 'TRUE']);
 
+// 대입의 범위. server: GLOBAL·PERSIST·PERSIST_ONLY — 서버 값을 바꾸고 이 스크립트의 세션 값은 그대로라 무시한다
+type Scope = 'session' | 'server';
+
 export function applySet(st: State, c: Cursor): void {
   c.expectWord('SET');
-  for (const toks of splitList(c.toks.slice(c.i), 'SET')) assign(st, new Cursor(toks, c.src));
+  let scope: Scope = 'session';
+  for (const toks of splitList(c.toks.slice(c.i), 'SET')) scope = assign(st, new Cursor(toks, c.src), scope);
 }
 
-function assign(st: State, a: Cursor): void {
-  if (a.isWord('NAMES') || a.isWord('CHARACTER') || a.isWord('CHARSET')) return;
-  if (a.isWord('GLOBAL') || a.isWord('PERSIST') || a.isWord('PERSIST_ONLY')) fail('SET GLOBAL·PERSIST 는 받을 수 없습니다');
-  if (!a.acceptWord('SESSION')) a.acceptWord('LOCAL');
-  const target = variable(a);
+// 대입 하나. 돌려주는 값은 다음 대입이 물려받는 범위다: 앞에 쓴 GLOBAL·PERSIST·PERSIST_ONLY·SESSION·LOCAL 은 수식어 없는 뒤 대입에도 이어진다
+// (MySQL: 가장 최근 수식어를 따른다). '@@global.x' 처럼 이름에 붙인 범위는 그 대입에만 쓴다
+function assign(st: State, a: Cursor, inherited: Scope): Scope {
+  if (a.isWord('NAMES') || a.isWord('CHARACTER') || a.isWord('CHARSET')) return inherited;
+  const scope = scopeWord(a) ?? inherited;
+  const variable = target(a);
+  if (!variable.name.startsWith('@') && (variable.scope ?? scope) === 'server') return scope; // 서버 변수: 값이 식이어도, 스키마에 영향을 주는 변수여도 이 세션과 상관없다
+  assignSession(st, a, variable.name);
+  return scope;
+}
+
+function scopeWord(a: Cursor): Scope | undefined {
+  if (a.acceptWord('GLOBAL') || a.acceptWord('PERSIST') || a.acceptWord('PERSIST_ONLY')) return 'server';
+  return a.acceptWord('SESSION') || a.acceptWord('LOCAL') ? 'session' : undefined;
+}
+
+function assignSession(st: State, a: Cursor, target: string): void {
   if (SCHEMA_VARIABLES.has(target)) fail(`이후 테이블 정의 결과를 바꾸는 세션 변수는 받을 수 없습니다: ${target} — ${RE_EXPORT}`);
   if (!a.acceptOp('=')) {
     a.expectOp(':');
@@ -50,22 +67,31 @@ function assign(st: State, a: Cursor): void {
   else if (target === 'sql_mode') st.sqlMode = sqlModeOf(value);
 }
 
-// '@v' (사용자 변수), '@@[session.]x' 와 'x' (세션 변수, 소문자)
-function variable(a: Cursor): string {
-  if (!a.acceptOp('@')) return a.ident().toLowerCase();
-  return a.acceptOp('@') ? systemName(a) : `@${a.ident().toLowerCase()}`;
+interface Variable {
+  name: string; // '@v' (사용자 변수) 또는 시스템 변수 이름 (소문자)
+  scope?: Scope; // '@@global.x'·'@@session.x' 처럼 이름에 붙인 범위
 }
 
-function systemName(a: Cursor): string {
+// '@v', '@@[global.|session.]x', 'x'
+function target(a: Cursor): Variable {
+  if (!a.acceptOp('@')) return { name: a.ident().toLowerCase() };
+  return a.acceptOp('@') ? systemName(a) : { name: `@${a.ident().toLowerCase()}` };
+}
+
+const NAME_SCOPES: ReadonlyMap<string, Scope> = new Map([['global', 'server'], ['persist', 'server'], ['persist_only', 'server'], ['session', 'session'], ['local', 'session']]);
+
+function systemName(a: Cursor): Variable {
   const first = a.ident().toLowerCase();
-  if (!a.acceptOp('.')) return first;
-  if (first === 'global' || first === 'persist' || first === 'persist_only') fail('SET GLOBAL·PERSIST 는 받을 수 없습니다');
-  return a.ident().toLowerCase();
+  if (!a.acceptOp('.')) return { name: first };
+  return { name: a.ident().toLowerCase(), scope: NAME_SCOPES.get(first) };
 }
 
 function valueOf(st: State, a: Cursor): string {
   if (a.acceptOp('@')) {
-    if (a.acceptOp('@')) return current(st, systemName(a));
+    if (a.acceptOp('@')) {
+      const source = systemName(a);
+      return source.scope === 'server' ? fail(`서버 변수 값(@@global·@@persist 의 ${source.name})은 알 수 없어 받을 수 없습니다`) : current(st, source.name);
+    }
     const name = `@${a.ident().toLowerCase()}`;
     return st.saved.get(name) ?? fail(`값을 저장하지 않은 변수입니다: ${name}`);
   }

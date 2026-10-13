@@ -60,7 +60,7 @@ export function resolveDefaults(given: Partial<ApplyDefaults> = {}): ApplyDefaul
   return { charset, collation };
 }
 
-// DDL 을 적용했으면 true, 세션 문장(SET·USE)이면 false
+// DDL 을 적용했으면 true, 세션 문장(SET·USE)과 무시하는 문장(isNoOp)이면 false
 function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): boolean {
   assertSameBackslashMode(st, ddl, noBackslashEscapes);
   const c = new Cursor(withoutCommentEnd(tokenize(ddl, { noBackslashEscapes })), ddl);
@@ -73,6 +73,7 @@ function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): bo
     if (db !== st.schemaName || !c.done) fail(`다른 스키마로 USE 할 수 없습니다: ${db}`);
     return false;
   }
+  if (isNoOp(c)) return false;
   if (!isCreateRoutine(ddl)) assertBmpStrings(c.toks);
   if (noBackslashEscapes && !isCreateRoutine(ddl)) assertNoBackslashTypeValues(c.toks, ddl);
   if (c.acceptWord('ALTER', 'TABLE')) alterTable(st, c);
@@ -91,6 +92,16 @@ function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): bo
   } else if (isCreateRoutine(ddl)) createRoutine(st, ddl, noBackslashEscapes);
   else return fail(unsupported(ddl));
   return true;
+}
+
+// 스키마(SHOW CREATE 결과)를 바꾸지 않는 문장 — 이미 MySQL 에서 돈 스크립트에 흔해 무시한다 (적용한 문장 수에 세지 않는다): 트랜잭션 제어, LOCK·UNLOCK TABLES,
+// 데이터 문장, 권한. DDL 은 MySQL 이 암묵적으로 커밋하므로 ROLLBACK 이 되돌리지 않고, TRUNCATE 가 바꾸는 AUTO_INCREMENT 값은 비교하지 않는다
+const NO_OP_WORDS: ReadonlySet<string> = new Set(['BEGIN', 'COMMIT', 'ROLLBACK', 'INSERT', 'UPDATE', 'DELETE', 'REPLACE', 'TRUNCATE', 'GRANT', 'REVOKE']);
+
+function isNoOp(c: Cursor): boolean {
+  const first = c.peek();
+  if (first?.t !== 'word') return false;
+  return NO_OP_WORDS.has(first.v.toUpperCase()) || c.isWord('START', 'TRANSACTION') || ['LOCK', 'UNLOCK'].some((w) => c.isWord(w, 'TABLES') || c.isWord(w, 'TABLE'));
 }
 
 // 문장 나누기(splitDump)는 SET SQL_MODE = '…' 꼴만 따라가 NO_BACKSLASH_ESCAPES 를 켜고 끈다. SET 문(applySet)이 바꾼 세션 SQL_MODE 와 어긋나면

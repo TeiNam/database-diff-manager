@@ -23,11 +23,11 @@ describe('SET 문', () => {
     expect(st.fkChecks).toBe(true);
   });
 
-  it('GLOBAL·식 값·저장하지 않은 변수는 거부한다', () => {
+  it('세션 변수의 식 값·저장하지 않은 변수는 거부한다', () => {
     const st = initialState(empty, 'shop', MYSQL_DEFAULTS, DEFAULT_SQL_MODE);
     const set = (sql: string) => () => applySet(st, new Cursor(tokenize(sql), sql));
-    expect(set('SET GLOBAL foreign_key_checks = 0')).toThrow(ApplyFailure);
     expect(set("SET sql_mode = CONCAT(@@sql_mode, ',X')")).toThrow(ApplyFailure);
+    expect(set("SET sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_DATE', '')")).toThrow(ApplyFailure);
     expect(set('SET FOREIGN_KEY_CHECKS = @never_saved')).toThrow(ApplyFailure);
   });
 });
@@ -220,15 +220,25 @@ describe('이후 테이블 정의를 바꾸는 세션 변수', () => {
   });
 });
 
-// GLOBAL·PERSIST 는 세션 값이 아니라 서버 값을 바꾼다 — 세션 상태(FOREIGN_KEY_CHECKS·SQL_MODE)에 반영하면 MySQL 과 달라진다
+// GLOBAL·PERSIST 는 세션 값이 아니라 서버 값을 바꾼다 — 이 스크립트의 세션(FOREIGN_KEY_CHECKS·SQL_MODE)은 그대로라 무시한다. 값이 식이거나
+// 스키마에 영향을 주는 변수여도 세션에는 상관없다. 앞에 쓴 GLOBAL·PERSIST·SESSION 은 수식어 없는 뒤 대입에도 이어진다 (MySQL: 가장 최근 수식어를 따른다)
 describe('SET 범위', () => {
   it.each([
     ['SET GLOBAL foreign_key_checks = 0'], ['SET PERSIST foreign_key_checks = 0'], ['SET PERSIST_ONLY foreign_key_checks = 0'],
     ['SET @@global.foreign_key_checks = 0'], ['SET @@persist.foreign_key_checks = 0'], ["SET @@persist_only.sql_mode = 'ANSI_QUOTES'"],
-  ])('%s 는 받지 않는다', (sql) => {
+    ['SET GLOBAL log_bin_trust_function_creators = 1'], ["SET GLOBAL sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_DATE', '')"], ['SET GLOBAL default_storage_engine = MyISAM'],
+    ["SET GLOBAL foreign_key_checks = 0, sql_mode = ''"], ["SET PERSIST max_connections = 10, @@session.foreign_key_checks = 0, GLOBAL sql_mode = ''"],
+  ])('%s 는 세션을 바꾸지 않아 무시한다', (sql) => {
     const st = freshState();
-    expect(() => setIn(st, sql)).toThrow(ApplyFailure);
-    expect(st.fkChecks).toBe(true);
+    setIn(st, sql);
     expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
+    expect(st.fkChecks).toBe(!sql.includes('@@session.foreign_key_checks'));
+  });
+
+  it('SESSION 수식어 뒤의 대입은 다시 세션 값이다', () => {
+    const st = freshState();
+    setIn(st, "SET GLOBAL max_connections = 10, SESSION foreign_key_checks = 0, sql_mode = ''");
+    expect(st.fkChecks).toBe(false);
+    expect(st.sqlMode).toBe('');
   });
 });

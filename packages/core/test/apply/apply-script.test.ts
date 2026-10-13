@@ -13,7 +13,7 @@ describe('applyScript — 문장 처리', () => {
   });
 
   it('지원하지 않는 문장·다른 스키마 USE·VIEW 는 그 문장 번호·줄과 함께 실패한다', () => {
-    expect(run('SET NAMES utf8mb4;\nINSERT INTO t VALUES (1);')).toMatchObject({ ok: false, error: { index: 2, line: 2, statement: 'INSERT INTO t VALUES (1)' } });
+    expect(run('SET NAMES utf8mb4;\nCREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET @x = 1;')).toMatchObject({ ok: false, error: { index: 2, line: 2, statement: 'CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET @x = 1' } });
     expect(run('USE other;')).toMatchObject({ ok: false, error: { index: 1 } });
     expect(run('CREATE OR REPLACE VIEW v AS SELECT 1;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('VIEW') } });
   });
@@ -27,6 +27,41 @@ describe('applyScript — 문장 처리', () => {
     run('INSERT INTO t VALUES (1);');
     expect(JSON.stringify(base)).toBe(before);
     expect(applyScript(base, 'SET NAMES utf8mb4;', { schemaName: 'shop', defaults: { charset: 'latin1', collation: 'utf8mb4_bin' } })).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1253') } });
+  });
+});
+
+// 이미 MySQL 에서 돈 스크립트에 흔한, 스키마(SHOW CREATE 결과)를 바꾸지 않는 문장은 무시한다: 트랜잭션 제어, LOCK·UNLOCK TABLES, 데이터 문장, 권한, 서버 변수(SET GLOBAL·PERSIST)
+describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
+  const NO_OPS = [
+    'START TRANSACTION;', 'BEGIN;', 'BEGIN WORK;', 'COMMIT;', 'ROLLBACK;', 'ROLLBACK TO SAVEPOINT s1;', 'LOCK TABLES t WRITE;', 'LOCK TABLE t READ;', 'UNLOCK TABLES;',
+    "INSERT INTO t VALUES (1), (2);", "INSERT INTO t (id) SELECT 3;", "UPDATE t SET id = 4 WHERE id = 1;", 'DELETE FROM t WHERE id = 2;', "REPLACE INTO t VALUES (5);",
+    'TRUNCATE TABLE t;', 'TRUNCATE t;', "GRANT SELECT ON shop.* TO 'app'@'%';", "REVOKE SELECT ON shop.* FROM 'app'@'%';",
+    'SET GLOBAL log_bin_trust_function_creators = 1;', 'SET PERSIST max_connections = 100;', "INSERT INTO t VALUES ('😀');",
+  ];
+
+  it.each(NO_OPS)('%s 는 무시하고 세지 않는다', (sql) => {
+    const r = run(`${sql}\nALTER TABLE t ADD COLUMN x INT;`);
+    expect(r).toMatchObject({ ok: true, applied: 1 });
+    if (r.ok) expect(r.model.tables[0].columns.map((c) => c.name)).toEqual(['id', 'x']);
+  });
+
+  it('무시하는 문장만 있으면 적용할 문장이 없다', () => {
+    expect(run(NO_OPS.join('\n'))).toMatchObject({ ok: false, error: { index: 0, reason: '적용할 DDL 문장이 없습니다' } });
+  });
+
+  it('SET GLOBAL foreign_key_checks = 0 은 이 세션의 FK 검사를 끄지 않는다', () => {
+    expect(run('SET GLOBAL foreign_key_checks = 0;\nCREATE TABLE u (id INT, ref INT, FOREIGN KEY (ref) REFERENCES missing (id));')).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining('1824') } });
+  });
+
+  it('SET GLOBAL sql_mode 는 세션을 바꾸지 않지만 문장 나누기는 NO_BACKSLASH_ESCAPES 로 읽으므로, 백슬래시가 든 뒤 문장은 RE_EXPORT 로 거부한다', () => {
+    const r = run("SET GLOBAL sql_mode = 'NO_BACKSLASH_ESCAPES';\nALTER TABLE t COMMENT 'C:\\path';");
+    expect(r).toMatchObject({ ok: false, error: { index: 2 } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT)).toBe(true);
+  });
+
+  it('스키마에 영향을 주는 세션 변수와 식으로 쓴 세션 SQL_MODE 는 여전히 거부한다', () => {
+    expect(run('SET default_storage_engine = MyISAM;\nALTER TABLE t ADD x INT;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining(RE_EXPORT) } });
+    expect(run("SET sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_DATE', '');\nALTER TABLE t ADD x INT;")).toMatchObject({ ok: false, error: { index: 1 } });
   });
 });
 
