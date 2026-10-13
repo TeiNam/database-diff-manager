@@ -101,7 +101,7 @@ function oneOf<T extends string>(c: Cursor, values: readonly T[]): T {
   return v;
 }
 
-function indexKind(c: Cursor): IndexKind | undefined {
+export function indexKind(c: Cursor): IndexKind | undefined {
   if (c.acceptWord('KEY') || c.acceptWord('INDEX')) return 'INDEX';
   for (const kind of ['UNIQUE', 'FULLTEXT', 'SPATIAL'] as const) {
     if (c.acceptWord(kind)) {
@@ -112,7 +112,7 @@ function indexKind(c: Cursor): IndexKind | undefined {
   return undefined;
 }
 
-function parseIndex(c: Cursor, kind: IndexKind, name: string): Index {
+export function parseIndex(c: Cursor, kind: IndexKind, name: string): Index {
   const index: Index = { name, kind, parts: parseIndexParts(c), invisible: false };
   while (!c.done) {
     if (c.acceptWord('USING')) index.using = assertWord(c.next().v, 'USING').toUpperCase();
@@ -158,7 +158,7 @@ function identList(c: Cursor): string[] {
   });
 }
 
-function parseForeignKey(c: Cursor, name: string): ForeignKey {
+export function parseForeignKey(c: Cursor, name: string): ForeignKey {
   const columns = identList(c);
   c.expectWord('REFERENCES');
   let refTable = c.ident();
@@ -174,7 +174,7 @@ function parseForeignKey(c: Cursor, name: string): ForeignKey {
   return fk;
 }
 
-function refAction(c: Cursor): string {
+export function refAction(c: Cursor): string {
   for (const words of REF_ACTIONS) if (c.acceptWord(...words)) return words.join(' ');
   throw c.error('참조 동작 필요');
 }
