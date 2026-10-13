@@ -40,7 +40,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 | ALTER TABLE 컬럼 절 | `ADD [COLUMN] def [FIRST\|AFTER c]`, `ADD [COLUMN] (def, …)`, `MODIFY [COLUMN]`, `CHANGE [COLUMN] old new def`, `RENAME COLUMN a TO b`, `DROP [COLUMN]`, `ALTER [COLUMN] c SET DEFAULT lit \| DROP DEFAULT \| SET VISIBLE \| SET INVISIBLE` |
 | ALTER TABLE 인덱스 절 | `ADD {INDEX\|KEY} [name] (parts) [opts]`, `ADD [CONSTRAINT [sym]] UNIQUE [INDEX\|KEY] …`, `ADD FULLTEXT …`, `ADD SPATIAL …`, `ADD [CONSTRAINT [sym]] PRIMARY KEY (…)`, `DROP {INDEX\|KEY} name`, `DROP PRIMARY KEY`, `RENAME {INDEX\|KEY} a TO b`, `ALTER INDEX name {VISIBLE\|INVISIBLE}` |
 | ALTER TABLE 제약 절 | `ADD [CONSTRAINT [sym]] FOREIGN KEY [name] (cols) REFERENCES t (cols) [ON DELETE …] [ON UPDATE …]`, `DROP FOREIGN KEY name`, `DROP CHECK name`, `DROP CONSTRAINT name` |
-| ALTER TABLE 테이블 절 | `COMMENT [=] '…'`, `ENGINE [=] …`, `ROW_FORMAT [=] …`, `KEY_BLOCK_SIZE [=] n`, `RENAME [TO\|AS] new`, `ALGORITHM=…`·`LOCK=…`(무시) |
+| ALTER TABLE 테이블 절 | `COMMENT [=] '…'`, `ENGINE [=] InnoDB`(그 밖의 엔진은 거부), `ROW_FORMAT [=] …`, `KEY_BLOCK_SIZE [=] n`, `RENAME [TO\|AS] new`, `ALGORITHM=…`·`LOCK=…`(무시) |
 | 단독 문장 | `CREATE [UNIQUE\|FULLTEXT\|SPATIAL] INDEX name ON t (…)`, `DROP INDEX name ON t`, `RENAME TABLE a TO b [, c TO d …]`, `CREATE TABLE [IF NOT EXISTS] …`, `DROP TABLE [IF EXISTS] a [, b …]`, `CREATE FUNCTION/PROCEDURE …`(DELIMITER 포함), `DROP {FUNCTION\|PROCEDURE} [IF EXISTS] …`, `DROP VIEW [IF EXISTS] …` |
 | 세션 문장 | `SET FOREIGN_KEY_CHECKS = 0\|1`(`@OLD_…` 저장·복원 포함): 0인 동안은 MySQL처럼 FK 부모 테이블이 없어도 되는 검사(FK 추가 시 부모 없음, 참조되는 테이블 삭제)를 건너뛴다. `SET [SESSION] SQL_MODE = '…'`: 뒤에 만드는 루틴의 SQL_MODE로 쓴다 |
 | 무시하는 문장 | `SET NAMES …`와 그 밖의 `SET`, 주석, 현재 스키마와 같은 `USE` |
@@ -59,6 +59,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 | 문자셋·파티션 | `CONVERT TO CHARACTER SET`, `[DEFAULT] CHARACTER SET=`·`COLLATE=` 테이블 옵션, 파티션 절 전부(`PARTITION BY`, `ADD/DROP/REORGANIZE/COALESCE/TRUNCATE PARTITION`, `REMOVE PARTITIONING`) | 컬럼 상속과 행 이동 규칙이 복잡하다 |
 | FK로 이어진 타입 변경 | FK 컬럼 또는 FK가 참조하는 컬럼의 타입·문자셋·콜레이션을 바꾸는 `MODIFY`/`CHANGE` | MySQL이 거부하는 경우(3780)와 허용하는 경우를 1차에서는 가르지 않는다 |
 | 데이터·권한·기타 | `INSERT`·`UPDATE`·`DELETE`·`REPLACE`·`TRUNCATE`, `GRANT`, `CREATE TABLE … SELECT`, `CREATE TABLE … LIKE`, `CREATE/DROP TRIGGER·EVENT`, `ALTER DATABASE`, 그 밖에 표에 없는 문장 | 범위 밖 |
+| InnoDB가 아닌 엔진 | `ENGINE=`이 InnoDB가 아닌 `CREATE TABLE`·`ALTER TABLE`, InnoDB가 아닌 기준 테이블을 바꾸는 문장 | 1차는 InnoDB만 지원한다(사용자 결정) |
 | 다른 스키마 | 다른 스키마를 한정한 이름(`other.t`), 다른 스키마로의 `USE` | 버전은 스키마 하나를 나타낸다. 현재 스키마 이름으로 한정한 경우(`cur.t`)는 허용한다 |
 
 ## 4. MySQL 정규화 규칙
@@ -67,7 +68,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 
 - **이름 비교:** 테이블 이름은 대소문자를 구분한다(Linux 기본 `lower_case_table_names=0`과 같다). 컬럼·인덱스·제약 이름은 구분하지 않는다.
 - **이름 표기:** 결과에 어느 표기가 남는지(예: 기존 컬럼 `name`을 `MODIFY NAME …`으로 바꿀 때)는 시나리오로 확인한 MySQL 동작을 따른다. 결정하기 전까지 대소문자만 다른 이름을 쓰는 절은 거부한다.
-  - 8.0/8.4 실측: MySQL 은 받고 쓴 표기가 이긴다(`MODIFY NAME …` → 컬럼 `NAME`, 인덱스 파트도 따라간다). 참조(`AFTER`·키 파트·`DROP COLUMN`·`ALTER COLUMN`)는 대소문자를 무시하고 정의의 원래 표기를 쓴다. Task 9 에서 거부를 이 규칙으로 바꾼다.
+  - 8.0/8.4 실측: MySQL 은 받고 쓴 표기가 이긴다(`MODIFY NAME …` → 컬럼 `NAME`, 인덱스 파트도 따라간다). 참조(`AFTER`·키 파트·`DROP COLUMN`·`ALTER COLUMN`)는 대소문자를 무시하고 정의의 원래 표기를 쓴다. 대소문자만 다른 이름을 쓰는 절은 드물어 1차에서는 거부를 유지한다(사용자 지시: 희귀 케이스는 재추출 안내).
 - **타입:**
   - 소문자로 쓴다. `INTEGER`→`int`, `INT(11)`→`int`
   - 정수 표시 폭은 지운다. 예외는 `tinyint(1)`과 `ZEROFILL`이다.
@@ -112,14 +113,14 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - `RENAME TABLE`은 다른 테이블 FK의 `refTable`을 바꾼다. 뷰 본문은 바꾸지 않는다. MySQL도 바꾸지 않는다.
 - **루틴:**
   - 본문은 쓴 그대로 저장한다. MySQL의 `SHOW CREATE FUNCTION`도 그렇다.
-  - `sqlMode`는 스크립트에서 그 문장 앞의 마지막 `SET [SESSION] SQL_MODE` 값을 쓴다. 없으면 MySQL 8.0/8.4 기본 모드(`ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`)를 쓴다.
+  - `sqlMode`는 스크립트에서 그 문장 앞의 마지막 `SET [SESSION] SQL_MODE` 값을 쓴다. 없으면 MySQL 8.0/8.4 기본 모드(`ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`)를 쓴다. 모드 이름은 MySQL 순서로 정렬하고 중복을 지운다(SHOW CREATE 의 `sql_mode` 표기). 묶음 모드(`ANSI`·`TRADITIONAL`)는 거부하고 다시 추출하도록 안내한다.
   - DEFINER는 저장하지 않는다. 비교 대상이 아니다.
   - 함수의 `RETURNS` 타입은 타입 규칙으로 정규화한다. 문자열 타입이면 MySQL처럼 ` CHARSET <스키마 기본 문자셋>`을 붙인다. `RETURNS` 안에 `CHARSET`·`COLLATE`를 직접 쓴 경우는 1차에서 거부한다.
 - **테이블 옵션:**
   - `ENGINE` 값은 MySQL 표기로 맞춘다(`innodb`→`InnoDB`). `ROW_FORMAT`은 대문자로 쓴다.
   - `COMMENT=''`이면 옵션을 지운다.
   - `AUTO_INCREMENT=n`은 비교에서 무시되므로 기준 값을 그대로 둔다.
-  - `ENGINE`을 InnoDB가 아닌 것으로 바꿀 때 FK가 있거나 다른 테이블 FK가 참조하는 테이블이면 3776이다. 그 밖의 엔진별 제약은 재현하지 않는다.
+  - InnoDB 테이블만 지원한다(사용자 결정). `ENGINE`을 InnoDB가 아닌 것으로 만들거나 바꾸는 문장, 그리고 InnoDB가 아닌 기준 테이블을 바꾸는 `ALTER TABLE`·`CREATE INDEX`·`DROP INDEX`는 거부하고 다시 추출하도록 안내한다. `DROP TABLE`·`RENAME TABLE`은 받는다. `ENGINE` 옵션이 없는 테이블은 InnoDB로 본다.
 
 ### 4.1 오류로 처리하는 경우
 

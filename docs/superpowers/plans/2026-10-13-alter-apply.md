@@ -2427,8 +2427,8 @@ export function createTable(st: State, c: Cursor): void {
   }
   const explicitNull = new Set(specs.filter(isExplicitNull).map((s) => s.name.toLowerCase()));
   let t: Table = { kind: 'table', name, columns: specs.map((s) => finalizeColumn(s, charset)), indexes: [], foreignKeys: [], checks: [], options, fidelity: 'full' };
-  // 컬럼 안 PRIMARY KEY·UNIQUE(Task 5 의 columnKeyItems)가 표 수준 정의보다 먼저다. addKeys 가 인덱스 출처(provenance)도 적는다
-  t = addKeys(st, t, [...specs.flatMap(columnKeyItems), ...items.filter((i): i is ConstraintItem => i.kind !== 'column')]);
+  // 컬럼 안 PRIMARY KEY·UNIQUE(Task 5 의 columnKeyItems)는 쓴 차례 그대로 표 수준 정의와 섞는다 (MySQL 과 ALTER 경로가 그렇다). addKeys 가 인덱스 출처(provenance)도 적는다
+  t = addKeys(st, t, items.flatMap((i) => (i.kind === 'column' ? columnKeyItems(i.spec) : [i])));
   t = enforcePrimaryKeyNotNull(t, explicitNull); // PRIMARY KEY 컬럼은 NOT NULL, NULL 을 직접 쓴 컬럼이면 1171
   checkTable(st, t);
   t = { ...t, indexes: sortIndexes(t), foreignKeys: sortForeignKeys(t.foreignKeys) };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addForeignKey, addIndex, addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, ensureFkIndexes, enforcePrimaryKeyNotNull, exprUses, leadsWith, nextFkName, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
+import { addForeignKey, addIndex, addKeys, assertReaddedKeysFit, checkNowNotNull, checkSetNullFks, checkTable, columnKeyItems, dropKeys, ensureFkIndexes, enforcePrimaryKeyNotNull, exprUses, leadsWith, nextFkName, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
 import { planAutoKeys } from '../../src/apply/auto-index';
 import { initialState, replaceTable, type State } from '../../src/apply/state';
 import { DEFAULT_SQL_MODE, MYSQL_DEFAULTS, RE_EXPORT, type ColumnSpec, type FkItem, type IndexItem } from '../../src/apply/types';
@@ -352,11 +352,36 @@ describe('checkNowNotNull — NULL 허용이던 컬럼이 NOT NULL 이 된 SET N
     expect(() => checkNowNotNull(alreadyBad, alreadyBad, new Map())).not.toThrow();
   });
 
+  it('이 문장이 더한 컬럼(기준에 없는 컬럼)이 NOT NULL 이 되어 SET NULL FK 에 있으면 거부한다 (ADD COLUMN x, ADD FOREIGN KEY (x) … SET NULL, ADD PRIMARY KEY (x))', () => {
+    const before = table(fresh(), 'child');
+    const added = { ...before, columns: [...before.columns, { ...col('x', 'int unsigned'), nullable: false }], foreignKeys: [...before.foreignKeys, { name: 'child_ibfk_2', columns: ['x'], refTable: 'parent', refColumns: ['id'], onDelete: 'SET NULL' }] };
+    expect(() => checkNowNotNull(before, added, new Map())).toThrow(/child_ibfk_2.*1830/);
+    const nullable = { ...added, columns: added.columns.map((c) => (c.name === 'x' ? { ...c, nullable: true } : c)) };
+    expect(() => checkNowNotNull(before, nullable, new Map())).not.toThrow();
+  });
+
   it('이름이 바뀐 컬럼도 따라간다 (renamed: 소문자 옛 이름 → 새 이름)', () => {
     const before = setNull(table(fresh(), 'child'));
     const after = notNull(renamedCol(before, 'pid', 'owner'), 'owner');
     expect(() => checkNowNotNull(before, after, new Map([['pid', 'owner']]))).toThrow(/owner/);
     expect(() => checkNowNotNull(before, renamedCol(before, 'pid', 'owner'), new Map([['pid', 'owner']]))).not.toThrow();
+  });
+});
+
+describe('checkSetNullFks — SET NULL FK 의 컬럼이 NOT NULL 이면 1830 (CREATE TABLE 은 문장 앞 상태가 없다)', () => {
+  const base = (): Table => ({ ...table(fresh(), 'child'), foreignKeys: [{ name: 'child_ibfk_1', columns: ['pid'], refTable: 'parent', refColumns: ['id'], onUpdate: 'SET NULL' }] });
+  const notNull = (t: Table): Table => ({ ...t, columns: t.columns.map((c) => (c.name === 'pid' ? { ...c, nullable: false } : c)) });
+
+  it('NOT NULL 이면 거부하고, NULL 허용·SET NULL 이 아닌 FK 는 건드리지 않는다', () => {
+    expect(() => checkSetNullFks(notNull(base()))).toThrow(/pid.*child_ibfk_1.*1830/);
+    expect(() => checkSetNullFks(base())).not.toThrow();
+    const cascade = notNull({ ...base(), foreignKeys: base().foreignKeys.map((f) => ({ ...f, onUpdate: 'CASCADE' })) });
+    expect(() => checkSetNullFks(cascade)).not.toThrow();
+  });
+
+  it('notNullBefore 에 든 컬럼(문장 앞에 이미 NOT NULL)은 건너뛴다', () => {
+    expect(() => checkSetNullFks(notNull(base()), new Set(['pid']))).not.toThrow();
+    expect(() => checkSetNullFks(notNull(base()), new Set(['other']))).toThrow(/1830/);
   });
 });
 

@@ -48,6 +48,7 @@ export interface VersionMeta {
   note: string | null;
   uploadedBy: string;
   uploadedAt: string;
+  derivedFrom?: DerivedFrom; // ALTER 적용으로 만든 버전에만 있다
 }
 
 export interface VersionSummary extends VersionMeta {
@@ -143,4 +144,37 @@ export interface MigrationUploadInput {
 export interface MigrationUploadResult {
   migration: MigrationMeta;
   warnings: DmsWarning[];
+}
+
+// ALTER 적용으로 만든 버전 (서버 009)
+export interface DerivedFrom {
+  baseVersionNo: number;
+  statementCount: number;
+  defaults: { charset: string; collation: string };
+}
+
+export interface AlterChange {
+  kind: 'table' | 'view' | 'function' | 'procedure';
+  name: string;
+  op: 'add' | 'drop' | 'modify' | 'rename';
+}
+
+export interface AlterRequest {
+  script: string;
+  filename?: string;
+  note?: string;
+  dryRun?: boolean;
+  defaults?: { charset?: string; collation?: string };
+}
+
+export type AlterResponse =
+  | { status: 'preview'; applied: number; changes: AlterChange[]; renames: RenameMapping[] }
+  | { status: 'ok' | 'duplicate'; versionId: number; versionNo: number; applied: number; changes: AlterChange[] };
+
+export interface Derivation {
+  baseVersionId: number | null;
+  baseVersionNo: number;
+  script: string;
+  statementCount: number;
+  defaults: { charset: string; collation: string };
 }

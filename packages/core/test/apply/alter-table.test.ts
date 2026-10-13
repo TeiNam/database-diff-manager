@@ -218,6 +218,28 @@ describe('ALTER TABLE — SET NULL FK 컬럼은 NOT NULL 이 될 수 없다 (MyS
     rejected(script, '1830');
   });
 
+  // 이 문장이 더한 컬럼은 기준(before)에 없다. PRIMARY KEY 가 FK 보다 뒤에 오면 FK 를 붙일 때는 NULL 허용이라 문장 끝 검사가 잡아야 한다 (MySQL 8.0.46·8.4.11 실측: 순서와 상관없이 1830)
+  describe('이 문장이 더한 컬럼', () => {
+    const NOPK = 'CREATE TABLE nopk (k int unsigned);\n';
+    const FK = 'ADD FOREIGN KEY (x) REFERENCES parent (id) ON DELETE SET NULL';
+    it.each([
+      [`ALTER TABLE nopk ADD COLUMN x int unsigned, ${FK}, ADD PRIMARY KEY (x);`], // FK 가 먼저 — 예전에는 받아들였다
+      [`ALTER TABLE nopk ADD COLUMN x int unsigned, ADD PRIMARY KEY (x), ${FK};`], // PRIMARY KEY 가 먼저
+      [`ALTER TABLE nopk ADD COLUMN x int unsigned PRIMARY KEY, ${FK};`],
+      [`ALTER TABLE nopk ${FK}, ADD COLUMN x int unsigned PRIMARY KEY;`], // FK 절이 컬럼 절보다 앞
+      ['ALTER TABLE nopk ADD FOREIGN KEY (k) REFERENCES parent (id) ON DELETE SET NULL, ADD PRIMARY KEY (k);'], // 기존 컬럼
+      ['ALTER TABLE nopk ADD FOREIGN KEY (k) REFERENCES parent (id) ON UPDATE SET NULL, MODIFY k int unsigned PRIMARY KEY;'],
+      [`ALTER TABLE nopk ADD COLUMN x int unsigned NOT NULL, ${FK};`], // 직접 쓴 NOT NULL
+    ])('거부: %s', (script) => {
+      rejected(`${NOPK}${script}`, '1830');
+    });
+
+    it('PRIMARY KEY 가 없으면 받는다 (UNIQUE 는 컬럼을 NOT NULL 로 만들지 않는다)', () => {
+      expect(col(okKeys(`${NOPK}ALTER TABLE nopk ADD COLUMN x int unsigned, ${FK};`), 'nopk', 'x').nullable).toBe(true);
+      expect(col(okKeys(`${NOPK}ALTER TABLE nopk ADD COLUMN x int unsigned, ${FK}, ADD UNIQUE (x);`), 'nopk', 'x').nullable).toBe(true);
+    });
+  });
+
   it('그 FK 를 같은 문장에서 지우면 NOT NULL 로 바꿀 수 있고, SET NULL 이 아닌 FK·FK 없는 컬럼은 상관없다', () => {
     expect(col(okKeys('ALTER TABLE child DROP FOREIGN KEY child_ibfk_1, MODIFY pid int unsigned NOT NULL;'), 'child', 'pid').nullable).toBe(false);
     expect(col(okKeys('ALTER TABLE child MODIFY pid int unsigned NOT NULL, DROP FOREIGN KEY child_ibfk_1;'), 'child', 'pid').nullable).toBe(false);
@@ -518,13 +540,19 @@ describe('ALTER TABLE — 컬럼 중복 절', () => {
   });
 });
 
-// MySQL 8.0.46·8.4.11 실측: 스토리지 엔진을 InnoDB 가 아닌 것으로 바꾸려면 테이블이 FK 에 참여하지 않아야 한다 (3776) —
-// 자기 FK 가 있거나 다른 테이블 FK 가 참조해도 거부이고, 같은 문장에서 FK 를 지워도·FOREIGN_KEY_CHECKS=0 이어도 같다. InnoDB 로의 변경은 그대로 받는다
-describe('ALTER TABLE — ENGINE 변경과 FK', () => {
+// InnoDB 테이블만 지원한다 (사용자 결정): ENGINE 을 InnoDB 가 아닌 것으로 바꾸는 절은 FK 가 있든 없든 거부하고 (RE_EXPORT 안내),
+// InnoDB 가 아닌 엔진의 기존 테이블에는 ALTER TABLE·CREATE INDEX·DROP INDEX 를 쓸 수 없다. DROP TABLE·RENAME TABLE 은 된다 (table-stmt.test.ts)
+describe('ALTER TABLE — InnoDB 테이블만 지원', () => {
   const engineOf = (r: { model: SchemaModel }, table: string) => tbl(r, table).options.find((o) => o.key === 'ENGINE')!.value;
-  const rejects3776 = (script: string) => expect(applyKeys(script)).toMatchObject({ ok: false, error: { reason: expect.stringMatching(/3776/) } });
+  const rejectsInnodbOnly = (base: SchemaModel, script: string) => {
+    const r = applyScript(base, script, { schemaName: 'shop' });
+    expect(r, script).toMatchObject({ ok: false, error: { reason: expect.stringContaining('InnoDB 테이블만 지원합니다') } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  };
 
   it.each([
+    ['ALTER TABLE doc ENGINE=MyISAM;'], // FK 가 없어도
+    ['ALTER TABLE doc ENGINE=myisam;'],
     ['ALTER TABLE child ENGINE=MyISAM;'], // 자기 FK
     ['ALTER TABLE parent ENGINE=MyISAM;'], // 다른 테이블 FK 가 참조
     ['ALTER TABLE child ENGINE=MEMORY;'],
@@ -532,21 +560,46 @@ describe('ALTER TABLE — ENGINE 변경과 FK', () => {
     ['SET FOREIGN_KEY_CHECKS = 0; ALTER TABLE parent ENGINE=MyISAM;'],
     ['SET FOREIGN_KEY_CHECKS = 0; ALTER TABLE child ENGINE=CSV;'],
     ['ALTER TABLE doc ADD COLUMN pid int, ADD FOREIGN KEY (pid) REFERENCES doc (id);\nALTER TABLE doc ENGINE=MyISAM;'], // 자기 참조 FK
-  ])('FK 에 참여하는 테이블의 엔진을 바꾸면 3776: %s', (script) => {
-    rejects3776(script);
+    ['ALTER TABLE doc ENGINE=ARCHIVE;'],
+    ['ALTER TABLE doc ENGINE=BLACKHOLE;'],
+    ['ALTER TABLE doc ENGINE=NoSuchEngine;'], // 모르는 이름도 같은 안내
+    ['ALTER TABLE doc ENGINE = MyISAM, COMMENT = \'x\';'],
+  ])('ENGINE 을 InnoDB 가 아닌 것으로 바꾸면 RE_EXPORT 로 거부: %s', (script) => {
+    rejectsInnodbOnly(KEYS_BASE, script);
   });
 
-  it('FK 가 없고 참조도 받지 않는 테이블은 바꾼다 (이름은 MySQL 표기), InnoDB 로의 변경은 FK 가 있어도 그대로 받는다', () => {
-    expect(engineOf(okKeys('ALTER TABLE doc ENGINE=myisam;'), 'doc')).toBe('MyISAM');
-    expect(engineOf(okKeys('ALTER TABLE doc ENGINE=MyISAM;\nALTER TABLE doc ENGINE=InnoDB;'), 'doc')).toBe('InnoDB');
+  it('ENGINE=InnoDB 는 그대로 받는다 (바뀌는 것이 없다), 이름은 MySQL 표기', () => {
     expect(engineOf(okKeys('ALTER TABLE child ENGINE=InnoDB;'), 'child')).toBe('InnoDB');
     expect(engineOf(okKeys('ALTER TABLE parent ENGINE=innodb;'), 'parent')).toBe('InnoDB');
+    expect(okKeys('ALTER TABLE doc ENGINE=InnoDB;').model).toEqual(KEYS_BASE);
   });
 
-  it('앞 문장에서 FK 를 모두 지웠으면 그 뒤 문장에서는 바꾼다', () => {
-    const r = okKeys('ALTER TABLE child DROP FOREIGN KEY child_ibfk_1, DROP FOREIGN KEY child_ibfk_2;\nALTER TABLE parent ENGINE=MyISAM;\nALTER TABLE child ENGINE=MyISAM;');
-    expect(engineOf(r, 'parent')).toBe('MyISAM');
-    expect(engineOf(r, 'child')).toBe('MyISAM');
+  // InnoDB 가 아닌 엔진의 기존 테이블 (기준 덤프에 있다)
+  const MYISAM_BASE = parseSqlDump(tdExport([
+    'CREATE TABLE `legacy` (\n  `id` int NOT NULL,\n  `name` varchar(20) DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix_name` (`name`)\n) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    'CREATE TABLE `modern` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+  ].join('\n\n'))).model;
+
+  it.each([
+    ['ALTER TABLE legacy ADD COLUMN x INT;'],
+    ['ALTER TABLE legacy COMMENT = \'x\';'],
+    ['ALTER TABLE legacy RENAME TO legacy2;'],
+    ['ALTER TABLE legacy ENGINE=InnoDB;'], // InnoDB 로 바꾸는 절도 (기준 테이블이 InnoDB 가 아니다)
+    ['CREATE INDEX ix_id ON legacy (id);'],
+    ['CREATE UNIQUE INDEX uq_name ON legacy (name);'],
+    ['DROP INDEX ix_name ON legacy;'],
+  ])('InnoDB 가 아닌 엔진의 기존 테이블에는 RE_EXPORT 로 거부: %s', (script) => {
+    rejectsInnodbOnly(MYISAM_BASE, script);
+  });
+
+  it('InnoDB 테이블은 같은 스크립트 안에 InnoDB 가 아닌 테이블이 있어도 바꾼다', () => {
+    const r = applyScript(MYISAM_BASE, 'ALTER TABLE modern ADD COLUMN x INT;', { schemaName: 'shop' });
+    expect(r).toMatchObject({ ok: true });
+    if (r.ok) expect(tbl(r, 'modern').columns.map((c) => c.name)).toEqual(['id', 'x']);
+  });
+
+  it('없는 테이블은 엔진보다 먼저 1146 이다', () => {
+    expect(applyScript(MYISAM_BASE, 'ALTER TABLE nope ADD COLUMN x INT;', { schemaName: 'shop' })).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1146') } });
   });
 });
 
