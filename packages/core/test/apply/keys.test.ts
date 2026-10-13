@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { addForeignKey, addIndex, addKeys, checkTable, dropKeys, ensureFkIndexes, exprUses, leadsWith, nextFkName, remapKeys, renameIndex, setIndexVisibility, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
+import { addForeignKey, addIndex, addKeys, checkNowNotNull, checkTable, columnKeyItems, dropKeys, ensureFkIndexes, exprUses, leadsWith, nextFkName, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
 import { initialState, replaceTable, type State } from '../../src/apply/state';
-import { DEFAULT_SQL_MODE, MYSQL_DEFAULTS, RE_EXPORT, type FkItem, type IndexItem } from '../../src/apply/types';
+import { DEFAULT_SQL_MODE, MYSQL_DEFAULTS, RE_EXPORT, type ColumnSpec, type FkItem, type IndexItem } from '../../src/apply/types';
 import type { Column, ForeignKey, Index, IndexKind, Table } from '../../src/model';
 import { parseSqlDump } from '../../src/parse-dump';
 import { tdExport } from '../helpers';
@@ -289,5 +289,83 @@ describe('addForeignKey — 타입 비교·키 중복·SET NULL·부모 상태 (
     expect(() => addForeignKey(st, c, fk(true, ['pid'], 'parent', ['id'], 'fk_pe'))).not.toThrow(/3734/);
     st.fkChecks = false;
     expect(() => addForeignKey(st, c, fk(true, ['pid'], 'parent', ['id'], 'fk_pe'))).toThrow(RE_EXPORT);
+  });
+});
+
+describe('컬럼을 바꾼 뒤 키 맞춤 (MySQL 8.0.46·8.4.11 실측: ALTER TABLE … MODIFY)', () => {
+  // child.name 은 varchar(20): KEY kp (name(10)), 함수 인덱스 파트 하나가 섞인 KEY kf
+  const prefixed = (): Table => {
+    const c = addIndex(table(fresh(), 'child'), idx('kp', 'INDEX', ['name'], true, 10));
+    return { ...c, indexes: [...c.indexes, { name: 'kf', kind: 'INDEX', parts: [{ expr: '`id` + 1', desc: false }, { column: 'name', length: 5, desc: true }], invisible: false }] };
+  };
+  const lengthsOf = (t: Table, index: string) => t.indexes.find((i) => i.name === index)!.parts.map((p) => p.length);
+
+  it('refitKeyParts: 새 길이가 prefix 이하이거나 prefix 를 가질 수 없는 타입이면 길이를 지우고, 더 길면 남긴다 (바꾸지 않은 컬럼은 그대로)', () => {
+    const changed = new Set(['name']);
+    expect(lengthsOf(refitKeyParts(retype(prefixed(), 'name', 'varchar(10)'), changed), 'kp')).toEqual([undefined]);
+    expect(lengthsOf(refitKeyParts(retype(prefixed(), 'name', 'varchar(3)'), changed), 'kp')).toEqual([undefined]);
+    expect(lengthsOf(refitKeyParts(retype(prefixed(), 'name', 'int'), changed), 'kp')).toEqual([undefined]);
+    expect(lengthsOf(refitKeyParts(retype(prefixed(), 'name', 'varchar(11)'), changed), 'kp')).toEqual([10]);
+    expect(lengthsOf(refitKeyParts(retype(prefixed(), 'name', 'text'), changed), 'kp')).toEqual([10]);
+    expect(lengthsOf(refitKeyParts(retype(prefixed(), 'name', 'varchar(3)'), new Set()), 'kp')).toEqual([10]); // 바꾼 컬럼이 없으면 손대지 않는다
+    expect(lengthsOf(refitKeyParts(retype(prefixed(), 'name', 'varchar(3)'), new Set(['id'])), 'kp')).toEqual([10]);
+  });
+
+  it('refitKeyParts: 함수 인덱스의 식 파트(column 없음)는 건너뛰고, 입력 테이블은 바꾸지 않는다', () => {
+    const t = retype(prefixed(), 'name', 'varchar(5)');
+    const before = JSON.stringify(t);
+    const next = refitKeyParts(t, new Set(['name']));
+    expect(next.indexes.find((i) => i.name === 'kf')!.parts).toEqual([{ expr: '`id` + 1', desc: false }, { column: 'name', desc: true }]);
+    expect(JSON.stringify(t)).toBe(before);
+  });
+
+  it('refitKeyParts: 새 타입이 키에 맞지 않으면 거부한다 (길이 없는 TEXT·BLOB 1170, JSON 3152, 문자열이 아닌 FULLTEXT 1283)', () => {
+    const p = table(fresh(), 'parent'); // KEY code (code) — 길이 없는 키
+    expect(() => refitKeyParts(retype(p, 'code', 'text'), new Set(['code']))).toThrow(/1170/);
+    expect(() => refitKeyParts(retype(p, 'code', 'json'), new Set(['code']))).toThrow(/3152/);
+    expect(() => refitKeyParts(retype(prefixed(), 'name', 'json'), new Set(['name']))).toThrow(/3152/); // prefix 는 먼저 없어진다
+    expect(() => refitKeyParts(retype(p, 'code', 'int'), new Set(['code']))).not.toThrow();
+    const ft = addIndex(p, idx('ft', 'FULLTEXT', ['note']));
+    expect(() => refitKeyParts(retype(ft, 'note', 'int'), new Set(['note']))).toThrow(/1283/);
+    expect(() => refitKeyParts(retype(ft, 'note', 'mediumtext'), new Set(['note']))).not.toThrow();
+    expect(() => refitKeyParts(retype(p, 'code', 'text'), new Set())).not.toThrow(); // 바꾼 컬럼으로 신고하지 않은 컬럼은 검사하지 않는다
+  });
+});
+
+describe('checkNowNotNull — NULL 허용이던 컬럼이 NOT NULL 이 된 SET NULL FK (MySQL 1830)', () => {
+  // child.pid: int unsigned NULL. child_ibfk_1 은 ON DELETE SET NULL 로 바꿔 쓴다
+  const setNull = (t: Table, onDelete = 'SET NULL'): Table => ({ ...t, foreignKeys: t.foreignKeys.map((f) => ({ ...f, onDelete })) });
+  const notNull = (t: Table, name: string): Table => ({ ...t, columns: t.columns.map((c) => (c.name === name ? { ...c, nullable: false } : c)) });
+  const renamedCol = (t: Table, from: string, to: string): Table => ({
+    ...t, columns: t.columns.map((c) => (c.name === from ? { ...c, name: to } : c)), foreignKeys: t.foreignKeys.map((f) => ({ ...f, columns: f.columns.map((n) => (n === from ? to : n)) })),
+  });
+
+  it('이 문장에서 NOT NULL 이 된 컬럼이 SET NULL FK 에 있으면 거부하고, 이미 NOT NULL 이던 컬럼·SET NULL 이 아닌 FK 는 건드리지 않는다', () => {
+    const before = setNull(table(fresh(), 'child'));
+    expect(() => checkNowNotNull(before, notNull(before, 'pid'), new Map())).toThrow(/child_ibfk_1.*1830/);
+    expect(() => checkNowNotNull(before, notNull(before, 'name'), new Map())).not.toThrow(); // FK 밖 컬럼
+    expect(() => checkNowNotNull(before, before, new Map())).not.toThrow(); // 바뀐 것 없음
+    const cascade = setNull(table(fresh(), 'child'), 'CASCADE');
+    expect(() => checkNowNotNull(cascade, notNull(cascade, 'pid'), new Map())).not.toThrow();
+    const alreadyBad = notNull(before, 'pid'); // 기준이 이미 NOT NULL (MySQL 이 만들 수 없는 상태) 이면 이 문장이 바꾼 것이 아니다
+    expect(() => checkNowNotNull(alreadyBad, alreadyBad, new Map())).not.toThrow();
+  });
+
+  it('이름이 바뀐 컬럼도 따라간다 (renamed: 소문자 옛 이름 → 새 이름)', () => {
+    const before = setNull(table(fresh(), 'child'));
+    const after = notNull(renamedCol(before, 'pid', 'owner'), 'owner');
+    expect(() => checkNowNotNull(before, after, new Map([['pid', 'owner']]))).toThrow(/owner/);
+    expect(() => checkNowNotNull(before, renamedCol(before, 'pid', 'owner'), new Map([['pid', 'owner']]))).not.toThrow();
+  });
+});
+
+describe('columnKeyItems — 컬럼 정의 안의 PRIMARY KEY·UNIQUE', () => {
+  const spec = (over: Partial<ColumnSpec>): ColumnSpec => ({ name: 'c', type: 'int', autoIncrement: false, invisible: false, primaryKey: false, unique: false, ...over });
+
+  it('PRIMARY KEY 는 PRIMARY 이름의 인덱스, UNIQUE 는 이름 없는 UNIQUE 인덱스(이름은 addIndex 가 컬럼 이름으로 짓는다), 둘 다 있으면 PRIMARY KEY 가 먼저', () => {
+    expect(columnKeyItems(spec({}))).toEqual([]);
+    expect(columnKeyItems(spec({ primaryKey: true }))).toEqual([{ kind: 'index', named: true, index: { name: 'PRIMARY', kind: 'PRIMARY', parts: [{ column: 'c', desc: false }], invisible: false } }]);
+    expect(columnKeyItems(spec({ unique: true }))).toEqual([{ kind: 'index', named: false, index: { name: '', kind: 'UNIQUE', parts: [{ column: 'c', desc: false }], invisible: false } }]);
+    expect(columnKeyItems(spec({ primaryKey: true, unique: true })).map((i) => i.index.kind)).toEqual(['PRIMARY', 'UNIQUE']);
   });
 });

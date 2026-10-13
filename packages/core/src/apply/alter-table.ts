@@ -1,0 +1,349 @@
+// ALTER TABLE 한 문장. 절 순서와 무관하게 MySQL 과 같은 단계로 적용한다 (sql_table.cc mysql_prepare_alter_table):
+// 1) 기존 컬럼 삭제 2) 기존 컬럼 변경 — 이름은 문장 전 컬럼 기준 (RENAME COLUMN a TO b, b TO a 맞바꾸기가 된다) 3) 컬럼 추가
+// 4) 위치(FIRST·AFTER) 5) 키 삭제 → 남은 키에 컬럼 삭제·이름 변경 반영, 바꾼(MODIFY·CHANGE) 컬럼의 키 파트 길이·타입 맞춤 → 인덱스 이름 변경·가시성
+// 6) 키 추가(컬럼 정의 안의 PRIMARY KEY·UNIQUE 포함), FK 자동 인덱스 7) 검사(NOT NULL 이 된 SET NULL FK 컬럼 포함)·키 순서 8) 테이블 옵션
+// 9) 다른 테이블 FK 가 참조하는 컬럼 이름 10) 테이블 이름 변경
+import { Cursor } from '../cursor';
+import type { Token } from '../lexer';
+import type { Column, IndexKind, Table } from '../model';
+import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
+import { addKeys, checkNowNotNull, checkTable, columnKeyItems, dropKeys, exprUses, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortIndexes, type KeyDrop } from './keys';
+import { splitList } from './lists';
+import { baseType, BLOB_TYPES, effectiveCollation, finalizeColumn, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
+import { engineName, optionValue, parseCommonOption, setOption } from './options';
+import { findColumn, needTable, objectName, replaceTable, sameName, type State } from './state';
+import { renameTable } from './table-stmt';
+import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type Position } from './types';
+
+const PARTITION = `파티션 절은 1차 지원 범위가 아닙니다 (MySQL 이 행을 옮깁니다) — ${RE_EXPORT}`;
+const CHARSET = `테이블 문자셋 변경(CONVERT TO·CHARACTER SET=·COLLATE=)은 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`;
+const PARTITION_WORDS: ReadonlySet<string> = new Set(['PARTITION', 'REMOVE', 'COALESCE', 'REORGANIZE', 'TRUNCATE', 'EXCHANGE', 'ANALYZE', 'CHECK', 'OPTIMIZE', 'REBUILD', 'REPAIR', 'DISCARD', 'IMPORT']);
+const CHARSET_WORDS: ReadonlySet<string> = new Set(['CONVERT', 'DEFAULT', 'CHARACTER', 'CHARSET', 'COLLATE']);
+
+type Clause =
+  | { k: 'add'; spec: ColumnSpec; pos: Position }
+  | { k: 'modify'; old: string; spec: ColumnSpec; pos: Position; rename: boolean } // MODIFY(rename=false)·CHANGE(true)
+  | { k: 'renameColumn'; old: string; to: string }
+  | { k: 'alterColumn'; old: string; set: (col: Column) => Column }
+  | { k: 'dropColumn'; name: string }
+  | { k: 'key'; item: ConstraintItem }
+  | ({ k: 'dropKey' } & KeyDrop)
+  | { k: 'renameIndex'; old: string; to: string }
+  | { k: 'indexVisibility'; name: string; invisible: boolean }
+  | { k: 'option'; key: string; value: string | undefined }
+  | { k: 'renameTable'; to: string }
+  | { k: 'noop' };
+
+interface Entry {
+  from?: string; // 문장 전 이름 (새 컬럼은 없음)
+  col: Column;
+  pos: Position;
+}
+
+export function alterTable(st: State, c: Cursor): void {
+  const name = objectName(c, st);
+  const clauses = splitList(c.toks.slice(c.i), 'ALTER TABLE 절').flatMap((toks) => parseClause(new Cursor(toks, c.src), st));
+  if (!clauses.length) fail('ALTER TABLE 에 바꿀 내용이 없습니다');
+  alterWith(st, name, clauses);
+}
+
+// CREATE [UNIQUE|FULLTEXT|SPATIAL] INDEX name [USING x] ON t (키 파트) [옵션] [ALGORITHM=…] [LOCK=…] = ALTER TABLE t ADD …
+export function createIndex(st: State, c: Cursor): void {
+  const kind: IndexKind = c.acceptWord('UNIQUE') ? 'UNIQUE' : c.acceptWord('FULLTEXT') ? 'FULLTEXT' : c.acceptWord('SPATIAL') ? 'SPATIAL' : 'INDEX';
+  c.expectWord('INDEX');
+  const name = c.ident();
+  const using = parseUsing(c);
+  c.expectWord('ON');
+  const table = objectName(c, st);
+  const index = parseIndexBody(new Cursor(withoutAlgorithmLock(c.toks.slice(c.i)), c.src), kind, name);
+  alterWith(st, table, [{ k: 'key', item: { kind: 'index', index: using && !index.using ? { ...index, using } : index, named: true } }]);
+}
+
+// DROP INDEX name ON t [ALGORITHM=…] [LOCK=…] = ALTER TABLE t DROP INDEX name
+export function dropIndexOn(st: State, c: Cursor): void {
+  const name = c.ident();
+  c.expectWord('ON');
+  const table = objectName(c, st);
+  const rest = withoutAlgorithmLock(c.toks.slice(c.i));
+  if (rest.length) fail(`알 수 없는 내용입니다: ${rest[0].v} (MySQL 1064)`);
+  alterWith(st, table, [{ k: 'dropKey', what: sameName(name, 'PRIMARY') ? 'primary' : 'index', name }]);
+}
+
+function alterWith(st: State, name: string, clauses: readonly Clause[]): void {
+  const before = needTable(st, name);
+  const { table, renamed } = applyClauses(st, before, clauses);
+  replaceTable(st, name, table);
+  renameReferencedColumns(st, name, renamed);
+  const rename = clauses.filter((x): x is Extract<Clause, { k: 'renameTable' }> => x.k === 'renameTable').at(-1);
+  if (rename && rename.to !== name) renameTable(st, name, rename.to);
+}
+
+function parseClause(c: Cursor, st: State): Clause[] {
+  if (c.acceptWord('ADD')) return parseAdd(c);
+  if (c.acceptWord('MODIFY')) {
+    c.acceptWord('COLUMN');
+    const spec = parseColumnSpec(c);
+    return [end(c, { k: 'modify', old: spec.name, spec, pos: parsePosition(c), rename: false }), ...columnKeys(spec)];
+  }
+  if (c.acceptWord('CHANGE')) {
+    c.acceptWord('COLUMN');
+    const old = c.ident();
+    const spec = parseColumnSpec(c);
+    return [end(c, { k: 'modify', old, spec, pos: parsePosition(c), rename: true }), ...columnKeys(spec)];
+  }
+  if (c.acceptWord('DROP')) return [end(c, parseDrop(c))];
+  if (c.acceptWord('RENAME')) return [end(c, parseRename(c, st))];
+  if (c.acceptWord('ALTER')) return [end(c, parseAlter(c))];
+  return parseOptions(c);
+}
+
+// 컬럼 정의 안의 PRIMARY KEY·UNIQUE 는 그 컬럼 절 바로 뒤의 키 절과 같다 (MySQL 도 문장의 키 목록에 쓴 차례대로 넣는다)
+const columnKeys = (spec: ColumnSpec): Clause[] => columnKeyItems(spec).map((item) => ({ k: 'key', item }));
+
+// 절 끝: 남은 토큰이 있으면 실패
+function end<T>(c: Cursor, clause: T): T {
+  if (!c.done) fail(`알 수 없는 내용입니다: ${c.peek()!.v} (MySQL 1064)`);
+  return clause;
+}
+
+function parseAdd(c: Cursor): Clause[] {
+  if (c.isWord('PARTITION')) return fail(PARTITION);
+  if (!c.acceptWord('COLUMN') && startsConstraint(c)) return [end(c, { k: 'key', item: parseConstraint(c) })];
+  if (c.isOp('(')) {
+    const specs = splitList(c.parenTokens(), '컬럼').map((toks) => {
+      const one = new Cursor(toks, c.src);
+      return end(one, parseColumnSpec(one));
+    });
+    return end(c, specs.flatMap((spec): Clause[] => [{ k: 'add', spec, pos: undefined }, ...columnKeys(spec)]));
+  }
+  const spec = parseColumnSpec(c);
+  return [end(c, { k: 'add', spec, pos: parsePosition(c) }), ...columnKeys(spec)];
+}
+
+function parseDrop(c: Cursor): Clause {
+  if (c.acceptWord('PRIMARY', 'KEY')) return { k: 'dropKey', what: 'primary', name: 'PRIMARY' };
+  if (c.acceptWord('INDEX') || c.acceptWord('KEY')) return { k: 'dropKey', what: 'index', name: c.ident() };
+  if (c.acceptWord('FOREIGN', 'KEY')) return { k: 'dropKey', what: 'fk', name: c.ident() };
+  if (c.acceptWord('CHECK')) return { k: 'dropKey', what: 'check', name: c.ident() };
+  if (c.acceptWord('CONSTRAINT')) return { k: 'dropKey', what: 'constraint', name: c.ident() };
+  if (c.isWord('PARTITION')) return fail(PARTITION);
+  c.acceptWord('COLUMN');
+  const name = c.ident();
+  if (!c.acceptWord('RESTRICT')) c.acceptWord('CASCADE');
+  return { k: 'dropColumn', name };
+}
+
+function parseRename(c: Cursor, st: State): Clause {
+  if (c.acceptWord('COLUMN')) {
+    const old = c.ident();
+    c.expectWord('TO');
+    return { k: 'renameColumn', old, to: c.ident() };
+  }
+  if (c.acceptWord('INDEX') || c.acceptWord('KEY')) {
+    const old = c.ident();
+    c.expectWord('TO');
+    return { k: 'renameIndex', old, to: c.ident() };
+  }
+  if (!c.acceptWord('TO')) c.acceptWord('AS');
+  return { k: 'renameTable', to: objectName(c, st) };
+}
+
+function parseAlter(c: Cursor): Clause {
+  if (c.acceptWord('INDEX')) {
+    const name = c.ident();
+    if (c.acceptWord('INVISIBLE')) return { k: 'indexVisibility', name, invisible: true };
+    c.expectWord('VISIBLE');
+    return { k: 'indexVisibility', name, invisible: false };
+  }
+  if (c.isWord('CHECK') || c.isWord('CONSTRAINT')) return fail(`ALTER CHECK·CONSTRAINT 는 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
+  c.acceptWord('COLUMN');
+  const old = c.ident();
+  if (c.acceptWord('SET', 'DEFAULT')) {
+    if (c.isOp('(')) return fail(`식 기본값 SET DEFAULT (…) 은 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
+    const value = parseDefault(c);
+    return { k: 'alterColumn', old, set: (col) => withDefault(col, normalizeDefault(value, col)) };
+  }
+  if (c.acceptWord('DROP', 'DEFAULT')) return { k: 'alterColumn', old, set: dropDefault };
+  if (c.acceptWord('SET', 'VISIBLE')) return { k: 'alterColumn', old, set: (col) => ({ ...col, invisible: false }) };
+  if (c.acceptWord('SET', 'INVISIBLE')) return { k: 'alterColumn', old, set: (col) => ({ ...col, invisible: true }) };
+  return fail(`알 수 없는 ALTER COLUMN 절입니다: ${c.peek()?.v ?? '(끝)'} (MySQL 1064)`);
+}
+
+// 기본값을 바꾼다 (undefined 면 DEFAULT 절이 없다 — 키를 남기지 않는다: 모델 해시·왕복 비교가 키 유무를 본다)
+function withDefault(col: Column, value: string | undefined): Column {
+  const next: Column = { ...col };
+  delete next.default;
+  return value === undefined ? next : { ...next, default: value };
+}
+
+// DROP DEFAULT: 기본값이 없어진다. NULL 허용 컬럼은 SHOW CREATE 에 DEFAULT NULL 로 보인다 (TEXT·BLOB 계열은 DEFAULT 가 보이지 않는다)
+const dropDefault = (col: Column): Column =>
+  withDefault(col, col.nullable && !col.autoIncrement && !BLOB_TYPES.has(baseType(col.type)) ? 'NULL' : undefined);
+
+// 테이블 옵션 (쉼표 없이 이어 쓸 수 있다). ROW_FORMAT=DEFAULT·KEY_BLOCK_SIZE=0·COMMENT='' 는 옵션을 지운다
+function parseOptions(c: Cursor): Clause[] {
+  const out: Clause[] = [];
+  while (!c.done) {
+    const word = c.peek()!.v.toUpperCase();
+    const common = parseCommonOption(c);
+    if (common) out.push({ k: 'option', ...common });
+    else if (c.acceptWord('ENGINE')) out.push({ k: 'option', key: 'ENGINE', value: engineName(optionValue(c)) });
+    else if (c.acceptWord('AUTO_INCREMENT') || c.acceptWord('ALGORITHM') || c.acceptWord('LOCK')) {
+      optionValue(c);
+      out.push({ k: 'noop' });
+    } else if (c.acceptWord('FORCE')) out.push({ k: 'noop' });
+    else if (CHARSET_WORDS.has(word)) fail(CHARSET);
+    else if (PARTITION_WORDS.has(word)) fail(PARTITION);
+    else fail(`지원하지 않는 ALTER TABLE 절입니다: ${c.peek()!.v} — ${RE_EXPORT}`);
+  }
+  return out;
+}
+
+function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { table: Table; renamed: Map<string, string> } {
+  const charset = tableCharset(before.options, st.defaults);
+  const pick = <K extends Clause['k']>(k: K) => clauses.filter((x): x is Extract<Clause, { k: K }> => x.k === k);
+  const keyDrops = pick('dropKey');
+  // 1) 기존 컬럼 삭제
+  const dropped = new Set(pick('dropColumn').map((d) => (findColumn(before, d.name) ?? fail(`컬럼 \`${d.name}\` 이 없습니다 (MySQL 1091)`)).name.toLowerCase()));
+  // 2) 기존 컬럼 변경 (이름은 문장 전 기준)
+  const entries: Entry[] = before.columns.filter((col) => !dropped.has(col.name.toLowerCase())).map((col) => ({ from: col.name, col, pos: undefined }));
+  changeColumns(st, before, entries, clauses, charset);
+  // 3) 컬럼 추가 4) 위치
+  for (const a of pick('add')) entries.push({ col: finalizeColumn(a.spec, charset), pos: a.pos });
+  for (const e of entries.filter((x) => x.pos)) placeEntry(entries, e);
+  assertUniqueColumns(entries);
+  const renamed = new Map(entries.filter((e) => e.from !== undefined && e.from !== e.col.name).map((e) => [e.from!.toLowerCase(), e.col.name]));
+  assertNoDependents(st, before, dropped, renamed, keyDrops);
+  updateColumnOrigins(st, before.name, entries);
+  // 5) 키 삭제 → 컬럼 변화 반영(바꾼 컬럼의 키 파트 길이·타입 맞춤 포함) → 인덱스 이름 변경·가시성
+  let t = remapKeys(dropKeys({ ...before, columns: entries.map((e) => e.col) }, keyDrops), dropped, renamed);
+  t = refitKeyParts(t, new Set(pick('modify').map((m) => m.spec.name.toLowerCase())));
+  for (const r of pick('renameIndex')) {
+    t = renameIndex(t, r.old, r.to);
+    moveIndexOrigin(st, before.name, r.old, r.to);
+  }
+  for (const v of pick('indexVisibility')) t = setIndexVisibility(t, v.name, v.invisible);
+  // 6) 키 추가와 FK 자동 인덱스
+  t = addKeys(st, t, pick('key').map((x) => x.item));
+  // 7) 검사·키 순서 8) 테이블 옵션
+  checkNowNotNull(before, t, renamed);
+  checkTable(st, t, renamed);
+  t = { ...t, indexes: sortIndexes(t) };
+  syncIndexOrigins(st, before.name, t);
+  for (const o of pick('option')) t = { ...t, options: setOption(t.options, o.key, o.value) };
+  return { table: t, renamed };
+}
+
+function changeColumns(st: State, before: Table, entries: Entry[], clauses: readonly Clause[], charset: TableCharset): void {
+  const touched = new Set<string>();
+  for (const ch of clauses) {
+    if (ch.k !== 'modify' && ch.k !== 'renameColumn' && ch.k !== 'alterColumn') continue;
+    const e = entries.find((x) => x.from !== undefined && sameName(x.from, ch.old)) ?? fail(`컬럼 \`${ch.old}\` 이 없습니다 (MySQL 1054)`);
+    if (touched.has(e.from!)) fail(`한 문장에서 컬럼 \`${ch.old}\` 을 두 번 바꿀 수 없습니다`);
+    touched.add(e.from!);
+    if (ch.k === 'renameColumn') e.col = { ...e.col, name: ch.to };
+    else if (ch.k === 'alterColumn') e.col = ch.set(e.col);
+    else {
+      if (!ch.rename && ch.spec.name !== e.col.name) fail(`MODIFY 에 쓴 이름 \`${ch.spec.name}\` 이 컬럼 \`${e.col.name}\` 과 대소문자가 다릅니다 — 이름을 바꾸려면 CHANGE 를 쓰세요`);
+      const next = finalizeColumn(ch.spec, charset);
+      assertRetypeAllowed(st, before, e.col, next, charset);
+      e.col = next;
+      e.pos = ch.pos;
+    }
+  }
+}
+
+function placeEntry(entries: Entry[], e: Entry): void {
+  entries.splice(entries.indexOf(e), 1);
+  if (e.pos && 'first' in e.pos) {
+    entries.unshift(e);
+    return;
+  }
+  const after = (e.pos as { after: string }).after;
+  const at = entries.findIndex((x) => sameName(x.col.name, after));
+  if (at < 0) fail(`AFTER 에 쓴 컬럼 \`${after}\` 이 없습니다 (MySQL 1054)`);
+  entries.splice(at + 1, 0, e);
+}
+
+function assertUniqueColumns(entries: readonly Entry[]): void {
+  if (!entries.length) fail('테이블의 모든 컬럼을 지울 수 없습니다 — DROP TABLE 을 쓰세요 (MySQL 1090)');
+  const seen = new Set<string>();
+  for (const { col } of entries) {
+    if (seen.has(col.name.toLowerCase())) fail(`컬럼 \`${col.name}\` 이 두 번 있습니다 (MySQL 1060)`);
+    seen.add(col.name.toLowerCase());
+  }
+}
+
+// 지우거나 이름을 바꾸는 컬럼을 쓰는 것: 생성 컬럼(3108)·CHECK(3959)·함수 인덱스(3837)는 MySQL 이 거부하고, 지우는 컬럼을 쓰는
+// FK 는 자기 쪽 1828, 다른 테이블(자기 참조 포함) 쪽 1829. 같은 문장에서 함께 지우는 키는 빼고 본다
+function assertNoDependents(st: State, t: Table, dropped: ReadonlySet<string>, renamed: ReadonlyMap<string, string>, keyDrops: readonly KeyDrop[]): void {
+  const changed = [...dropped, ...renamed.keys()];
+  if (!changed.length) return;
+  const keyDropped = (what: KeyDrop['what'], name: string) => keyDrops.some((d) => (d.what === what || d.what === 'constraint') && sameName(d.name, name));
+  for (const name of changed) {
+    const gen = t.columns.find((c) => c.generated && !dropped.has(c.name.toLowerCase()) && exprUses(c.generated.expr, name));
+    if (gen) fail(`생성 컬럼 \`${gen.name}\` 이 쓰는 컬럼 \`${name}\` 은 지우거나 이름을 바꿀 수 없습니다 (MySQL 3108)`);
+    const check = t.checks.find((k) => !keyDropped('check', k.name) && exprUses(k.expr, name));
+    if (check) fail(`CHECK \`${check.name}\` 이 쓰는 컬럼 \`${name}\` 은 지우거나 이름을 바꿀 수 없습니다 (MySQL 3959)`);
+    const fn = t.indexes.find((i) => !keyDropped('index', i.name) && i.parts.some((p) => p.expr !== undefined && exprUses(p.expr, name)));
+    if (fn) fail(`함수 인덱스 \`${fn.name}\` 이 쓰는 컬럼 \`${name}\` 은 지우거나 이름을 바꿀 수 없습니다 (MySQL 3837)`);
+  }
+  for (const name of dropped) {
+    const own = t.foreignKeys.find((f) => !keyDropped('fk', f.name) && f.columns.some((c) => sameName(c, name)));
+    if (own) fail(`FK \`${own.name}\` 가 쓰는 컬럼 \`${name}\` 은 지울 수 없습니다 (MySQL 1828)`);
+    for (const child of st.model.tables) {
+      const fk = child.foreignKeys.find((f) => f.refTable === t.name && f.refSchema === undefined && !(child.name === t.name && keyDropped('fk', f.name)) && f.refColumns.some((c) => sameName(c, name)));
+      if (fk) fail(`\`${child.name}\` 의 FK \`${fk.name}\` 가 참조하는 컬럼 \`${name}\` 은 지울 수 없습니다 (MySQL 1829)`);
+    }
+  }
+}
+
+// FK 로 이어진 컬럼(자기 FK 컬럼·다른 테이블이 참조하는 컬럼)의 타입·콜레이션 변경은 1차 범위 밖 (MySQL 3780 과 허용 사례를 가르지 않는다)
+function assertRetypeAllowed(st: State, t: Table, old: Column, next: Column, charset: TableCharset): void {
+  if (old.type === next.type && effectiveCollation(old, charset) === effectiveCollation(next, charset)) return;
+  const linked = t.foreignKeys.some((f) => f.columns.some((c) => sameName(c, old.name)))
+    || st.model.tables.some((x) => x.foreignKeys.some((f) => f.refTable === t.name && f.refSchema === undefined && f.refColumns.some((c) => sameName(c, old.name))));
+  if (linked) fail(`FK 로 이어진 컬럼 \`${old.name}\` 의 타입·문자셋 변경은 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
+}
+
+function updateColumnOrigins(st: State, table: string, entries: readonly Entry[]): void {
+  const before = st.origins.columns.get(table) ?? new Map<string, string | undefined>();
+  st.origins.columns.set(table, new Map(entries.map((e) => [e.col.name, e.from === undefined ? undefined : before.get(e.from)])));
+}
+
+function moveIndexOrigin(st: State, table: string, from: string, to: string): void {
+  const m = st.origins.indexes.get(table);
+  const key = m && [...m.keys()].find((k) => sameName(k, from));
+  if (!m || key === undefined) return;
+  const origin = m.get(key);
+  m.delete(key);
+  m.set(to, origin);
+}
+
+// 키 목록에 맞춰 인덱스 이름 추적을 정리한다 (지운 키는 빠지고 새 키는 undefined)
+function syncIndexOrigins(st: State, table: string, t: Table): void {
+  const m = st.origins.indexes.get(table) ?? new Map<string, string | undefined>();
+  st.origins.indexes.set(table, new Map(t.indexes.map((i) => [i.name, m.get(i.name)])));
+}
+
+// 다른 테이블 FK 가 참조하는 이 테이블 컬럼 이름도 따라 바뀐다 (MySQL 8.0)
+function renameReferencedColumns(st: State, table: string, renamed: ReadonlyMap<string, string>): void {
+  if (!renamed.size) return;
+  const rename = (n: string) => renamed.get(n.toLowerCase()) ?? n;
+  st.model.tables = st.model.tables.map((x) => (x.name === table ? x : {
+    ...x,
+    foreignKeys: x.foreignKeys.map((f) => (f.refTable === table && f.refSchema === undefined ? { ...f, refColumns: f.refColumns.map(rename) } : f)),
+  }));
+}
+
+// 끝의 ALGORITHM [=] x · LOCK [=] x 는 스키마에 영향이 없어 뺀다
+function withoutAlgorithmLock(toks: readonly Token[]): Token[] {
+  const out = [...toks];
+  const isKey = (k: number) => out[k]?.t === 'word' && /^(ALGORITHM|LOCK)$/i.test(out[k].v);
+  for (;;) {
+    const n = out.length;
+    if (n >= 3 && isKey(n - 3) && out[n - 2].t === 'op' && out[n - 2].v === '=') out.splice(n - 3, 3);
+    else if (n >= 2 && isKey(n - 2)) out.splice(n - 2, 2);
+    else return out;
+  }
+}

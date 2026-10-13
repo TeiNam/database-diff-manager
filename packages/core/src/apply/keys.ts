@@ -3,7 +3,7 @@ import { quotedIdentifiers } from '../lexer';
 import type { Column, ForeignKey, Index, IndexKind, IndexPart, Table } from '../model';
 import { baseType, BLOB_TYPES, CHARSET_TYPES, effectiveCollation, INT_TYPES, tableCharset } from './normalize-mysql';
 import { findColumn, findTable, sameName, type State } from './state';
-import { fail, RE_EXPORT, type ConstraintItem, type FkItem, type IndexItem } from './types';
+import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type FkItem, type IndexItem } from './types';
 
 export interface KeyDrop {
   what: 'index' | 'primary' | 'fk' | 'check' | 'constraint';
@@ -61,6 +61,17 @@ function assertDistinct(columns: readonly string[]): void {
   if (dup !== undefined) fail(`키에 컬럼 \`${dup}\` 이 두 번 있습니다 (MySQL 1060)`);
 }
 
+// 컬럼 정의 안의 PRIMARY KEY(KEY)·UNIQUE [KEY] 는 MySQL 이 그 컬럼 하나짜리 인덱스로 바꾼다 (이름 없는 UNIQUE 는 addIndex 가 컬럼 이름으로 짓는다).
+// ALTER TABLE 의 ADD·MODIFY·CHANGE 가 쓴다 (CREATE TABLE 도 같은 규칙). PRIMARY KEY 가 먼저
+export function columnKeyItems(spec: ColumnSpec): IndexItem[] {
+  const item = (kind: 'PRIMARY' | 'UNIQUE'): IndexItem => ({
+    kind: 'index',
+    named: kind === 'PRIMARY',
+    index: { name: kind === 'PRIMARY' ? 'PRIMARY' : '', kind, parts: [{ column: spec.name, desc: false }], invisible: false },
+  });
+  return [...(spec.primaryKey ? [item('PRIMARY')] : []), ...(spec.unique ? [item('UNIQUE')] : [])];
+}
+
 export function addIndex(t: Table, item: IndexItem): Table {
   const parts = item.index.parts.map((p) => ({ ...p, column: (findColumn(t, p.column!) ?? fail(`키 컬럼 \`${p.column}\` 이 없습니다 (MySQL 1072)`)).name }));
   assertDistinct(parts.map((p) => p.column));
@@ -115,6 +126,35 @@ function checkKeyParts(t: Table, index: Index): void {
   }
 }
 
+// 컬럼 정의를 바꾼(MODIFY·CHANGE) 뒤 그 컬럼을 쓰는 기존 키를 새 정의에 맞춘다 (MySQL 8.0.46·8.4.11 실측, sql_table.cc mysql_prepare_alter_table):
+// - 키 파트 길이(prefix)는 새 타입이 prefix 를 가질 수 없거나(INT·ENUM …) 새 길이가 prefix 이하이면 오류 없이 없어진다 (varchar(20) 의 c(10) 을
+//   varchar(5) 로 줄이면 KEY (c)). 키를 새로 쓸 때(addIndex)와 달리 거부하지 않는다. 새 길이가 더 길거나 TEXT·BLOB 이면 prefix 가 남는다
+// - 그 뒤 새 타입이 키에 맞는지 다시 본다: 길이 없는 TEXT·BLOB(1170)·JSON(3152), 문자열이 아닌 FULLTEXT 컬럼(1283)
+// changed: 정의를 바꾼 컬럼의 새 이름(소문자). 이름만 바꾸거나 기본값만 바꾼 컬럼은 포함하지 않는다
+export function refitKeyParts(t: Table, changed: ReadonlySet<string>): Table {
+  if (!changed.size) return t;
+  const isChanged = (p: IndexPart) => p.column !== undefined && changed.has(p.column.toLowerCase());
+  const indexes = t.indexes.map((i) => {
+    if (!i.parts.some(isChanged)) return i;
+    const refit: Index = { ...i, parts: i.parts.map((p) => (isChanged(p) ? withoutOutgrownLength(findColumn(t, p.column!)!, p) : p)) };
+    checkKeyParts(t, { ...refit, parts: refit.parts.filter(isChanged) }); // 식 파트(column 없음)는 건너뛴다
+    return refit;
+  });
+  return { ...t, indexes };
+}
+
+// prefix 가 새 정의에서 쓸모없으면 지운다: prefix 를 가질 수 없는 타입이거나 새 길이가 prefix 이하 (TEXT·BLOB 의 prefix 는 늘 남는다)
+function withoutOutgrownLength(col: Column, part: IndexPart): IndexPart {
+  if (part.length === undefined) return part;
+  const base = baseType(col.type);
+  const full = declaredLength(col); // 괄호가 없는 타입은 NaN — 길이를 알 수 없으니 prefix 를 남긴다
+  const isKept = BLOB_TYPES.has(base) || (LENGTH_TYPES.has(base) && (Number.isNaN(full) || part.length < full));
+  if (isKept) return part;
+  const next: IndexPart = { ...part };
+  delete next.length;
+  return next;
+}
+
 // FK 를 붙인다 (받치는 인덱스는 ensureFkIndexes 가 문장 끝에 만든다)
 export function addForeignKey(st: State, t: Table, item: FkItem): Table {
   const { refSchema, ...rest } = item.fk;
@@ -137,7 +177,21 @@ export function addForeignKey(st: State, t: Table, item: FkItem): Table {
 function checkSetNull(t: Table, columns: readonly string[], fk: Pick<ForeignKey, 'onDelete' | 'onUpdate'>, name: string): void {
   if (fk.onDelete !== 'SET NULL' && fk.onUpdate !== 'SET NULL') return;
   const notNullColumn = columns.map((n) => findColumn(t, n)!).find((c) => !c.nullable);
-  if (notNullColumn) fail(`컬럼 \`${notNullColumn.name}\` 은 NOT NULL 이라 FK \`${name}\` 의 SET NULL 을 쓸 수 없습니다 (MySQL 1830)`);
+  if (notNullColumn) fail(setNullOnNotNull(notNullColumn.name, name));
+}
+
+const setNullOnNotNull = (column: string, fkName: string): string => `컬럼 \`${column}\` 은 NOT NULL 이라 FK \`${fkName}\` 의 SET NULL 을 쓸 수 없습니다 (MySQL 1830)`;
+
+// 문장 끝 검사: NULL 허용이던 컬럼이 이 문장에서 NOT NULL 이 되었는데 SET NULL FK 가 쓰면 1830 (MODIFY·CHANGE 가 NOT NULL 을 쓸 때, PRIMARY KEY 가 컬럼을 암묵적으로
+// NOT NULL 로 만들 때. MySQL 8.0.46·8.4.11 실측). 같은 문장에서 지운 FK 는 보지 않고, 새로 붙인 FK 는 addForeignKey 가 본다.
+// renamed: 이 문장에서 바뀐 컬럼 이름 (소문자 옛 이름 → 새 이름)
+export function checkNowNotNull(before: Table, t: Table, renamed: ReadonlyMap<string, string>): void {
+  const wasNullable = new Set(before.columns.filter((c) => c.nullable).map((c) => (renamed.get(c.name.toLowerCase()) ?? c.name).toLowerCase()));
+  for (const fk of t.foreignKeys) {
+    if (fk.onDelete !== 'SET NULL' && fk.onUpdate !== 'SET NULL') continue;
+    const column = fk.columns.map((n) => findColumn(t, n)!).find((c) => !c.nullable && wasNullable.has(c.name.toLowerCase()));
+    if (column) fail(setNullOnNotNull(column.name, fk.name));
+  }
 }
 
 // 부모 쪽 검사: 참조 컬럼이 있고, 타입·콜레이션이 맞고(3780), 참조 컬럼에 정확히 맞는 PRIMARY KEY·UNIQUE 가 있어야 한다 (8.4 6125).

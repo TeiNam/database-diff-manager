@@ -5,6 +5,7 @@ import { LexError, tokenize } from '../lexer';
 import type { SchemaModel } from '../model';
 import { splitDump } from '../parse-dump';
 import { UnsafeValueError } from '../sql-safety';
+import { alterTable, createIndex, dropIndexOn } from './alter-table';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
 import { applySet } from './session';
 import { initialState, type State } from './state';
@@ -66,8 +67,15 @@ function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): bo
     if (db !== st.schemaName || !c.done) fail(`다른 스키마로 USE 할 수 없습니다: ${db}`);
     return false;
   }
-  // 문장 종류별 처리 (Task 5~7 에서 이 자리에 추가한다)
-  return fail(unsupported(ddl));
+  if (c.acceptWord('ALTER', 'TABLE')) alterTable(st, c);
+  else if (c.acceptWord('DROP', 'INDEX')) dropIndexOn(st, c);
+  else if (c.isWord('CREATE', 'INDEX') || ['UNIQUE', 'FULLTEXT', 'SPATIAL'].some((w) => c.isWord('CREATE', w, 'INDEX'))) {
+    c.next();
+    createIndex(st, c);
+  }
+  // Task 6·7: 여기에 else if 를 더한다
+  else return fail(unsupported(ddl));
+  return true;
 }
 
 function unsupported(ddl: string): string {
