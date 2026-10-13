@@ -63,8 +63,9 @@ export function createTable(st: State, c: Cursor): void {
   }
   const explicitNull = new Set(specs.filter(isExplicitNull).map((s) => s.name.toLowerCase()));
   let t: Table = { kind: 'table', name, columns: specs.map((s) => finalizeColumn(s, charset)), indexes: [], foreignKeys: [], checks: [], options, fidelity: 'full' };
-  // 컬럼 안 PRIMARY KEY·UNIQUE(Task 5 의 columnKeyItems)가 표 수준 정의보다 먼저다. addKeys 가 인덱스 출처(provenance)도 적는다
-  t = addKeys(st, t, [...specs.flatMap(columnKeyItems), ...items.filter((i): i is ConstraintItem => i.kind !== 'column')]);
+  // 키는 쓴 차례대로 들어간다: 컬럼 안 PRIMARY KEY·UNIQUE(columnKeyItems)는 그 컬럼 정의를 쓴 자리에서, 표 수준 키·FK 는 쓴 자리에서 (ALTER 의 columnKeys 와 같다).
+  // SHOW CREATE 의 같은 무리 안 순서가 이 차례다 (sortIndexes). addKeys 가 인덱스 출처(provenance)도 적는다
+  t = addKeys(st, t, items.flatMap((i): ConstraintItem[] => (i.kind === 'column' ? columnKeyItems(i.spec) : [i])));
   t = enforcePrimaryKeyNotNull(t, explicitNull); // PRIMARY KEY 컬럼은 NOT NULL, NULL 을 직접 쓴 컬럼이면 1171
   checkSetNullFks(t); // FK 를 붙인 뒤에 PRIMARY KEY 가 컬럼을 NOT NULL 로 만들었으면 addForeignKey 의 검사가 놓친다 (1830)
   checkTable(st, t);

@@ -256,6 +256,26 @@ describe('CREATE TABLE — 기본 문자셋 binary 는 범위 밖', () => {
   });
 });
 
+// 키는 쓴 차례대로 키 목록에 들어간다: 컬럼 안 PRIMARY KEY·UNIQUE 는 그 컬럼 정의를 쓴 자리에서, 표 수준 키는 쓴 자리에서 (ALTER 의 columnKeys 와 같다).
+// SHOW CREATE 에서 같은 무리(NULL 없는 UNIQUE 끼리, NULL 허용 UNIQUE 끼리) 안의 순서가 이 차례다 (keys.ts sortIndexes)
+describe('CREATE TABLE — 키 순서는 쓴 차례', () => {
+  const names = (script: string, table: string): string[] => tbl(ok(script), table).indexes.map((i) => i.name);
+
+  it('표 수준 UNIQUE 가 뒤에 오는 컬럼의 인라인 UNIQUE 보다 앞에 쓰이면 그 차례다', () => {
+    expect(names('CREATE TABLE t1 (a INT NOT NULL, UNIQUE KEY ua (a), b INT NOT NULL UNIQUE);', 't1')).toEqual(['ua', 'b']);
+    expect(names('CREATE TABLE t2 (a INT, UNIQUE (a), a2 INT, b INT UNIQUE);', 't2')).toEqual(['a', 'b']); // NULL 허용 UNIQUE 끼리
+  });
+
+  it('인라인 UNIQUE 사이에 낀 표 수준 키도 쓴 자리에 들어간다', () => {
+    expect(names('CREATE TABLE t3 (a INT NOT NULL UNIQUE, b INT NOT NULL, UNIQUE KEY mid (b), c INT NOT NULL UNIQUE);', 't3')).toEqual(['a', 'mid', 'c']);
+  });
+
+  it('PRIMARY KEY 는 어디에 써도 맨 앞이고, 컬럼 안 키만 쓰면 컬럼 차례다', () => {
+    expect(names('CREATE TABLE t4 (a INT NOT NULL, UNIQUE KEY ua (a), b INT PRIMARY KEY);', 't4')).toEqual(['PRIMARY', 'ua']);
+    expect(names('CREATE TABLE t5 (a INT NOT NULL UNIQUE, b INT NOT NULL UNIQUE, c INT NOT NULL UNIQUE);', 't5')).toEqual(['a', 'b', 'c']);
+  });
+});
+
 describe('입력 모델은 바뀌지 않는다', () => {
   it('CREATE·DROP·RENAME TABLE 을 섞어 적용해도 기준 모델 JSON 이 그대로다', () => {
     const before = JSON.stringify(BASE);
