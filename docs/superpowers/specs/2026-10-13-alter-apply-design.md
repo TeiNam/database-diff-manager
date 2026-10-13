@@ -67,6 +67,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 
 - **이름 비교:** 테이블 이름은 대소문자를 구분한다(Linux 기본 `lower_case_table_names=0`과 같다). 컬럼·인덱스·제약 이름은 구분하지 않는다.
 - **이름 표기:** 결과에 어느 표기가 남는지(예: 기존 컬럼 `name`을 `MODIFY NAME …`으로 바꿀 때)는 시나리오로 확인한 MySQL 동작을 따른다. 결정하기 전까지 대소문자만 다른 이름을 쓰는 절은 거부한다.
+  - 8.0/8.4 실측: MySQL 은 받고 쓴 표기가 이긴다(`MODIFY NAME …` → 컬럼 `NAME`, 인덱스 파트도 따라간다). 참조(`AFTER`·키 파트·`DROP COLUMN`·`ALTER COLUMN`)는 대소문자를 무시하고 정의의 원래 표기를 쓴다. Task 9 에서 거부를 이 규칙으로 바꾼다.
 - **타입:**
   - 소문자로 쓴다. `INTEGER`→`int`, `INT(11)`→`int`
   - 정수 표시 폭은 지운다. 예외는 `tinyint(1)`과 `ZEROFILL`이다.
@@ -80,17 +81,33 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - NULL 허용 컬럼에 기본값이 없으면 `DEFAULT NULL`을 붙인다. TEXT·BLOB 계열은 붙이지 않는다(명시한 `DEFAULT NULL`도 SHOW CREATE 에 보이지 않는다). JSON 은 붙인다(td-export 실출력 `json DEFAULT NULL`). GEOMETRY 계열은 시나리오로 확인한다.
   - 리터럴 기본값은 TEXT·BLOB·JSON·GEOMETRY 계열에 쓸 수 없다(MySQL 1101).
   - `timestamp`는 `explicit_defaults_for_timestamp=ON`(8.0 기본) 규칙을 따른다.
-  - PRIMARY KEY에 들어간 컬럼은 NOT NULL이 되고, `DEFAULT NULL`은 사라진다.
+  - PRIMARY KEY에 들어간 컬럼은 NOT NULL이 되고, `DEFAULT NULL`은 사라진다. 다른 기본값은 남는다. `NULL`이나 `DEFAULT NULL`을 직접 쓴 컬럼이 PRIMARY KEY에 들어가면 1171이다(컬럼 안 `DEFAULT NULL PRIMARY KEY`만 1067).
+  - AUTO_INCREMENT 컬럼은 `NULL`을 써도 NOT NULL이 된다. `DEFAULT NULL`은 받되 남지 않고, 다른 기본값은 1067이다. `ALTER COLUMN … SET DEFAULT 5`는 받지만 SHOW CREATE에 찍히지 않으므로 저장하지 않는다.
+  - `ALTER COLUMN … DROP DEFAULT`는 DEFAULT 절을 없앤다. NULL 허용 컬럼에도 `DEFAULT NULL`이 남지 않는다(8.0/8.4 실측).
+  - `SET DEFAULT`는 생성 컬럼이면 1221, TEXT·BLOB·JSON·GEOMETRY 계열이면 `NULL`이어도 1101이다.
+  - FLOAT·DOUBLE AUTO_INCREMENT는 8.4가 1063으로 거부하므로 8.0에서도 거부한다(`MySQL 8.4 1063`). 기준 덤프에 이미 있는 컬럼은 다시 검사하지 않는다.
+  - STORED 생성 컬럼은 `AS` 없는 `MODIFY`·`CHANGE`로 일반 컬럼이 된다. VIRTUAL은 3106이다.
 - **문자셋:**
   - 새 문자열 컬럼(그리고 문자셋 없이 쓴 `MODIFY`·`CHANGE`)은 테이블 기본 문자셋·콜레이션을 물려받는다. 예전 컬럼의 문자셋을 물려받지 않는 것도 MySQL과 같다.
-  - 저장 표기는 `SHOW CREATE` 규칙을 따른다. 컬럼 콜레이션이 테이블 기본 콜레이션과 다르면 `CHARACTER SET`을 붙이고, 콜레이션이 그 문자셋의 기본 콜레이션이 아니면 `COLLATE`를 붙인다. `COLLATE`를 명시하면 둘 다 붙인다.
+  - 저장 표기는 `SHOW CREATE` 규칙을 따른다(8.0/8.4 실측). 컬럼에 `CHARACTER SET`이나 `COLLATE`를 하나라도 쓰면 둘 다 붙는다. 문자셋만 쓰면 그 문자셋의 기본 콜레이션, `COLLATE`만 쓰면 그 콜레이션의 문자셋이다. 둘 다 안 쓰면 테이블 기본을 물려받고, 콜레이션이 그 문자셋의 기본 콜레이션이 아닐 때만 `COLLATE`를 붙인다.
+  - `CHARACTER SET binary`·`COLLATE binary`는 MySQL이 타입을 VARBINARY·BLOB으로 바꾸므로 1차에서 거부한다.
   - 새 테이블은 옵션에 쓴 문자셋·콜레이션을 쓰고, 없으면 2장의 스키마 기본값을 쓴다. 문자셋만 쓰면 그 문자셋의 기본 콜레이션, 콜레이션만 쓰면 그 콜레이션의 문자셋이다.
 - **자동 이름:**
   - 이름 없는 인덱스·UNIQUE는 첫 키 파트의 컬럼 이름을 쓴다. 이미 있으면 `_2`, `_3`…을 붙인다.
-  - 이름 없는 FK는 `<테이블>_ibfk_<N>`이다. N은 기존 최대값+1이다.
-  - FK에 쓸 수 있는 인덱스(FK 컬럼이 앞부분과 같은 인덱스)가 없으면 인덱스를 자동으로 만든다. 그 이름 규칙은 시나리오로 확인한 MySQL 동작을 따른다.
+  - 이름 없는 FK는 `<테이블>_ibfk_<N>`이다. N은 문장 앞 FK 이름(그 문장에서 지우는 것 포함)의 최댓값+1부터, 이름 없이 더한 FK마다 1씩 는다. 직접 쓴 `_ibfk_N` 이름은 세지 않고, 겹치면 1826이다. 같은 문장에서 지운 FK와 같은 이름의 FK도 1826이다(다시 만들려면 문장을 둘로 나눈다).
+  - FK 목록은 이름을 소문자로 바꾼 코드 포인트 순이다(SHOW CREATE). FK를 더하거나 테이블 이름을 바꾼 문장에서만 다시 정렬한다. 라틴 확장·그리스·키릴 문자가 든 이름끼리의 순서는 재현하지 못한다.
+  - FK에 쓸 수 있는 인덱스(FK 컬럼이 앞부분과 같은 인덱스)가 없으면 인덱스를 자동으로 만든다. 이름은 CONSTRAINT 이름, `FOREIGN KEY` 뒤 인덱스 이름, 첫 컬럼 이름(겹치면 `_2`…) 순으로 정한다. 앞의 두 이름이 기존 인덱스와 겹치면 1061(`PRIMARY`는 1280)이다.
+  - 자동 인덱스는 다른 키가 같은 앞쪽 파트를 가지면 MySQL이 조용히 지우거나 새 자동 인덱스로 바꾼다. FK가 남아 있어도 그렇다(MySQL `foreign_key_prefix`).
+  - 자동 인덱스라는 표시는 SHOW CREATE에 나오지 않는다. 한 번의 적용 안에서 만들었거나 FK만 지워서 남은 자동 인덱스는 출처를 따라가 MySQL과 같게 처리한다. 덤프의 인덱스는 이름으로 가린다.
+    - FK 이름과 같은 인덱스는 자동으로 본다. 직접 만든 `KEY f` + `CONSTRAINT f`도 자동으로 보는 한계가 있다.
+    - FK 이름이 `<테이블>_ibfk_N` 꼴이고 인덱스 이름이 FK의 첫 컬럼(`_N` 포함)이면 자동인지 알 수 없다. 그 인덱스를 지우거나 바꾸게 되는 문장은 거부하고 다시 추출하도록 안내한다.
+    - 그 밖의 인덱스는 직접 만든 것으로 본다. `FOREIGN KEY ix_g (…)`로 이름을 정한 자동 인덱스, 그리고 기준 덤프나 앞선 업로드에서 FK가 이미 지워져 남은 자동 인덱스도 직접 만든 것으로 보는 한계가 있다.
+  - 키 순서는 MySQL 규칙(PRIMARY, UNIQUE, 일반, FULLTEXT 무리)을 따르고, VIRTUAL 생성 컬럼·함수 파트가 든 키는 같은 무리 안에서 맨 뒤로 간다.
 - **연쇄 변경:**
   - 컬럼을 지우면 그 컬럼을 인덱스에서 빼고, 빈 인덱스는 지운다.
+  - 같은 문장에서 지운 컬럼을 같은 이름으로 다시 더하면 키 파트가 새 컬럼을 따라간다. 타입 모양이 달라지면 MySQL이 옛 키 파트의 바이트 길이를 prefix로 넘기므로, 1차에서는 거부하고 다시 추출하도록 안내한다.
+  - 컬럼을 바꾼 뒤 기존 키 파트의 prefix가 새 길이 이상이거나 새 타입이 prefix를 가질 수 없으면 prefix를 지운다(MySQL이 조용히 지운다). 길이 없는 키 파트의 컬럼이 TEXT·BLOB이 되면 1170, JSON이 되면 3152, FULLTEXT의 컬럼이 문자열이 아니게 되면 1283이다.
+  - `FIRST`·`AFTER`는 절 순서대로 하나씩 처리한다. 그 시점에 없는 컬럼을 `AFTER`로 가리키면 1054다.
   - `RENAME COLUMN`·`CHANGE`로 이름이 바뀌면 같은 테이블의 인덱스·FK와, 그 컬럼을 참조하는 다른 테이블의 FK `refColumns`를 바꾼다.
   - `RENAME TABLE`은 다른 테이블 FK의 `refTable`을 바꾼다. 뷰 본문은 바꾸지 않는다. MySQL도 바꾸지 않는다.
 - **루틴:**
@@ -102,6 +119,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - `ENGINE` 값은 MySQL 표기로 맞춘다(`innodb`→`InnoDB`). `ROW_FORMAT`은 대문자로 쓴다.
   - `COMMENT=''`이면 옵션을 지운다.
   - `AUTO_INCREMENT=n`은 비교에서 무시되므로 기준 값을 그대로 둔다.
+  - `ENGINE`을 InnoDB가 아닌 것으로 바꿀 때 FK가 있거나 다른 테이블 FK가 참조하는 테이블이면 3776이다. 그 밖의 엔진별 제약은 재현하지 않는다.
 
 ### 4.1 오류로 처리하는 경우
 
@@ -116,6 +134,9 @@ MySQL이 오류를 내는 다음 경우는 적용을 실패시킨다.
 - **PK 중복:** PRIMARY KEY를 두 번 정의할 때(1068)
 - **FK 정의:** 없는 컬럼이나 테이블을 참조하는 FK. 참조 컬럼의 타입이 다른 FK(3780)
 - **키 파트:** TEXT·BLOB 키 파트에 prefix 길이가 없을 때(1170)
+- **NULL과 키:** PRIMARY KEY 컬럼에 NULL을 직접 쓸 때(1171). `ON DELETE`·`ON UPDATE SET NULL` FK의 컬럼이 NOT NULL이 될 때(1830). `ADD PRIMARY KEY`가 컬럼을 NOT NULL로 만드는 경우도 포함한다.
+- **한 문장의 두 번째 참조:** 한 문장에서 같은 컬럼을 두 번 바꿀 때(1054), 같은 컬럼을 두 번 지울 때(1091)
+- **8.4 규칙:** 8.4만 거부하는 문장은 8.0에서도 거부하고, 메시지에 `MySQL 8.4 NNNN`으로 적는다. 예: FLOAT·DOUBLE AUTO_INCREMENT(1063), 고유 키가 아닌 키를 참조하는 FK(6125)
 
 MySQL의 모든 검사를 재현하지는 않는다. 화면 안내와 이 문서에 "실제 DB에 적용했을 때 MySQL이 거부할 수 있는 스크립트를 이 도구가 받아들일 수 있다"고 적는다. 예를 들어 키 길이 한도나 행 크기 한도 검사는 하지 않는다.
 

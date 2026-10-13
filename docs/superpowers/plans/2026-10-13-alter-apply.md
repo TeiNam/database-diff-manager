@@ -2292,6 +2292,12 @@ git commit -m "feat(core): ALTER 적용 — ALTER TABLE 절(컬럼·키·옵션�
 - Consumes: Task 1~5
 - Produces: `createTable(st, c)` (`c` 는 `CREATE TABLE` 뒤), `dropTable(st, c)` (`DROP TABLE` 뒤), `renameTables(st, c)` (`RENAME TABLE` 뒤)
 
+**Task 5 에서 바뀐 것 (이 Task 가 따른다):**
+- `keys.ts` 의 `isExplicitNull(spec)` 은 이 Task 에서 만든다: `export const isExplicitNull = (s: ColumnSpec): boolean => s.nullable === true || s.default?.kind === 'null';`. `alter-table.ts` 의 비공개 `explicitNullColumns` 도 이 함수를 쓰게 바꾼다.
+- 컬럼 안 키는 `columnKeyItems(spec)`, PRIMARY KEY 의 NOT NULL·1171 은 `enforcePrimaryKeyNotNull(t, explicitNull)`, FK 순서는 `sortForeignKeys(fks)` 다 (모두 `keys.ts`).
+- 인덱스 출처는 `addKeys` 가 `st.origins.provenance` 에 적는다. 다른 경로로 인덱스를 만들면 `auto-index.ts` 의 `markProvenance(st, table, names, 'user' | 'auto')` 를 부른다. `moveOrigins`·`forgetOrigins` 가 테이블 이름 변경·삭제 때 출처를 함께 옮기거나 지운다.
+- 실측 규칙(스펙 4장): CREATE 에서 `(c INT NULL, PRIMARY KEY (c))`·`(c INT DEFAULT NULL, PRIMARY KEY (c))`·`(c INT NULL PRIMARY KEY)` 는 1171, `(c INT DEFAULT NULL PRIMARY KEY)` 는 1067, `(c INT, PRIMARY KEY (c))` 는 `c int NOT NULL`. 이름 없는 FK 번호는 1 부터, 직접 쓴 `<테이블>_ibfk_N` 은 세지 않고 겹치면 1826.
+
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
 `packages/core/test/apply/table-stmt.test.ts`:
@@ -2329,9 +2335,25 @@ describe('CREATE TABLE', () => {
   it('표 수준 FK·자기 참조 FK 와 자동 인덱스, 문자셋만 쓴 옵션은 그 문자셋 기본 콜레이션', () => {
     const r = ok('CREATE TABLE coupon (id INT UNSIGNED NOT NULL AUTO_INCREMENT, member_id INT UNSIGNED, parent_id INT UNSIGNED, PRIMARY KEY (id), CONSTRAINT fk_cm FOREIGN KEY (member_id) REFERENCES member (id), FOREIGN KEY (parent_id) REFERENCES coupon (id)) ENGINE=InnoDB DEFAULT CHARSET=latin1;');
     const t = tbl(r, 'coupon');
-    expect(t.foreignKeys.map((f) => f.name)).toEqual(['fk_cm', 'coupon_ibfk_1']);
+    expect(t.foreignKeys.map((f) => f.name)).toEqual(['coupon_ibfk_1', 'fk_cm']); // SHOW CREATE 는 FK 를 이름(소문자) 순으로 찍는다
     expect(t.indexes.map((i) => i.name)).toEqual(['PRIMARY', 'fk_cm', 'parent_id']);
     expect(t.options.find((o) => o.key === 'COLLATE')!.value).toBe('latin1_swedish_ci');
+  });
+
+  it('PRIMARY KEY 컬럼: 직접 쓴 NULL 은 1171 (컬럼 안 DEFAULT NULL PRIMARY KEY 만 1067), 안 쓰면 NOT NULL 이고 DEFAULT NULL 이 없다', () => {
+    expect(apply('CREATE TABLE n1 (c INT NULL, PRIMARY KEY (c));')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1171') } });
+    expect(apply('CREATE TABLE n2 (c INT DEFAULT NULL, PRIMARY KEY (c));')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1171') } });
+    expect(apply('CREATE TABLE n3 (c INT NULL PRIMARY KEY);')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1171') } });
+    expect(apply('CREATE TABLE n4 (c INT DEFAULT NULL PRIMARY KEY);')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1067') } });
+    const c = tbl(ok('CREATE TABLE n5 (c INT, PRIMARY KEY (c));'), 'n5').columns[0];
+    expect(c).toMatchObject({ name: 'c', type: 'int', nullable: false });
+    expect(c.default).toBeUndefined();
+  });
+
+  it('이름 없는 FK 번호는 1 부터, 직접 쓴 같은 이름과 겹치면 1826', () => {
+    const r = ok('CREATE TABLE f0 (a INT UNSIGNED, b INT UNSIGNED, FOREIGN KEY (a) REFERENCES member (id), CONSTRAINT f0_ibfk_7 FOREIGN KEY (b) REFERENCES member (id));');
+    expect(tbl(r, 'f0').foreignKeys.map((f) => f.name)).toEqual(['f0_ibfk_1', 'f0_ibfk_7']);
+    expect(apply('CREATE TABLE f1 (a INT UNSIGNED, b INT UNSIGNED, FOREIGN KEY (a) REFERENCES member (id), CONSTRAINT f1_ibfk_1 FOREIGN KEY (b) REFERENCES member (id));')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1826') } });
   });
 
   it('IF NOT EXISTS 는 있는 테이블을 그대로 두고, 없는 IF NOT EXISTS·LIKE·파티션·중복은 거부', () => {
@@ -2373,12 +2395,12 @@ import { fkAutoNameCollides, renamedAutoName } from '../auto-name';
 import { Cursor } from '../cursor';
 import type { Table, TableOption } from '../model';
 import { parseTableItem } from './def-parser';
-import { addKeys, checkTable, sortIndexes } from './keys';
+import { addKeys, checkTable, columnKeyItems, enforcePrimaryKeyNotNull, isExplicitNull, sortForeignKeys, sortIndexes } from './keys';
 import { splitList } from './lists';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, finalizeColumn, primaryCollation, tableCharset } from './normalize-mysql';
 import { engineName, optionValue, parseCommonOption, setOption } from './options';
 import { findTable, forgetOrigins, moveOrigins, nameTaken, needTable, objectName, objectNameList, trackNew, type State } from './state';
-import { fail, type ColumnSpec, type ConstraintItem, type IndexItem } from './types';
+import { fail, RE_EXPORT, type ConstraintItem } from './types';
 ```
 
 그리고 `renameTable` 아래에 덧붙인다:
@@ -2388,7 +2410,7 @@ import { fail, type ColumnSpec, type ConstraintItem, type IndexItem } from './ty
 export function createTable(st: State, c: Cursor): void {
   const ifNotExists = c.acceptWord('IF', 'NOT', 'EXISTS');
   const name = objectName(c, st);
-  if (!c.isOp('(')) fail('CREATE TABLE … LIKE·SELECT 는 1차 지원 범위가 아닙니다 — td-export 로 다시 뽑아 올려 주세요');
+  if (!c.isOp('(')) fail(`CREATE TABLE … LIKE·SELECT 는 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
   if (nameTaken(st, name)) {
     if (ifNotExists) return; // MySQL 은 경고만 남기고 아무것도 하지 않는다
     fail(`테이블 \`${name}\` 이 이미 있습니다 (MySQL 1050)`);
@@ -2403,20 +2425,15 @@ export function createTable(st: State, c: Cursor): void {
     if (seen.has(s.name.toLowerCase())) fail(`컬럼 \`${s.name}\` 이 두 번 있습니다 (MySQL 1060)`);
     seen.add(s.name.toLowerCase());
   }
+  const explicitNull = new Set(specs.filter(isExplicitNull).map((s) => s.name.toLowerCase()));
   let t: Table = { kind: 'table', name, columns: specs.map((s) => finalizeColumn(s, charset)), indexes: [], foreignKeys: [], checks: [], options, fidelity: 'full' };
-  t = addKeys(st, t, [...inlineKeys(specs), ...items.filter((i): i is ConstraintItem => i.kind !== 'column')]);
+  // 컬럼 안 PRIMARY KEY·UNIQUE(Task 5 의 columnKeyItems)가 표 수준 정의보다 먼저다. addKeys 가 인덱스 출처(provenance)도 적는다
+  t = addKeys(st, t, [...specs.flatMap(columnKeyItems), ...items.filter((i): i is ConstraintItem => i.kind !== 'column')]);
+  t = enforcePrimaryKeyNotNull(t, explicitNull); // PRIMARY KEY 컬럼은 NOT NULL, NULL 을 직접 쓴 컬럼이면 1171
   checkTable(st, t);
-  t = { ...t, indexes: sortIndexes(t) };
+  t = { ...t, indexes: sortIndexes(t), foreignKeys: sortForeignKeys(t.foreignKeys) };
   st.model.tables = [...st.model.tables, t];
   trackNew(st.origins, t, false);
-}
-
-// 컬럼 안 PRIMARY KEY·UNIQUE → 인덱스 (문장에서 표 수준 정의보다 먼저 나온다)
-function inlineKeys(specs: readonly ColumnSpec[]): IndexItem[] {
-  const key = (s: ColumnSpec, kind: 'PRIMARY' | 'UNIQUE'): IndexItem => ({
-    kind: 'index', named: kind === 'PRIMARY', index: { name: kind === 'PRIMARY' ? 'PRIMARY' : '', kind, parts: [{ column: s.name, desc: false }], invisible: false },
-  });
-  return specs.flatMap((s) => [...(s.primaryKey ? [key(s, 'PRIMARY')] : []), ...(s.unique ? [key(s, 'UNIQUE')] : [])]);
 }
 
 // CREATE TABLE 의 테이블 옵션 → SHOW CREATE 모양 (ENGINE·DEFAULT CHARSET·COLLATE 는 늘 있다)
@@ -2433,7 +2450,7 @@ function createOptions(c: Cursor, st: State): TableOption[] {
     else if (c.acceptWord('CHARACTER', 'SET') || c.acceptWord('CHARSET')) charset = canonicalCharset(optionValue(c));
     else if (c.acceptWord('COLLATE')) collation = canonicalCollation(optionValue(c));
     else if (c.acceptWord('AUTO_INCREMENT')) optionValue(c);
-    else if (c.isWord('PARTITION')) fail('파티션 절은 1차 지원 범위가 아닙니다 — td-export 로 다시 뽑아 올려 주세요');
+    else if (c.isWord('PARTITION')) fail(`파티션 절은 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
     else fail(`지원하지 않는 테이블 옵션입니다: ${c.peek()?.v ?? '(끝)'}`);
     c.acceptOp(',');
   }
@@ -2742,7 +2759,7 @@ git commit -m "feat(core): ALTER 적용 — 결과 모델을 td-export 0.1.52 �
   - `packages/core/package.json`: `test:mysql` 스크립트에 `test/apply.int.test.ts` 를 더한다
 - Create: `packages/core/test/apply.int.test.ts`
 - Create: `packages/core/test/fixtures/alter-scenarios/_base.sql`
-- Create: 시나리오 폴더 26개 — `packages/core/test/fixtures/alter-scenarios/<이름>/script.sql`, 실패 시나리오에는 `expect-error.txt` 를 함께 둔다
+- Create: 시나리오 폴더 34개 — `packages/core/test/fixtures/alter-scenarios/<이름>/script.sql`, 실패 시나리오에는 `expect-error.txt` 를 함께 둔다
 - 실측과 다르면 Modify: `packages/core/src/apply/*.ts`
   - 고칠 때마다 `packages/core/test/apply/*.test.ts` 에 그 규칙의 단위 테스트를 더한다
 
@@ -2907,7 +2924,7 @@ suite.each(MYSQL_TARGETS)('$name ALTER 적용', ({ name: target, port }) => {
 "test:mysql": "docker compose -f docker-compose.test.yml up -d --wait && MYSQL_IT=1 vitest run test/mysql.int.test.ts test/apply.int.test.ts",
 ```
 
-- [ ] **Step 3: 공용 기준 덤프와 성공 시나리오 14개를 만든다**
+- [ ] **Step 3: 공용 기준 덤프와 성공 시나리오 15개를 만든다**
 
 `packages/core/test/fixtures/alter-scenarios/_base.sql`:
 
@@ -3117,7 +3134,23 @@ ALTER TABLE member
 ALTER TABLE member MODIFY name VARCHAR(50);
 ```
 
-- [ ] **Step 4: 실패 시나리오 12개를 만든다 (`script.sql` 과 `expect-error.txt`)**
+`alter-measured/script.sql` (Task 5 에서 8.0·8.4 실측으로 정한 규칙을 고정 — 스펙 4장):
+
+```sql
+ALTER TABLE member ALTER COLUMN name DROP DEFAULT;
+ALTER TABLE orders MODIFY id BIGINT AUTO_INCREMENT;
+ALTER TABLE member ADD COLUMN x1 INT FIRST, ADD COLUMN x2 INT AFTER x1, MODIFY age INT AFTER x2;
+ALTER TABLE member DROP COLUMN age, ADD COLUMN age INT;
+ALTER TABLE orders ADD COLUMN m2 INT UNSIGNED, ADD FOREIGN KEY (m2) REFERENCES member (id);
+ALTER TABLE orders DROP FOREIGN KEY orders_ibfk_2, ADD COLUMN m3 INT UNSIGNED, ADD FOREIGN KEY (m3) REFERENCES member (id);
+ALTER TABLE orders ADD COLUMN ref2 INT UNSIGNED, ADD CONSTRAINT a_fk FOREIGN KEY (ref2) REFERENCES member (id);
+ALTER TABLE orders ADD COLUMN m4 INT UNSIGNED, ADD FOREIGN KEY (m4) REFERENCES member (id);
+ALTER TABLE orders ADD INDEX ix_m4 (m4, amount);
+CREATE TABLE np (c INT, d INT);
+ALTER TABLE np ADD PRIMARY KEY (c), ADD COLUMN e INT NULL AUTO_INCREMENT, ADD UNIQUE KEY (e);
+```
+
+- [ ] **Step 4: 실패 시나리오 19개를 만든다 (`script.sql` 과 `expect-error.txt`)**
 
 | 폴더 | script.sql | expect-error.txt |
 |---|---|---|
@@ -3133,8 +3166,15 @@ ALTER TABLE member MODIFY name VARCHAR(50);
 | `error-drop-last-column` | `CREATE TABLE one_col (x INT);` 다음 줄에 `ALTER TABLE one_col DROP COLUMN x;` | `1090` |
 | `error-key-duplicate-column` | `ALTER TABLE member ADD INDEX ix_dup (name, name);` | `1060` |
 | `error-set-null-not-null` | `ALTER TABLE orders ADD CONSTRAINT fk_m2 FOREIGN KEY (member_id) REFERENCES member (id) ON DELETE SET NULL;` | `1830` |
+| `error-after-unplaced` | `ALTER TABLE member MODIFY age INT AFTER x, ADD COLUMN x INT;` | `1054` |
+| `error-pk-explicit-null` | `ALTER TABLE orders MODIFY id INT NULL;` | `1171` |
+| `error-engine-fk` | `ALTER TABLE orders ENGINE=MyISAM;` | `3776` |
+| `error-drop-column-twice` | `ALTER TABLE member DROP COLUMN age, DROP COLUMN age;` | `1091` |
+| `error-modify-set-null-not-null` | `ALTER TABLE orders ADD COLUMN m3 INT UNSIGNED, ADD CONSTRAINT fk_m3 FOREIGN KEY (m3) REFERENCES member (id) ON DELETE SET NULL;` 다음 줄에 `ALTER TABLE orders MODIFY m3 INT UNSIGNED NOT NULL;` | `1830` |
+| `error-fk-auto-index-name` | `ALTER TABLE orders ADD COLUMN m5 INT UNSIGNED, ADD CONSTRAINT member_id FOREIGN KEY (m5) REFERENCES member (id);` | `1061` |
+| `error-float-auto-increment` | `CREATE TABLE fl (id INT PRIMARY KEY);` 다음 줄에 `ALTER TABLE fl ADD COLUMN f FLOAT AUTO_INCREMENT, ADD KEY (f);` | `1063` |
 
-`expect-error.txt` 에는 숫자 한 줄만 쓴다.
+`expect-error.txt` 에는 숫자 한 줄만 쓴다. `error-float-auto-increment` 에는 `only.txt`(`MySQL 8.4`)도 둔다 — 8.0 은 받지만 우리는 8.4 규칙으로 둘 다 거부한다.
 
 - [ ] **Step 5: MySQL 에서 돌리고, 다른 부분을 고친다**
 
@@ -3175,7 +3215,7 @@ Run: `npm test -w @tdm/core && npm run typecheck -w @tdm/core` — Expected: PAS
 
 ```bash
 git add packages/core/test/mysql-dump.ts packages/core/test/mysql.int.test.ts packages/core/test/apply.int.test.ts packages/core/test/fixtures/alter-scenarios packages/core/package.json packages/core/src/apply packages/core/test/apply docs/superpowers/specs/2026-10-13-alter-apply-design.md
-git commit -m "test(core): ALTER 적용을 실제 MySQL 8.0/8.4 결과와 비교하는 시나리오 (성공 14·실패 12) — 실측에 맞춘 규칙 보정"
+git commit -m "test(core): ALTER 적용을 실제 MySQL 8.0/8.4 결과와 비교하는 시나리오 (성공 15·실패 19) — 실측에 맞춘 규칙 보정"
 ```
 
 ---
