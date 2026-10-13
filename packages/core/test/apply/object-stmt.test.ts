@@ -3,7 +3,10 @@ import { applyScript } from '../../src/apply';
 import { isCreateRoutine } from '../../src/apply/object-stmt';
 import { DEFAULT_SQL_MODE, RE_EXPORT } from '../../src/apply/types';
 import { canonicalJson } from '../../src/canonical';
+import { diffSchemas } from '../../src/diff';
 import { parseSqlDump } from '../../src/parse-dump';
+import { parseRoutine } from '../../src/parse-routine';
+import { printRoutine } from '../../src/print';
 import { fixture } from '../helpers';
 
 const SHOP = parseSqlDump(fixture('td-export-0152/shop.sql')).model; // 함수 tax, 프로시저 mark_paid, 뷰 paid_orders·big_paid
@@ -133,6 +136,55 @@ describe('CREATE FUNCTION·PROCEDURE', () => {
   it('isCreateRoutine: FUNCTION·PROCEDURE 만 (DEFINER 가 있어도, 소문자여도) 루틴 생성문으로 본다', () => {
     for (const ddl of ['CREATE FUNCTION f() RETURNS INT RETURN 1', "create definer = 'a'@'b' procedure p() select 1", 'CREATE\n  PROCEDURE p() SELECT 1']) expect(isCreateRoutine(ddl), ddl).toBe(true);
     for (const ddl of ['CREATE TABLE function (a INT)', 'CREATE AGGREGATE FUNCTION f RETURNS INT SONAME "x.so"', 'CREATE FUNCTIONS_X', 'CREATE VIEW v AS SELECT 1', 'DROP FUNCTION f']) expect(isCreateRoutine(ddl), ddl).toBe(false);
+  });
+});
+
+// SHOW CREATE 는 기본값과 같은 특성(NOT DETERMINISTIC·CONTAINS SQL·SQL SECURITY DEFINER·LANGUAGE SQL)과 빈 COMMENT 를 찍지 않는다 (printRoutine 이 따르는 규칙).
+// 덤프에서 읽은 모델에는 그래서 들어 있지 않다. 손으로 쓴 스크립트(GUI 클라이언트가 내보내는 꼴)의 것을 그대로 저장하면 diff 와 print·parse 왕복이 어긋난다
+describe('손으로 쓴 기본값 특성', () => {
+  it.each([['LANGUAGE SQL'], ['NOT DETERMINISTIC'], ['CONTAINS SQL'], ['SQL SECURITY DEFINER'], ["COMMENT ''"]])('%s 는 저장하지 않는다 (함수·프로시저)', (clause) => {
+    expect(routineOf(`CREATE PROCEDURE p_d() ${clause} SELECT 1;`, 'p_d').characteristics).toEqual({});
+    expect(routineOf(`CREATE FUNCTION f_d() RETURNS INT ${clause} RETURN 1;`, 'f_d').characteristics).toEqual({});
+  });
+
+  it('다섯 가지를 함께 써도 저장하지 않는다', () => {
+    const all = "LANGUAGE SQL NOT DETERMINISTIC CONTAINS SQL SQL SECURITY DEFINER COMMENT ''";
+    expect(routineOf(`CREATE PROCEDURE p_d() ${all} SELECT 1;`, 'p_d').characteristics).toEqual({});
+    expect(routineOf(`CREATE FUNCTION f_d() RETURNS INT COMMENT '' SQL SECURITY DEFINER CONTAINS SQL NOT DETERMINISTIC LANGUAGE SQL RETURN 1;`, 'f_d').characteristics).toEqual({});
+  });
+
+  it.each([
+    ['DETERMINISTIC', { deterministic: true }], ['NO SQL', { dataAccess: 'NO SQL' }], ['READS SQL DATA', { dataAccess: 'READS SQL DATA' }],
+    ['MODIFIES SQL DATA', { dataAccess: 'MODIFIES SQL DATA' }], ['SQL SECURITY INVOKER', { security: 'INVOKER' }], ["COMMENT 'x'", { comment: 'x' }],
+  ])('기본값이 아닌 %s 는 SHOW CREATE 가 찍는 그대로 남긴다', (clause, expected) => {
+    expect(routineOf(`CREATE PROCEDURE p_k() ${clause} SELECT 1;`, 'p_k').characteristics).toEqual(expected);
+  });
+
+  it('기본값과 아닌 것이 섞이면 기본값만 뺀다', () => {
+    const r = routineOf("CREATE FUNCTION f_k(a INT) RETURNS INT LANGUAGE SQL NOT DETERMINISTIC READS SQL DATA SQL SECURITY INVOKER COMMENT 'c' RETURN a;", 'f_k');
+    expect(r.characteristics).toEqual({ dataAccess: 'READS SQL DATA', security: 'INVOKER', comment: 'c' });
+  });
+
+  it('기본값을 덧붙여 쓴 CREATE 는 덧붙이지 않은 CREATE 와 같은 모델이고, print·parse 왕복이 그대로다', () => {
+    const plain = routineOf('CREATE FUNCTION f_r(a INT) RETURNS INT DETERMINISTIC RETURN a;', 'f_r');
+    const spelled = routineOf("CREATE FUNCTION f_r(a INT) RETURNS INT LANGUAGE SQL DETERMINISTIC CONTAINS SQL SQL SECURITY DEFINER COMMENT '' RETURN a;", 'f_r');
+    expect(canonicalJson(spelled)).toBe(canonicalJson(plain));
+    expect(canonicalJson({ ...parseRoutine(printRoutine(spelled)), sqlMode: spelled.sqlMode })).toBe(canonicalJson(spelled));
+  });
+
+  it('덤프에서 읽은 루틴을 기본값을 덧붙여 다시 만들어도 diff 에 변경으로 나오지 않는다 (빈 COMMENT 포함)', () => {
+    const script = [
+      'DROP PROCEDURE mark_paid;', 'DELIMITER $$',
+      "CREATE PROCEDURE mark_paid(IN p_id int) LANGUAGE SQL NOT DETERMINISTIC MODIFIES SQL DATA SQL SECURITY DEFINER COMMENT ''",
+      "BEGIN UPDATE orders SET status = 'paid' WHERE id = p_id; INSERT INTO order_audit(order_id) VALUES (p_id); END$$", 'DELIMITER ;',
+    ].join('\n');
+    expect(diffSchemas(SHOP, ok(script).model).routines).toEqual([]);
+  });
+
+  // 빈 COMMENT 는 저장하지 않으므로, COMMENT 가 있을 때만 거부하는 NBE 가드(위)에 걸리지 않는다
+  it('NO_BACKSLASH_ESCAPES 세션의 빈 COMMENT 는 본문에 백슬래시가 있어도 받는다', () => {
+    const r = routineOf("SET sql_mode = 'NO_BACKSLASH_ESCAPES';\nCREATE FUNCTION f_e() RETURNS VARCHAR(9) DETERMINISTIC COMMENT '' RETURN 'a\\';", 'f_e');
+    expect(r.characteristics).toEqual({ deterministic: true });
   });
 });
 
