@@ -152,8 +152,8 @@ export function effectiveCollation(col: Pick<Column, 'type' | 'charset' | 'colla
 
 const fspOf = (type: string): number => Number(/^(?:datetime|timestamp|time)\((\d)\)/.exec(type)?.[1] ?? 0);
 
-const ER_INVALID_DEFAULT = 1067;
-const ER_INVALID_ON_UPDATE = 1294;
+export const ER_INVALID_DEFAULT = 1067;
+export const ER_INVALID_ON_UPDATE = 1294;
 
 // CURRENT_TIMESTAMP 기본값·ON UPDATE: DATETIME·TIMESTAMP 에만, 소수 초 자릿수는 컬럼과 같아야 한다.
 // errno: 기본값이 잘못되면 1067, ON UPDATE 가 잘못되면 1294
