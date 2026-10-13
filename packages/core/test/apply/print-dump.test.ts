@@ -82,6 +82,35 @@ describe('printSqlDump', () => {
     expect(again.model.routines.map((x) => x.name)).toEqual(['p']);
   });
 
+  it("본문이 '--' 줄 주석으로 끝나는 루틴도 끝맺음이 주석에 먹히지 않아 경고 없이 같은 모델로 돌아온다", () => {
+    roundTrip(withRoutines(procedure('BEGIN SELECT 1; END -- tail')));
+  });
+
+  it("본문이 '#' 줄 주석으로 끝나는 루틴도 끝맺음이 주석에 먹히지 않아 경고 없이 같은 모델로 돌아온다", () => {
+    roundTrip(withRoutines(procedure('BEGIN SELECT 1; END # tail')));
+  });
+
+  it('줄 주석으로 끝나는 루틴 뒤의 테이블·뷰는 왕복해도 모두 남는다 (루틴이 파일 끝까지 삼키지 않는다)', () => {
+    for (const comment of ['-- tail', '# tail']) {
+      const model = withRoutines(procedure(`BEGIN SELECT 1; END ${comment}`));
+      const again = parseSqlDump(printSqlDump(model));
+      expect(again.model.routines.map((x) => x.name), comment).toEqual(['p']);
+      expect(again.model.tables.map((t) => t.name), comment).toEqual(model.tables.map((t) => t.name));
+      expect(again.model.views.map((v) => v.name), comment).toEqual(model.views.map((v) => v.name));
+    }
+  });
+
+  it('파싱 실패한 테이블·뷰의 원문이 줄 주석으로 끝나도 세미콜론이 주석에 먹히지 않아 뒤의 객체가 남는다', () => {
+    const failed = parseSqlDump(tdExport('CREATE TABLE `broken` (`id` int, ???) -- note\n;\n\nCREATE VIEW `broken_v` AS select ??? -- note\n;')).model;
+    expect([failed.tables.map((t) => t.name), failed.views.map((v) => v.name)]).toEqual([['broken'], ['broken_v']]);
+    const shop = shopModel();
+    const model: SchemaModel = { ...shop, tables: [...failed.tables, ...shop.tables], views: [...failed.views, ...shop.views] };
+    const again = parseSqlDump(printSqlDump(model));
+    expect(again.model.tables.map((t) => t.name)).toEqual(model.tables.map((t) => t.name));
+    expect(again.model.views.map((v) => v.name)).toEqual(model.views.map((v) => v.name));
+    expect(same(again.model, model)).toBe(true);
+  });
+
   it('루틴 SQL_MODE: 있으면 저장·설정·복원 줄을 붙이고(빈 문자열 포함), 없으면 붙이지 않는다', () => {
     const none = printSqlDump(withRoutines(procedure('BEGIN SELECT 1; END')));
     expect(none).not.toContain('OLD_ROUTINE_SQL_MODE');
