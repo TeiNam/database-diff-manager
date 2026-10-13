@@ -133,6 +133,14 @@ export function assertAutoKeysKnown(plan: Pick<AutoKeyPlan, 'uncertain'>): void 
     + `MySQL 이 지우고 직접 만든 것이면 남기므로 결과를 정할 수 없습니다 — ${RE_EXPORT}`);
 }
 
+// ALTER INDEX … VISIBLE|INVISIBLE 의 대상이 같은 문장이 버린 자동 인덱스면 1176: 자동 키가 먼저 버려져 대상이 없다 (8.0.46·8.4.11 실측 — 절 순서, 버리는 키의 종류(인덱스·UNIQUE·새 FK),
+// FK 만 지운 뒤 남은 자동 인덱스도 같다. 같은 이름의 새 인덱스가 대신하면 받고, 인덱스 이름 충돌(1061)·없는 컬럼(1072) 같은 오류가 먼저다). t: 키를 더한 뒤의 테이블.
+// 자동인지 알 수 없는(ambiguous) 인덱스는 assertAutoKeysKnown 이 거부하므로 여기서는 보지 않는다
+export function assertTargetsKept(plan: Pick<AutoKeyPlan, 'uncertain'>, t: Table, names: readonly string[]): void {
+  const lost = names.find((n) => !t.indexes.some((i) => sameName(i.name, n)) && !plan.uncertain.some((u) => sameName(u, n)));
+  if (lost !== undefined) fail(`인덱스 \`${lost}\` 이 없습니다 — 같은 문장이 더하는 키가 FK 의 자동 인덱스 \`${lost}\` 를 먼저 버립니다 (MySQL 1176)`);
+}
+
 // ── 출처 표 (st.origins.provenance: 테이블 → 인덱스 이름 소문자 → 출처). 표는 바꾸지 않고 새로 만들어 넣는다 ──
 const tableProvenance = (st: State, table: string): ReadonlyMap<string, IndexProvenance> => st.origins.provenance.get(table) ?? new Map();
 

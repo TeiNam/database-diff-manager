@@ -138,6 +138,20 @@ const CASES: [variant: string, script: string, expected: string][] = [
   ['text', 'ALTER TABLE t ADD INDEX ix (v(20))', 'PRIMARY(id) ka(x1) f(v) ix(v) | f'],
   ['text', 'ALTER TABLE t ADD INDEX ix (v, x1)', 'PRIMARY(id) ka(x1) ix(v,x1) | f'],
   ['text', 'ALTER TABLE t ADD INDEX ix (v(20), x1)', 'PRIMARY(id) ka(x1) f(v) ix(v,x1) | f'],
+  // ALTER INDEX … VISIBLE|INVISIBLE 가 같은 문장이 버리는 자동 인덱스를 가리키면 1176 (자동 키가 먼저 버려져 대상이 없다). 절 순서·버리는 키의 종류(인덱스·UNIQUE·새 FK)·FK 만 지운 뒤 남은 자동 인덱스와 상관없다
+  ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ADD INDEX ix (x0);', 'error 1176'],
+  ['named', 'ALTER TABLE t ALTER INDEX f VISIBLE, ADD INDEX ix (x0, x1);', 'error 1176'],
+  ['named', 'ALTER TABLE t ADD INDEX ix (x0), ALTER INDEX f INVISIBLE;', 'error 1176'],
+  ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ADD UNIQUE (x0);', 'error 1176'],
+  ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ADD CONSTRAINT h FOREIGN KEY (x0) REFERENCES par (id);', 'error 1176'],
+  ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ALTER INDEX ka INVISIBLE, ADD INDEX ix (x0);', 'error 1176'],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ALTER INDEX f INVISIBLE, ADD INDEX z (x0);', 'error 1176'],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f, ALTER INDEX f INVISIBLE, ADD INDEX z (x0);', 'error 1176'],
+  ['plain', 'ALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ALTER INDEX x0 INVISIBLE, ADD INDEX ix (x0);', 'error 1176'],
+  // 같은 문장의 다른 오류와 겹치면: 인덱스 이름 충돌(1061)·없는 컬럼(1072)이 먼저고(자동 키를 버린 뒤에야 대상이 없는 것이 드러난다), 처음부터 없는 대상(1176)은 이름 충돌보다 먼저다
+  ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ADD INDEX ka (x0, x1);', 'error 1061'],
+  ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ADD INDEX ix (x0, nope);', 'error 1072'],
+  ['named', 'ALTER TABLE t ALTER INDEX nope INVISIBLE, ADD INDEX ka (x0);', 'error 1176'],
 ];
 
 describe('ALTER TABLE — FK 자동 인덱스: MySQL 이 낸 결과와 같다', () => {
@@ -213,11 +227,37 @@ const SCRIPT_CASES: [variant: string, script: string, expected: string][] = [
   ['colkey', 'ALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | '],
   ['colkey', 'ALTER TABLE t ADD CONSTRAINT f FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | f'],
   ['colkey', 'ALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | '],
+  // ALTER INDEX 가 버려지지 않는 인덱스를 가리키면 받는다: 자동 인덱스를 못 덮는 키와 함께, 직접 만든 인덱스·스크립트가 더한 인덱스, 문장을 나눈 경우
+  ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ADD INDEX ix (x1, x0);', 'PRIMARY(id) ka(x1) f(x0) kz(x2) ix(x1,x0) | f'],
+  ['named', 'ALTER TABLE t ALTER INDEX ka INVISIBLE, ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | f'],
+  ['user', 'ALTER TABLE t ALTER INDEX k0 INVISIBLE, ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) k0(x0) kz(x2) ix(x0,x1) | f'],
+  ['plain', 'ALTER TABLE t ADD INDEX x0 (x0);\nALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ALTER INDEX x0 INVISIBLE, ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) x0(x0) ix(x0,x1) | t_ibfk_1'],
+  ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE;\nALTER TABLE t ADD INDEX ix (x0);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0) | f'],
+  ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ADD INDEX f (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) f(x0,x1) | f'], // 같은 이름의 새 f 가 자동 f 를 대신해 대상이 있다 (새 f 는 보이는 채로 남는다)
+  ['unnamed', 'ALTER TABLE t ALTER INDEX x0 INVISIBLE, ADD INDEX ix (x1, x0);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x1,x0) | t_ibfk_1'],
 ];
 
 describe('ALTER TABLE — FK 자동 인덱스: 스크립트 안에서 출처를 기억한다', () => {
   it.each(SCRIPT_CASES)('%s: %s', (variant, script, expected) => {
     expect(shown(tableT(ok(variant, script)))).toBe(expected);
+  });
+});
+
+describe('ALTER TABLE — ALTER INDEX 와 같은 문장이 버리는 FK 자동 인덱스', () => {
+  it('거부 메시지는 인덱스 이름과 MySQL 1176 을 말한다', () => {
+    const r = run('named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ADD INDEX ix (x0);');
+    expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringMatching(/`f`.*\(MySQL 1176\)/) } });
+  });
+
+  it('같은 이름의 새 인덱스가 자동 인덱스를 대신하면 ALTER INDEX 는 받고 새 인덱스는 보이는 채로 남는다 (MySQL 8.0.46·8.4.11 실측)', () => {
+    const t = tableT(ok('named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ADD INDEX f (x0, x1);'));
+    expect(t.indexes.find((i) => i.name === 'f')).toMatchObject({ parts: [{ column: 'x0' }, { column: 'x1' }], invisible: false });
+  });
+
+  it('자동 인덱스를 덮지 못하는 키와 함께면 INVISIBLE 이 적용되고 자동 인덱스는 남는다', () => {
+    const t = tableT(ok('named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ADD INDEX ix (x1, x0);'));
+    expect(t.indexes.find((i) => i.name === 'f')!.invisible).toBe(true);
+    expect(t.indexes.find((i) => i.name === 'ix')!.invisible).toBe(false);
   });
 });
 
@@ -233,6 +273,7 @@ describe('ALTER TABLE — FK 자동 인덱스: 자동인지 알 수 없을 때',
     'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1, ADD INDEX z (x0);',
     'ALTER TABLE t ADD CONSTRAINT h FOREIGN KEY (x0) REFERENCES par (id);', // 같은 컬럼의 두 번째 FK: 자동 키라면 새 키가 대신한다
     'ALTER TABLE t ADD CONSTRAINT h FOREIGN KEY (x0, x1) REFERENCES par2 (a, b);', // 자동 키라면 더 긴 새 자동 키가 대신한다
+    'ALTER TABLE t ALTER INDEX x0 INVISIBLE, ADD INDEX ix (x0);', // 자동이면 MySQL 은 1176, 직접 만든 것이면 받는다 — 1176 이 아니라 재추출 안내
   ];
   it.each(REJECTED)('거부: %s', (script) => {
     const r = run('unnamed', script);

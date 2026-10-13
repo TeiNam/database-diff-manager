@@ -8,7 +8,7 @@ import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
-import { assertAutoKeysKnown, classifyFkIndexes, planAutoKeys, renameProvenance, syncProvenance, type AutoKeyPlan } from './auto-index';
+import { assertAutoKeysKnown, assertTargetsKept, classifyFkIndexes, planAutoKeys, renameProvenance, syncProvenance, type AutoKeyPlan } from './auto-index';
 import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, enforcePrimaryKeyNotNull, exprUses, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
 import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
@@ -231,6 +231,7 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   const items = pick('key').map((x) => x.item);
   const plan = planAutoKeys(t, items, flagged); // 이 문장의 키가 FK 자동 인덱스를 대신하는가
   t = addConstraints(st, before, t, items, plan); // 6) 키 추가와 FK 자동 인덱스
+  assertTargetsKept(plan, t, pick('indexVisibility').map((v) => v.name)); // 버려진 자동 인덱스에 ALTER INDEX 를 썼으면 1176
   t = enforcePrimaryKeyNotNull(t, explicitNullColumns(clauses)); // 7) PRIMARY KEY 컬럼 NOT NULL·검사·키 순서 8) 테이블 옵션
   checkNowNotNull(before, t, renamed);
   checkTable(st, t, renamed);

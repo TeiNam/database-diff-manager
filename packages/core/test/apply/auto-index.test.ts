@@ -1,6 +1,6 @@
 // FK 가 자동으로 만든 인덱스 — 덤프에서 이름으로 가리기, 이 실행(applyScript)이 아는 출처, 새 키가 자동 키를 버리는 계획 (MySQL 8.0.46·8.4.11 실측)
 import { describe, expect, it } from 'vitest';
-import { assertAutoKeysKnown, classifyFkIndexes, markProvenance, planAutoKeys, renameProvenance, syncProvenance } from '../../src/apply/auto-index';
+import { assertAutoKeysKnown, assertTargetsKept, classifyFkIndexes, markProvenance, planAutoKeys, renameProvenance, syncProvenance } from '../../src/apply/auto-index';
 import { initialState, type IndexProvenance, type State } from '../../src/apply/state';
 import { DEFAULT_SQL_MODE, MYSQL_DEFAULTS, type FkItem, type IndexItem } from '../../src/apply/types';
 import type { Column, ForeignKey, Index, IndexKind, Table } from '../../src/model';
@@ -134,6 +134,19 @@ describe('planAutoKeys / assertAutoKeysKnown', () => {
     expect(() => assertAutoKeysKnown(plan)).toThrow(/`pid`.*자동으로 만든 것인지.*td-export 로 다시 뽑아 올려 주세요$/);
     expect(planAutoKeys(child, [idx('ix', 'INDEX', ['x1'])], auto([], ['pid'])).uncertain).toEqual([]);
     expect(() => assertAutoKeysKnown(planAutoKeys(child, []))).not.toThrow();
+  });
+
+  // ALTER INDEX … VISIBLE|INVISIBLE 의 대상이 같은 문장이 버린 자동 인덱스면 1176 (MySQL 8.0.46·8.4.11 실측). 표는 키를 더한 뒤의 것
+  it('assertTargetsKept: 버려진 자동 인덱스를 가리키면 1176, 남은 인덱스·같은 이름의 새 인덱스·알 수 없는 인덱스(따로 거부한다)는 통과한다', () => {
+    const covering = [idx('ix', 'INDEX', ['x0', 'x1'])];
+    const after = (indexes: Index[]): Table => ({ ...child, indexes });
+    const certain = planAutoKeys(child, covering, auto(['pid']));
+    const kept = after([...certain.kept]);
+    expect(() => assertTargetsKept(certain, kept, ['PID'])).toThrow(/`PID`.*\(MySQL 1176\)/); // 대소문자 무시, 입력한 이름으로 알린다
+    expect(() => assertTargetsKept(certain, kept, ['PRIMARY'])).not.toThrow();
+    expect(() => assertTargetsKept(certain, after([...certain.kept, plain('pid', 'x0', 'x1')]), ['pid'])).not.toThrow(); // 같은 이름의 새 인덱스가 대신했다
+    expect(() => assertTargetsKept(planAutoKeys(child, covering, auto([], ['pid'])), kept, ['pid'])).not.toThrow(); // assertAutoKeysKnown 이 거부한다
+    expect(() => assertTargetsKept(planAutoKeys(child, [idx('ix', 'INDEX', ['x1'])], auto(['pid'])), child, ['pid'])).not.toThrow(); // 덮지 못하면 남는다
   });
 });
 
