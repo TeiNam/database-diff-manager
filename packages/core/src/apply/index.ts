@@ -141,7 +141,8 @@ function withoutCommentEnd(toks: Token[]): Token[] {
 function unsupported(ddl: string): string {
   if (VIEW_RE.test(ddl)) return `CREATE·ALTER VIEW 는 1차 지원 범위가 아닙니다 (MySQL 이 뷰 본문을 다시 써서 저장합니다) — ${RE_EXPORT}`;
   const head = ddl.split(/\s+/).slice(0, 3).join(' ');
-  return `지원하지 않는 문장입니다: ${head} — 1차 지원 범위는 ALTER·CREATE·DROP·RENAME TABLE, CREATE·DROP INDEX, CREATE·DROP FUNCTION·PROCEDURE, DROP VIEW 입니다`;
+  return `지원하지 않는 문장입니다: ${head} — 1차 지원 범위는 ALTER·CREATE·DROP·RENAME TABLE, CREATE·DROP INDEX, CREATE·DROP FUNCTION·PROCEDURE, DROP VIEW 이고, `
+    + `스키마를 바꾸지 않는 문장(트랜잭션 제어·LOCK·데이터 문장·권한)은 무시합니다 — ${RE_EXPORT}`;
 }
 
 // 기준 → 결과 이름 대응 (diff 의 rename 매핑 형식). 새로 만든 객체·지운 객체는 들어가지 않는다

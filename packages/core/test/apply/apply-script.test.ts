@@ -18,6 +18,14 @@ describe('applyScript — 문장 처리', () => {
     expect(run('CREATE OR REPLACE VIEW v AS SELECT 1;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('VIEW') } });
   });
 
+  it('지원하지 않는 문장의 거부 안내는 모두 RE_EXPORT 로 끝난다', () => {
+    for (const sql of ['CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET @x = 1;', 'CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1;', 'ALTER DATABASE shop CHARACTER SET utf8mb4;', 'SELECT 1;', 'CALL p();', 'CREATE VIEW v AS SELECT 1;']) {
+      const r = run(sql);
+      expect(r, sql).toMatchObject({ ok: false, error: { index: 1 } });
+      expect(!r.ok && r.error.reason.endsWith(RE_EXPORT), sql).toBe(true);
+    }
+  });
+
   it('닫히지 않은 따옴표는 문장으로 나누지 못한다', () => {
     expect(run("ALTER TABLE t COMMENT 'x;")).toMatchObject({ ok: false, error: { index: 0, reason: expect.stringContaining('나누지 못했습니다') } });
   });
