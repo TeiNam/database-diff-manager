@@ -51,6 +51,7 @@ function timeDefault(fsp: number, text: string): TemporalResult {
   if (minutes > 59 || seconds > 59 || hours * 3600 + minutes * 60 + seconds > MAX_TIME_SECONDS) return { invalid: `'${text}' 은 올바른 시간이 아닙니다` };
   const frac = fraction(m[5], fsp);
   if (frac === undefined) return UNSUPPORTED;
-  const sign = m[1] === '-' && (hours > 0 || minutes > 0 || seconds > 0) ? '-' : '';
+  const isZero = hours === 0 && minutes === 0 && seconds === 0 && !/[1-9]/.test(frac); // 소수 초만 0 이 아니어도 부호가 남는다 ('-00:00:00.123', 8.0.46·8.4.11 실측)
+  const sign = m[1] === '-' && !isZero ? '-' : '';
   return { value: `${sign}${m[2].padStart(2, '0')}:${m[3]}:${m[4] ?? '00'}${frac}` };
 }
