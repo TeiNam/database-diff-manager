@@ -38,11 +38,11 @@ const warningText = (w: ParseWarning): string => JSON.stringify([w.code, w.kind,
 // 어긋난 객체의 이름표 (없으면 빈 배열). 경고만 어긋나면 그 경고가 가리키는 객체(스키마 경고면 경고 종류와 줄)를 적는다
 export function roundTripMismatches(input: RoundTripInput): string[] {
   const { base, applied, reparsed } = input;
-  let memo: { parsed: ParsedDump; objects: Map<string, SchemaObject> } | undefined;
+  let memo: { objects: Map<string, SchemaObject>; warnings: Set<string> } | undefined; // 경고는 문구 집합으로 — 경고마다 기준의 경고를 훑으면 경고 수의 제곱이다
   const baseAgain = () => {
     if (!memo) {
       const parsed = input.baseAgain();
-      memo = { parsed, objects: byKey(parsed.model) };
+      memo = { objects: byKey(parsed.model), warnings: new Set(parsed.warnings.map(warningText)) };
     }
     return memo;
   };
@@ -63,7 +63,7 @@ export function roundTripMismatches(input: RoundTripInput): string[] {
   if (objectsOf(applied).length !== objectsOf(reparsed.model).length && !bad.size) bad.set('count', '객체 수');
   for (const w of reparsed.warnings) {
     const keys = warningKeys(w);
-    if (keys.some((k) => untouched.has(k)) && baseAgain().parsed.warnings.some((x) => warningText(x) === warningText(w))) continue;
+    if (keys.some((k) => untouched.has(k)) && baseAgain().warnings.has(warningText(w))) continue;
     bad.set(`warning ${warningText(w)}`, keys.length ? labelOf({ kind: w.kind, name: w.object }) : `${w.code} 경고 (줄 ${w.line})`);
   }
   return [...new Set(bad.values())];
