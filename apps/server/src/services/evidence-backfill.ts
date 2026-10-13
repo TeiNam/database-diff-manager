@@ -55,7 +55,9 @@ function judgeVersion(db: Db, versionId: number): void {
     const baseId = derivation.baseVersionId;
     const inherited = (baseId === null ? loadEvidence(db, versionId) : loadEvidence(db, baseId)) ?? NO_SOURCE;
     const baseStale = baseId === null ? undefined : loadStaleReason(db, baseId);
-    saveEvidence(db, versionId, inherited, 'backfill', staleReason ?? (baseStale ? `기준 버전 v${derivation.baseVersionNo} 이 ${STALE_MODEL_REASON}` : null));
+    // 기준이 지워졌으면 이미 붙은 사유를 이어받는다 — 풀릴 근거(기준의 재판정)가 사라졌으니 보수적으로 둔다
+    const kept = baseId === null ? loadStaleReason(db, versionId) : undefined;
+    saveEvidence(db, versionId, inherited, 'backfill', staleReason ?? kept ?? (baseStale ? `기준 버전 v${derivation.baseVersionNo} 이 ${STALE_MODEL_REASON}` : null));
     return;
   }
   saveEvidence(db, versionId, parsed.model.evidence ?? NO_SOURCE, 'backfill', staleReason);
