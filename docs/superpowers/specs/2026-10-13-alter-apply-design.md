@@ -13,23 +13,23 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 ## 2. 사용자 흐름
 
 1. 스키마의 버전 목록에서 **ALTER 적용**을 누른다. admin·dba만 보인다.
-2. 기준 버전을 고른다. 기본값은 최신 버전이다.
+2. 기준 버전을 고른다. 목록에는 SQL 출처 버전만 나오고, 기본값은 그중 가장 최신 버전이다.
 3. 스크립트를 넣는다. `.sql` 파일을 고르거나 텍스트를 붙여 넣는다.
    - **스키마 기본 문자셋·콜레이션**도 확인한다. 기본값은 MySQL 8.0/8.4 서버 기본값인 `utf8mb4` / `utf8mb4_0900_ai_ci`이다. 문자셋 없이 쓴 `CREATE TABLE`과 문자열을 반환하는 함수에 MySQL은 DB 기본값을 쓰는데, td-export 덤프에는 DB 기본값이 없기 때문이다. 입력값은 저장되고, 같은 스키마에서 다음에 열 때 기본값으로 쓴다.
 4. **미리보기**를 누르면 서버가 저장하지 않고 적용만 해서 돌려준다.
-   - 성공하면 적용한 문장 수와 "기준 → 결과" 비교 요약(객체별 변경 개수)을 보여 준다.
-   - 실패하면 `N번째 문장 (줄 L): 이유`와 그 문장을 보여 준다.
+   - 성공하면 적용한 문장 수와 "기준 → 결과"로 바뀌는 객체의 목록(종류·이름·추가/삭제/변경/이름 변경)을 보여 준다.
+   - 실패하면 `N번째 문장 (줄 L): 이유` 메시지를 보여 준다. 특정 문장이 아닌 실패(적용할 문장이 없음 등)는 이유만 보여 준다. 문장 본문은 화면에 나오지 않는다.
 5. **저장**을 누르면 새 버전이 생긴다.
    - 버전 이력에는 `ALTER 적용 (기준 vN)` 배지가 붙고, 적용한 스크립트 원문을 볼 수 있다.
    - 메모 칸은 기존 업로드와 같다.
 
-기준 버전 조건은 다음과 같다. 조건에 맞지 않으면 버튼을 비활성화하고 이유를 툴팁으로 보여 준다.
+기준 버전 조건은 다음과 같다. 기준 버전 목록에는 SQL 출처 버전만 나온다. 서버도 같은 조건을 검사해, 맞지 않으면 400으로 이유를 돌려주고 대화상자가 그 메시지를 그대로 보여 준다.
 
 | 기준 버전 | 처리 |
 |---|---|
 | SQL 출처 (ALTER로 만든 버전 포함) | 적용 가능 |
-| MD 출처 | 거부: 모델 정보가 부분적이라 결과를 MySQL과 맞출 수 없다 |
-| stale | 거부: 저장된 모델이 현재 파서와 다르다. 원문을 다시 올린 버전을 기준으로 쓴다 |
+| MD 출처 | 거부: 목록에서 뺀다. 모델 정보가 부분적이라 결과를 MySQL과 맞출 수 없다 |
+| stale | 거부: 목록만으로는 알 수 없어 서버가 400으로 거부한다. 저장된 모델이 현재 파서와 다르다. 원문을 다시 올린 버전을 기준으로 쓴다 |
 
 ## 3. 지원 범위 (1차)
 
@@ -193,9 +193,10 @@ type ApplyResult =
   - `schema_version_derivations(version_id PK → schema_versions ON DELETE CASCADE, base_version_id → schema_versions ON DELETE SET NULL, base_version_no INTEGER NOT NULL, script TEXT NOT NULL, statement_count INTEGER NOT NULL, default_charset TEXT NOT NULL, default_collation TEXT NOT NULL)`. `base_version_no`는 기준 버전이 지워져도 배지에 `기준 vN`을 보여 주려고 남긴다
 - **`POST /versions/:id/alter`:**
   - 권한은 admin·dba이다. `onRequest`에서 검사하는 기존 방식을 따르고 CSRF 헤더도 기존대로 요구한다.
-  - 본문은 JSON `{ script: string, filename?: string, note?: string, dryRun?: boolean, defaults?: { charset?: string, collation?: string } }`이다. 크기 제한은 업로드와 같다.
+  - 본문은 JSON `{ script: string, filename?: string, note?: string, dryRun?: boolean, defaults?: { charset?: string, collation?: string } }`이다. `script`는 1,000,000자까지, 요청 본문은 4 MiB까지 받는다(`apps/server/src/limits.ts`의 `MAX_ALTER_SCRIPT`·`ALTER_BODY_LIMIT`). JSON 문자열의 따옴표 이스케이프로 본문이 늘어나는 만큼 본문 한도에 여유를 둔다.
   - `:id` 버전이 SQL 출처가 아니거나 stale이면 400을 돌려준다.
-  - `dryRun: true`면 `{ applied, summary }`를 돌려준다. `summary`는 기존 비교 요약과 같은 모양이다.
+  - 스크립트 적용이 실패해도 400이다. 메시지는 `N번째 문장 (줄 L): 이유`이고(특정 문장이 아닌 실패는 이유만), `details.error`에 `{ index, line, statement, reason }`을 담는다.
+  - `dryRun: true`면 저장하지 않고 `{ status: 'preview', applied, changes, renames }`를 돌려준다. `changes`는 기준과 결과를 기존 비교 엔진으로 비교해 바뀌는 객체를 모은 목록이고 항목은 `{ kind, name, op }`이다(`kind`는 table·view·function·procedure, `op`는 add·drop·modify·rename). `renames`는 `applyScript`가 모은 이름 대응이다. 저장하면 `{ status: 'ok' | 'duplicate', versionId, versionNo, applied, changes }`를 돌려준다.
   - 결과 모델을 `printSqlDump`로 출력하고 다시 파싱한 모델을 쓴다. 그래야 저장 모델과 원문 재파싱 모델이 항상 같아서 서버 시작 시 stale로 잘못 표시되지 않는다.
   - "변경 없음" 판정은 모델 해시가 아니라 기존 비교 엔진으로 한다(`diffSchemas(기준, 결과, renames)`의 변경이 0개).
   - 저장할 때는 출력한 텍스트를 원문으로 기존 `ingest` 경로에 넘겨 새 버전을 만든다. `source_filename`은 업로드한 파일 이름 또는 `alter.sql`이다. 같은 트랜잭션에서 아래를 기록한다.
@@ -217,7 +218,7 @@ type ApplyResult =
   - 메모
   - 미리보기 결과
   - 저장
-- 실패하면 해당 문장을 강조해서 보여 준다.
+- 실패하면 서버가 돌려준 메시지(`N번째 문장 (줄 L): 이유`)만 보여 준다. 문장 본문을 따로 보여 주거나 강조하지는 않는다.
 - SQL 출처 버전이 없으면 버튼을 보이지 않는다. 기준 버전이 stale 이면(목록에서는 알 수 없다) 서버가 400 으로 이유를 돌려주고 대화상자가 그대로 보여 준다.
 - 버전 이력의 배지는 `ALTER 적용 (기준 vN)`이다. 배지를 누르면 스크립트 원문을 보는 패널이 열린다.
 

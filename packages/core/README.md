@@ -14,8 +14,12 @@ A pure TypeScript package that reads td-export dumps (`.sql`, `.md`) into a sche
 | `diffSchemas(base, target, renames?)` | Two models → `SchemaDiff` | Table and view changes, rename candidates, and renames that could not be applied (`ignoredRenames`) |
 | `generateDdl(diff)` | `SchemaDiff` → `Statement[]` | Generates statements in a fixed order that accounts for FK and view dependencies |
 | `renderDdl(stmts, partial?)` | `Statement[]` → string | Adds a header comment per object, `notes`, and the trailing `;` on each statement |
+| `applyScript(base, script, { schemaName, defaults? })` | Model + ALTER script → `ApplyResult` | Applies the script to a copy of the model the way MySQL 8.0/8.4 would, and stops at the first statement it cannot apply (no partial result). Success is `{ ok: true, model, applied, renames, defaults }`: the new model, the statement count, the BASE → result renames, and the Schema defaults used. Failure is `{ ok: false, error }`, where `error` has `index` (1-based; 0 when no single statement is at fault), `line`, `statement` (first 500 characters), and `reason`. Use a model parsed from a SQL dump |
+| `printSqlDump(model)` | Model → SQL dump string | Prints a td-export 0.1.52 format dump that `parseSqlDump` reads back into the same model. Throws `ApplyFailure` for a model it cannot print safely (for example a Schema name containing `*/`) |
 
 In a parse warning (`ParseWarning`), `code` is `'parse-error'` (parsing failed) or `'round-trip'` (the re-printed output differs from the original), and `kind` is `'table'` or `'view'`.
+
+For `applyScript`, `schemaName` is the Schema being edited (names qualified with another Schema are rejected), and `defaults` is `{ charset?, collation? }`, the Schema's default character set and collation, which a dump does not record. Omitted values come from `MYSQL_DEFAULTS` (`utf8mb4` / `utf8mb4_0900_ai_ci`), and giving only one of the two derives the other. A statement outside the supported scope fails with a `reason` that ends with a hint to re-export with td-export; the scope is in the [design document](../../docs/superpowers/specs/2026-10-13-alter-apply-design.md) (Korean).
 
 The fields of `Statement` are as follows.
 

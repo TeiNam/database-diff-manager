@@ -79,7 +79,7 @@ jobs:
           MYSQL_IT: '1'
           MYSQL80_PORT: '33080'
           MYSQL84_PORT: '33084'
-        run: npx vitest run test/mysql.int.test.ts
+        run: npx vitest run test/mysql.int.test.ts test/apply.int.test.ts
 
   # 계산만 한다 (태그는 이미지가 올라간 뒤 release 잡에서 만든다)
   version:

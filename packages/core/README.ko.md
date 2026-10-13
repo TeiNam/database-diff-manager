@@ -14,8 +14,12 @@ td-export 덤프(`.sql`, `.md`)를 스키마 모델로 읽고, 두 버전을 비
 | `diffSchemas(base, target, renames?)` | 두 모델 → `SchemaDiff` | 테이블·뷰 변경, rename 후보, 적용하지 못한 rename(`ignoredRenames`) |
 | `generateDdl(diff)` | `SchemaDiff` → `Statement[]` | FK·뷰 의존성을 고려한 고정 순서로 문장을 만든다 |
 | `renderDdl(stmts, partial?)` | `Statement[]` → 문자열 | 객체별 머리 주석, `notes`, 문장 끝 `;`를 붙인다 |
+| `applyScript(base, script, { schemaName, defaults? })` | 모델 + ALTER 스크립트 → `ApplyResult` | MySQL 8.0/8.4가 처리하는 방식대로 모델의 복사본에 스크립트를 적용하고, 적용할 수 없는 첫 문장에서 멈춘다(부분 결과 없음). 성공은 `{ ok: true, model, applied, renames, defaults }`로 새 모델, 적용한 문장 수, BASE → 결과 rename, 쓴 스키마 기본값을 돌려준다. 실패는 `{ ok: false, error }`이고 `error`는 `index`(1부터, 문장 하나의 잘못이 아니면 0), `line`, `statement`(앞 500자), `reason`이다. SQL 덤프에서 읽은 모델에 쓴다 |
+| `printSqlDump(model)` | 모델 → SQL 덤프 문자열 | `parseSqlDump`가 다시 읽으면 같은 모델이 나오는 td-export 0.1.52 형식 덤프로 출력한다. 안전하게 출력할 수 없는 모델(`*/`가 든 스키마 이름 등)이면 `ApplyFailure`를 던진다 |
 
 파싱 경고(`ParseWarning`)의 `code`는 `'parse-error'`(파싱 실패) 또는 `'round-trip'`(재출력 결과가 원문과 다름)이고, `kind`는 `'table'` 또는 `'view'`다.
+
+`applyScript`의 `schemaName`은 편집하는 스키마의 이름이고(다른 스키마를 붙인 이름은 거부한다), `defaults`는 덤프에 없는 스키마 기본 문자셋·콜레이션 `{ charset?, collation? }`이다. 주지 않은 값은 `MYSQL_DEFAULTS`(`utf8mb4` / `utf8mb4_0900_ai_ci`)로 채우고, 둘 중 하나만 주면 다른 하나를 그 값에서 구한다. 지원 범위 밖의 문장은 `reason` 끝에 td-export로 다시 뽑으라는 안내를 붙여 거부한다. 지원 범위는 [설계 문서](../../docs/superpowers/specs/2026-10-13-alter-apply-design.md)에 있다.
 
 `Statement`의 필드는 다음과 같다.
 
