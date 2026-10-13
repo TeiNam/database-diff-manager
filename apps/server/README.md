@@ -53,6 +53,8 @@ All paths are under `/api`. Requests that change state must include the `X-Reque
 | POST | `/uploads` (multipart: `meta` JSON + `files`) | admin, dba |
 | GET | `/versions/:id`, `/versions/:id/source` | logged in |
 | DELETE | `/versions/:id` | admin, dba |
+| POST | `/versions/:id/alter` (JSON: `script`, `filename?`, `note?`, `dryRun?`, `defaults?: { charset?, collation? }` — applies an ALTER script to a SQL-sourced version and saves the result as a new version; `dryRun` returns the change list without saving) | admin, dba |
+| GET | `/versions/:id/derivation` (base version and script of a version created by an ALTER script) | logged in |
 | GET | `/diff?base=&target=` | logged in |
 | PUT | `/diff/renames` | admin, dba |
 | GET | `/objects/:id/history` | logged in |

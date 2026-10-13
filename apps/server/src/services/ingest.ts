@@ -12,6 +12,8 @@ export interface IngestInput {
   text: string;
   note?: string;
   userId: number;
+  evidence?: SchemaEvidence; // 완전성 판정을 원문 대신 이 값으로 (ALTER 적용 버전: 기준 버전의 판정을 물려받는다)
+  onCreated?: (versionId: number) => void; // 새 버전을 만든 같은 트랜잭션 안에서 부른다 (duplicate 면 부르지 않는다)
 }
 
 export type IngestResult =
@@ -93,11 +95,11 @@ export function ingest(db: Db, input: IngestInput): IngestResult {
   const { model } = parsed;
   assertSchemaDump(parsed);
   assertIdentified(parsed);
-  const warnings = withUnverifiedWarning(model, withEmptySchemaWarning(format, parsed));
+  // 완전성 증거를 버전마다 저장해 diff 가 TARGET 일 때 증거가 complete 가 아니면 부재 기반 파괴 문장을 막는다 (15회차)
+  const evidence = input.evidence ?? model.evidence ?? UNJUDGED;
+  const warnings = withUnverifiedWarning({ ...model, evidence }, withEmptySchemaWarning(format, parsed));
   assertUniqueNames(model);
   const hash = modelHash(model);
-  // 완전성 증거를 버전마다 저장해 diff 가 TARGET 일 때 증거가 complete 가 아니면 부재 기반 파괴 문장을 막는다 (15회차)
-  const evidence = model.evidence ?? UNJUDGED;
   return tx(db, () => {
     const schemaId = ensureSchema(db, ensureDatabase(db, input.databaseName), input.schemaName);
     const latest = one<{ id: number; version_no: number; model_hash: string; source_format: SourceFormat }>(db,
@@ -116,6 +118,7 @@ export function ingest(db: Db, input: IngestInput): IngestResult {
     saveEvidence(db, versionId, evidence, 'ingest');
     const routineIds = routineObjectIds(db, schemaId);
     for (const obj of [...model.tables, ...model.views, ...model.routines]) linkObject(db, schemaId, versionId, obj, routineIds);
+    input.onCreated?.(versionId);
     return { status: 'ok', versionId, versionNo, warnings };
   });
 }

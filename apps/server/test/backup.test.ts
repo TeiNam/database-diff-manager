@@ -19,7 +19,7 @@ describe('backupDb', () => {
     db.close();
     const copy = openDb(target);
     expect(one<{ n: number }>(copy, 'SELECT COUNT(*) AS n FROM users')!.n).toBe(1);
-    expect(one<{ user_version: number }>(copy, 'PRAGMA user_version')!.user_version).toBe(8);
+    expect(one<{ user_version: number }>(copy, 'PRAGMA user_version')!.user_version).toBe(9);
     copy.close();
   });
 
