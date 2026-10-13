@@ -1288,6 +1288,13 @@ describe('이름 짓기', () => {
 });
 
 describe('addIndex', () => {
+  it('InnoDB 의 USING HASH 는 지우고 USING BTREE 는 남긴다', () => {
+    const st = fresh();
+    const hash = idx('h', 'INDEX', ['name']);
+    expect(addIndex(table(st, 'child'), { ...hash, index: { ...hash.index, using: 'HASH' } }).indexes.at(-1)!.using).toBeUndefined();
+    expect(addIndex(table(st, 'child'), { ...hash, index: { ...hash.index, using: 'BTREE' } }).indexes.at(-1)!.using).toBe('BTREE');
+  });
+
   it('이름 없는 UNIQUE 는 첫 컬럼 이름, PRIMARY KEY 는 컬럼을 NOT NULL 로 만든다', () => {
     const st = fresh();
     expect(addIndex(table(st, 'child'), idx('', 'UNIQUE', ['name'], false)).indexes.at(-1)).toMatchObject({ name: 'name', kind: 'UNIQUE' });
@@ -1320,6 +1327,8 @@ describe('addForeignKey / ensureFkIndexes', () => {
     expect(ensureFkIndexes(unnamed, [{ name: 'child_ibfk_2', named: false }]).indexes.at(-1)).toMatchObject({ name: 'pid2', parts: [{ column: 'pid2' }] });
     const named = addForeignKey(st, withCol, fk(true, ['pid2'], 'parent', ['id'], 'fk_p2'));
     expect(ensureFkIndexes(named, [{ name: 'fk_p2', named: true }]).indexes.at(-1)!.name).toBe('fk_p2');
+    expect(ensureFkIndexes(named, [{ name: 'fk_p2', indexName: 'ix_p2', named: true }]).indexes.at(-1)!.name).toBe('fk_p2'); // CONSTRAINT 이름이 먼저
+    expect(ensureFkIndexes(unnamed, [{ name: 'child_ibfk_2', indexName: 'ix_p2', named: false }]).indexes.at(-1)!.name).toBe('ix_p2');
     const reuse = addForeignKey(st, c, fk(true, ['pid'], 'parent', ['id'], 'fk_again'));
     expect(ensureFkIndexes(reuse, [{ name: 'fk_again', named: true }]).indexes).toHaveLength(c.indexes.length); // KEY pid 가 받친다
   });
@@ -1434,7 +1443,7 @@ function notNull(c: Column): Column {
 
 export function addIndex(t: Table, item: IndexItem): Table {
   const parts = item.index.parts.map((p) => ({ ...p, column: (findColumn(t, p.column!) ?? fail(`키 컬럼 \`${p.column}\` 이 없습니다 (MySQL 1072)`)).name }));
-  const index: Index = { ...item.index, parts };
+  const index: Index = withoutInnodbHash(t, { ...item.index, parts });
   checkKeyParts(t, index);
   if (index.kind === 'PRIMARY') {
     if (t.indexes.some((i) => i.kind === 'PRIMARY')) fail('PRIMARY KEY 가 이미 있습니다 (MySQL 1068)');
@@ -1446,6 +1455,14 @@ export function addIndex(t: Table, item: IndexItem): Table {
   if (sameName(name, 'PRIMARY')) fail('인덱스 이름으로 PRIMARY 는 쓸 수 없습니다 (MySQL 1280)');
   if (t.indexes.some((i) => sameName(i.name, name))) fail(`인덱스 이름 \`${name}\` 이 이미 있습니다 (MySQL 1061)`);
   return { ...t, indexes: [...t.indexes, { ...index, name }] };
+}
+
+// InnoDB 는 USING HASH 를 BTREE 로 만들고 SHOW CREATE 에서 지운다 (USING BTREE 는 남긴다 — MySQL 8.0 실측)
+function withoutInnodbHash(t: Table, index: Index): Index {
+  if (index.using !== 'HASH' || t.options.find((o) => o.key === 'ENGINE')?.value !== 'InnoDB') return index;
+  const next: Index = { ...index };
+  delete next.using;
+  return next;
 }
 
 function checkKeyParts(t: Table, index: Index): void {
@@ -1504,13 +1521,13 @@ function fkCompatible(a: Column, aCs: TableCharset, b: Column, bCs: TableCharset
   return kind(a) === kind(b) && effectiveCollation(a, aCs) === effectiveCollation(b, bCs);
 }
 
-// 이 문장에서 붙인 FK 에 받치는 인덱스가 없으면 만든다. 이름: FOREIGN KEY 뒤에 쓴 인덱스 이름 → CONSTRAINT 이름 → 첫 컬럼 (겹치면 _2 …)
+// 이 문장에서 붙인 FK 에 받치는 인덱스가 없으면 만든다. 이름: CONSTRAINT 이름 → FOREIGN KEY 뒤에 쓴 인덱스 이름 → 첫 컬럼 (겹치면 _2 …, MySQL 8.0 실측)
 export function ensureFkIndexes(t: Table, added: readonly { name: string; indexName?: string; named: boolean }[]): Table {
   let next = t;
   for (const a of added) {
     const fk = next.foreignKeys.find((f) => f.name === a.name)!;
     if (next.indexes.some((i) => leadsWith(i, fk.columns))) continue;
-    const name = uniqueIndexName(next, a.indexName ?? (a.named ? fk.name : fk.columns[0]));
+    const name = uniqueIndexName(next, a.named ? fk.name : (a.indexName ?? fk.columns[0]));
     next = { ...next, indexes: [...next.indexes, { name, kind: 'INDEX', parts: fk.columns.map((column) => ({ column, desc: false })), invisible: false }] };
   }
   return next;
