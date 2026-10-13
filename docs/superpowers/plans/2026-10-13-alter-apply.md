@@ -887,17 +887,41 @@ git commit -m "feat(core): ALTER 적용 — 사람이 쓴 컬럼·인덱스·FK 
 ### Task 3: 적용 상태·SET 문·applyScript 뼈대
 
 **Files:**
-- Create: `packages/core/src/apply/state.ts`, `packages/core/src/apply/session.ts`, `packages/core/src/apply/index.ts`
-- Test: `packages/core/test/apply/session.test.ts`, `packages/core/test/apply/apply-script.test.ts`
+- Create: `packages/core/src/apply/lists.ts`, `packages/core/src/apply/state.ts`, `packages/core/src/apply/session.ts`, `packages/core/src/apply/index.ts`
+- Modify: `packages/core/src/apply/def-parser.ts` (`checkList` 를 `splitList` 로), `packages/core/src/apply/normalize-mysql.ts` (ENUM·SET 값·타입 인자 목록을 `splitList` 로)
+- Test: `packages/core/test/apply/lists.test.ts`, `packages/core/test/apply/session.test.ts`, `packages/core/test/apply/apply-script.test.ts`
 
 **Interfaces:**
 - Consumes: Task 1 의 `fail`, `ApplyFailure`, `MYSQL_DEFAULTS`, `DEFAULT_SQL_MODE`, `ApplyOptions`, `ApplyResult`, `canonicalCharset`, `canonicalCollation`, `charsetOfCollation`; parse-dump 의 `splitDump`; sql-safety 의 `UnsafeValueError`
 - Produces:
+  - `lists.ts`: `splitList(toks, what): Token[][]` — 쉼표 목록. 빈 목록·빈 항목·끝 쉼표는 `(MySQL 1064)` (`splitTopLevel` 은 끝 쉼표를 조용히 버린다)
   - `state.ts`: `State`, `Origins`, `initialState(base, schemaName, defaults, sqlMode)`, `trackNew(origins, table, fromBase)`, `moveOrigins(origins, from, to)`, `forgetOrigins(origins, name)`, `sameName(a, b)`, `findColumn(t, name)`, `findTable(st, name)`, `nameTaken(st, name)`, `needTable(st, name)`, `replaceTable(st, name, next)`, `objectName(c, st)`, `objectNameList(c, st)`
   - `session.ts`: `applySet(st, c)` — `c` 는 `SET` 앞
   - `index.ts`: `applyScript(base, script, opts): ApplyResult`, re-export `MYSQL_DEFAULTS`·타입. 문장 분기 함수 `applyStatement` 는 Task 5~7 이 한 줄씩 늘린다
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
+
+`packages/core/test/apply/lists.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { splitList } from '../../src/apply/lists';
+import { ApplyFailure } from '../../src/apply/types';
+import { tokenize } from '../../src/lexer';
+
+const items = (src: string) => splitList(tokenize(src), '테스트').map((toks) => toks.map((t) => t.v).join(' '));
+
+describe('splitList', () => {
+  it('깊이 0 쉼표로 나눈다', () => {
+    expect(items('a INT, b VARCHAR(10, 2), c')).toEqual(['a INT', 'b VARCHAR ( 10 , 2 )', 'c']);
+  });
+
+  it.each([[''], ['a,'], ['a,,b'], [',a']])('%j 는 1064', (src) => {
+    expect(() => items(src)).toThrow(ApplyFailure);
+    expect(() => items(src)).toThrow(/1064/);
+  });
+});
+```
 
 `packages/core/test/apply/session.test.ts`:
 
@@ -972,14 +996,39 @@ describe('applyScript — 문장 처리', () => {
 });
 ```
 
-Run: `npx vitest run test/apply/session.test.ts test/apply/apply-script.test.ts` (in `packages/core`) — Expected: FAIL (모듈 없음)
+Run: `npx vitest run test/apply/lists.test.ts test/apply/session.test.ts test/apply/apply-script.test.ts` (in `packages/core`) — Expected: FAIL (모듈 없음)
 
-- [ ] **Step 2: state.ts 를 구현한다**
+- [ ] **Step 2: lists.ts 를 만들고 앞 Task 의 목록 검사를 이것으로 모은다**
+
+`packages/core/src/apply/lists.ts`:
+
+```ts
+// 쉼표 목록. splitTopLevel(덤프 파서와 공용)은 끝 쉼표를 조용히 버리고 빈 항목을 남긴다 — 사람이 쓴 스크립트에서는 MySQL 처럼 1064 로 거부한다
+import { splitTopLevel } from '../cursor';
+import type { Token } from '../lexer';
+import { fail } from './types';
+
+export function splitList(toks: readonly Token[], what: string): Token[][] {
+  if (!toks.length) fail(`${what} 목록이 비었습니다 (MySQL 1064)`);
+  const last = toks[toks.length - 1];
+  if (last.t === 'op' && last.v === ',') fail(`${what} 목록이 쉼표로 끝납니다 (MySQL 1064)`);
+  const items = splitTopLevel([...toks]);
+  if (items.some((i) => !i.length)) fail(`${what} 목록에 빈 항목이 있습니다 (MySQL 1064)`);
+  return items;
+}
+```
+
+그리고 앞 Task 의 두 곳을 이 함수로 바꾼다 (동작은 같거나 더 엄격하다 — 기존 테스트는 그대로 통과해야 한다):
+- `def-parser.ts` 의 `checkList(inner, what)` 본문을 `splitList(inner, what);` 한 줄로 바꾼다 (결과는 쓰지 않는다 — 키 파트·FK 목록 파싱은 parse-table 이 한다).
+- `normalize-mysql.ts` 의 `enumValues` 와 `withArgs` 에서 `splitTopLevel(inner)` 를 `splitList(inner, 'ENUM·SET 값')`·`splitList(inner, '타입 인자')` 로 바꾼다. `ENUM('a','b',)`·`DECIMAL(10,)` 가 1064 로 거부되는 테스트를 normalize-mysql.test.ts 에 더한다. 빈 괄호 검사가 이미 있으면 메시지가 바뀌어도 테스트가 통과하는지 확인한다.
+
+- [ ] **Step 3: state.ts 를 구현한다**
 
 ```ts
 // ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE), 기준 이름 추적
-import { Cursor, splitTopLevel } from '../cursor';
+import { Cursor } from '../cursor';
 import type { Column, SchemaModel, Table } from '../model';
+import { splitList } from './lists';
 import { fail, type ApplyDefaults } from './types';
 
 // 지금 이름 → 기준 버전 이름 (스크립트에서 새로 만든 것은 undefined). 끝에서 rename 매핑을 만든다
@@ -1056,7 +1105,7 @@ export function objectName(c: Cursor, st: State): string {
 
 // 'a [, b …] [RESTRICT|CASCADE]' 이름 목록 (DROP TABLE·DROP VIEW). c 는 목록 앞
 export function objectNameList(c: Cursor, st: State): string[] {
-  return splitTopLevel(c.toks.slice(c.i)).map((toks) => {
+  return splitList(c.toks.slice(c.i), '이름').map((toks) => {
     const one = new Cursor(toks, c.src);
     const name = objectName(one, st);
     if (!one.acceptWord('RESTRICT')) one.acceptWord('CASCADE');
@@ -1066,18 +1115,19 @@ export function objectNameList(c: Cursor, st: State): string[] {
 }
 ```
 
-- [ ] **Step 3: session.ts 를 구현한다**
+- [ ] **Step 4: session.ts 를 구현한다**
 
 ```ts
 // SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 만 추적한다 (NAMES 등 나머지는 스키마에 영향이 없어 무시).
 // td-export·마이그레이션 스크립트의 'SET @OLD_X = @@X, X = 0' 저장과 'SET X = @OLD_X' 복원을 따른다
-import { Cursor, splitTopLevel } from '../cursor';
+import { Cursor } from '../cursor';
+import { splitList } from './lists';
 import type { State } from './state';
 import { DEFAULT_SQL_MODE, fail } from './types';
 
 export function applySet(st: State, c: Cursor): void {
   c.expectWord('SET');
-  for (const toks of splitTopLevel(c.toks.slice(c.i))) assign(st, new Cursor(toks, c.src));
+  for (const toks of splitList(c.toks.slice(c.i), 'SET')) assign(st, new Cursor(toks, c.src));
 }
 
 function assign(st: State, a: Cursor): void {
@@ -1129,7 +1179,7 @@ function sqlModeOf(value: string): string {
 }
 ```
 
-- [ ] **Step 4: index.ts 를 구현한다**
+- [ ] **Step 5: index.ts 를 구현한다**
 
 ```ts
 // ALTER 스크립트 → 새 모델. 문장마다 MySQL 과 같은 결과를 만들고, 받을 수 없는 문장에서 멈춘다 (부분 적용하지 않는다)
@@ -1217,14 +1267,14 @@ function collectRenames(st: State): RenameMapping[] {
 }
 ```
 
-Run: `npx vitest run test/apply/session.test.ts test/apply/apply-script.test.ts` — Expected: PASS
+Run: `npx vitest run test/apply/lists.test.ts test/apply/session.test.ts test/apply/apply-script.test.ts test/apply/def-parser.test.ts test/apply/normalize-mysql.test.ts` — Expected: PASS
 
-- [ ] **Step 5: 타입 검사와 커밋**
+- [ ] **Step 6: 타입 검사와 커밋**
 
 Run: `npm run typecheck -w @tdm/core` — Expected: 오류 없음
 
 ```bash
-git add packages/core/src/apply/state.ts packages/core/src/apply/session.ts packages/core/src/apply/index.ts packages/core/test/apply/session.test.ts packages/core/test/apply/apply-script.test.ts
+git add packages/core/src/apply/lists.ts packages/core/src/apply/state.ts packages/core/src/apply/session.ts packages/core/src/apply/index.ts packages/core/src/apply/def-parser.ts packages/core/src/apply/normalize-mysql.ts packages/core/test/apply/lists.test.ts packages/core/test/apply/session.test.ts packages/core/test/apply/apply-script.test.ts packages/core/test/apply/normalize-mysql.test.ts
 git commit -m "feat(core): ALTER 적용 — 작업 상태·SET 문(FOREIGN_KEY_CHECKS·SQL_MODE)·applyScript 뼈대"
 ```
 
@@ -1727,6 +1777,8 @@ describe('ALTER TABLE — 컬럼', () => {
     ['ALTER TABLE nope ADD x INT;', '1146'],
     ['ALTER TABLE other.member ADD x INT;', '다른 스키마'],
     ['ALTER TABLE member ADD COLUMN g INT AS (age + 1);', '생성 컬럼'],
+    ['ALTER TABLE member ADD x INT,;', '쉼표'],
+    ['ALTER TABLE member ADD (x INT, y INT,);', '쉼표'],
   ])('%s → %s', (script, needle) => {
     expect(apply(script)).toMatchObject({ ok: false, error: { reason: expect.stringContaining(needle) } });
   });
@@ -1853,11 +1905,12 @@ export function renameTable(st: State, from: string, to: string): void {
 // 1) 기존 컬럼 삭제 2) 기존 컬럼 변경 — 이름은 문장 전 컬럼 기준 (RENAME COLUMN a TO b, b TO a 맞바꾸기가 된다) 3) 컬럼 추가
 // 4) 위치(FIRST·AFTER) 5) 키 삭제 → 남은 키에 컬럼 삭제·이름 변경 반영 → 인덱스 이름 변경·가시성 6) 키 추가, FK 자동 인덱스
 // 7) 검사·키 순서 8) 테이블 옵션 9) 다른 테이블 FK 가 참조하는 컬럼 이름 10) 테이블 이름 변경
-import { Cursor, splitTopLevel } from '../cursor';
+import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
-import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, startsConstraint } from './def-parser';
+import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
 import { addKeys, checkTable, dropKeys, exprUses, remapKeys, renameIndex, setIndexVisibility, sortIndexes, type KeyDrop } from './keys';
+import { splitList } from './lists';
 import { baseType, BLOB_TYPES, effectiveCollation, finalizeColumn, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { engineName, optionValue, parseCommonOption, setOption } from './options';
 import { findColumn, needTable, objectName, replaceTable, sameName, type State } from './state';
@@ -1891,7 +1944,7 @@ interface Entry {
 
 export function alterTable(st: State, c: Cursor): void {
   const name = objectName(c, st);
-  const clauses = splitTopLevel(c.toks.slice(c.i)).flatMap((toks) => parseClause(new Cursor(toks, c.src), st));
+  const clauses = splitList(c.toks.slice(c.i), 'ALTER TABLE 절').flatMap((toks) => parseClause(new Cursor(toks, c.src), st));
   if (!clauses.length) fail('ALTER TABLE 에 바꿀 내용이 없습니다');
   alterWith(st, name, clauses);
 }
@@ -1901,7 +1954,7 @@ export function createIndex(st: State, c: Cursor): void {
   const kind: IndexKind = c.acceptWord('UNIQUE') ? 'UNIQUE' : c.acceptWord('FULLTEXT') ? 'FULLTEXT' : c.acceptWord('SPATIAL') ? 'SPATIAL' : 'INDEX';
   c.expectWord('INDEX');
   const name = c.ident();
-  const using = c.acceptWord('USING') ? c.ident().toUpperCase() : undefined;
+  const using = parseUsing(c);
   c.expectWord('ON');
   const table = objectName(c, st);
   const index = parseIndexBody(new Cursor(withoutAlgorithmLock(c.toks.slice(c.i)), c.src), kind, name);
@@ -1956,7 +2009,7 @@ function parseAdd(c: Cursor): Clause[] {
   if (c.isWord('PARTITION')) return fail(PARTITION);
   if (!c.acceptWord('COLUMN') && startsConstraint(c)) return [end(c, { k: 'key', item: parseConstraint(c) })];
   if (c.isOp('(')) {
-    const specs = splitTopLevel(c.parenTokens()).map((toks) => {
+    const specs = splitList(c.parenTokens(), '컬럼').map((toks) => {
       const one = new Cursor(toks, c.src);
       return end(one, parseColumnSpec(one));
     });
@@ -2287,6 +2340,7 @@ describe('CREATE TABLE', () => {
     expect(apply('CREATE TABLE copy LIKE member;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('LIKE') } });
     expect(apply('CREATE TABLE p (id INT) PARTITION BY HASH (id) PARTITIONS 2;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('파티션') } });
     expect(apply('CREATE TABLE d (a INT, A INT);')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1060') } });
+    expect(apply('CREATE TABLE e (a INT,);')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('쉼표') } });
   });
 });
 
@@ -2316,10 +2370,11 @@ Run: `npx vitest run test/apply/table-stmt.test.ts` — Expected: FAIL (`지원�
 
 ```ts
 import { fkAutoNameCollides, renamedAutoName } from '../auto-name';
-import { Cursor, splitTopLevel } from '../cursor';
+import { Cursor } from '../cursor';
 import type { Table, TableOption } from '../model';
 import { parseTableItem } from './def-parser';
 import { addKeys, checkTable, sortIndexes } from './keys';
+import { splitList } from './lists';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, finalizeColumn, primaryCollation, tableCharset } from './normalize-mysql';
 import { engineName, optionValue, parseCommonOption, setOption } from './options';
 import { findTable, forgetOrigins, moveOrigins, nameTaken, needTable, objectName, objectNameList, trackNew, type State } from './state';
@@ -2338,7 +2393,7 @@ export function createTable(st: State, c: Cursor): void {
     if (ifNotExists) return; // MySQL 은 경고만 남기고 아무것도 하지 않는다
     fail(`테이블 \`${name}\` 이 이미 있습니다 (MySQL 1050)`);
   }
-  const items = splitTopLevel(c.parenTokens()).map((toks) => parseTableItem(new Cursor(toks, c.src)));
+  const items = splitList(c.parenTokens(), '테이블 정의').map((toks) => parseTableItem(new Cursor(toks, c.src)));
   const options = createOptions(c, st);
   const charset = tableCharset(options, st.defaults);
   const specs = items.flatMap((i) => (i.kind === 'column' ? [i.spec] : []));
@@ -2406,7 +2461,7 @@ export function dropTable(st: State, c: Cursor): void {
 
 // RENAME TABLE a TO b [, c TO d …] — 앞에서부터 차례로 (맞바꾸기는 임시 이름을 거친다)
 export function renameTables(st: State, c: Cursor): void {
-  for (const toks of splitTopLevel(c.toks.slice(c.i))) {
+  for (const toks of splitList(c.toks.slice(c.i), 'RENAME TABLE')) {
     const one = new Cursor(toks, c.src);
     const from = objectName(one, st);
     one.expectWord('TO');
