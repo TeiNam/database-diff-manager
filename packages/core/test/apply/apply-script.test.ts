@@ -67,6 +67,32 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
     if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT)).toBe(true);
   });
 
+  // 구분자를 바꾼 뒤(DELIMITER ;; 뒤 되돌리지 않음)나 클라이언트 명령 '\g' 로 문장 여럿이 한 덩어리가 되면, 첫 단어만 보고 무시하면 뒤 DDL 이 조용히 사라진다
+  const NO_DELIMITER_RESET = 'DELIMITER ;;\nCREATE FUNCTION f1() RETURNS INT DETERMINISTIC RETURN 1;;\n';
+  it.each([
+    'INSERT INTO t VALUES (1); ALTER TABLE t ADD COLUMN x INT;', 'START TRANSACTION; ALTER TABLE t ADD COLUMN x INT;', "GRANT SELECT ON shop.* TO 'app'@'%'; ALTER TABLE t ADD COLUMN x INT;",
+    'TRUNCATE TABLE t; ALTER TABLE t ADD COLUMN x INT;', 'SET GLOBAL max_connections = 10; ALTER TABLE t ADD COLUMN x INT;', 'SET NAMES utf8mb4; ALTER TABLE t ADD COLUMN x INT;',
+    'SET FOREIGN_KEY_CHECKS = 0; ALTER TABLE t ADD COLUMN x INT;', 'USE shop; ALTER TABLE t ADD COLUMN x INT;',
+  ])('구분자 안에 문장이 여럿이면 무시하지 않고 RE_EXPORT 로 거부한다: %s', (chunk) => {
+    const r = run(`${NO_DELIMITER_RESET}${chunk}`);
+    expect(r).toMatchObject({ ok: false, error: { index: 2 } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  });
+
+  it.each([
+    'INSERT INTO t VALUES (1)\\g ALTER TABLE t ADD COLUMN x INT;', 'COMMIT\\g ALTER TABLE t ADD COLUMN x INT;', 'SET GLOBAL max_connections = 10\\g ALTER TABLE t ADD COLUMN x INT;',
+    "INSERT INTO t VALUES (1)\\G", 'SET NAMES utf8mb4 \\g',
+  ])('클라이언트 명령(\\g)이 든 문장도 거부한다: %s', (chunk) => {
+    const r = run(`${chunk}\nALTER TABLE t ADD COLUMN y INT;`);
+    expect(r).toMatchObject({ ok: false, error: { index: 1 } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  });
+
+  it('구분자를 바꾼 뒤에도 끝에 ; 만 붙은 무시하는 문장 하나는 그대로 무시한다', () => {
+    const r = run('DELIMITER $$\nINSERT INTO t VALUES (1);$$\nCOMMIT;;$$\nDELIMITER ;\nALTER TABLE t ADD COLUMN x INT;');
+    expect(r).toMatchObject({ ok: true, applied: 1 });
+  });
+
   it('스키마에 영향을 주는 세션 변수와 식으로 쓴 세션 SQL_MODE 는 여전히 거부한다', () => {
     expect(run('SET default_storage_engine = MyISAM;\nALTER TABLE t ADD x INT;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining(RE_EXPORT) } });
     expect(run("SET sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_DATE', '');\nALTER TABLE t ADD x INT;")).toMatchObject({ ok: false, error: { index: 1 } });

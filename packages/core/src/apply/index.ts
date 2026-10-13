@@ -64,6 +64,7 @@ export function resolveDefaults(given: Partial<ApplyDefaults> = {}): ApplyDefaul
 function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): boolean {
   assertSameBackslashMode(st, ddl, noBackslashEscapes);
   const c = new Cursor(withoutCommentEnd(tokenize(ddl, { noBackslashEscapes })), ddl);
+  if (c.isWord('SET') || c.isWord('USE') || isNoOp(c)) assertOneStatement(c.toks);
   if (c.isWord('SET')) {
     applySet(st, c);
     return false;
@@ -102,6 +103,16 @@ function isNoOp(c: Cursor): boolean {
   const first = c.peek();
   if (first?.t !== 'word') return false;
   return NO_OP_WORDS.has(first.v.toUpperCase()) || c.isWord('START', 'TRANSACTION') || ['LOCK', 'UNLOCK'].some((w) => c.isWord(w, 'TABLES') || c.isWord(w, 'TABLE'));
+}
+
+// 무시하는 문장(SET·USE·isNoOp)은 첫 단어만 보고 덩어리를 통째로 넘긴다. 그런데 구분자를 바꾼 뒤(DELIMITER ;; 를 되돌리지 않음)에는 ';' 가 문장을 끝내지 않고,
+// mysql 클라이언트 명령 '\g'·'\G' 도 문장을 끝내므로 한 덩어리에 문장이 여럿 들 수 있다 — 그대로 넘기면 뒤 DDL 이 조용히 사라지므로 받지 않는다 (끝의 ';' 만은 괜찮다)
+function assertOneStatement(toks: readonly Token[]): void {
+  const isSemicolon = (t: Token) => t.t === 'op' && t.v === ';';
+  const end = toks.findIndex(isSemicolon);
+  const continues = end >= 0 && toks.slice(end).some((t) => !isSemicolon(t));
+  if (!continues && !toks.some((t) => t.t === 'op' && t.v === '\\')) return;
+  fail(`한 문장 뒤에 다른 문장이 이어져 있습니다 (DELIMITER 를 ';' 로 되돌리지 않았거나 '\\g' 를 썼습니다) — 무시하는 문장과 함께 뒤 문장이 버려지지 않도록 받지 않습니다 — ${RE_EXPORT}`);
 }
 
 // 문장 나누기(splitDump)는 SET SQL_MODE = '…' 꼴만 따라가 NO_BACKSLASH_ESCAPES 를 켜고 끈다. SET 문(applySet)이 바꾼 세션 SQL_MODE 와 어긋나면
