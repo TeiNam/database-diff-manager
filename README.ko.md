@@ -46,12 +46,14 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑는
 
 | 항목 | 내용 |
 |---|---|
-| 받는 문장 | `ALTER TABLE`(컬럼·인덱스·PK/FK·테이블 옵션·`RENAME`), `CREATE INDEX`, `DROP INDEX`, `CREATE`/`DROP`/`RENAME TABLE`, `CREATE`/`DROP FUNCTION`·`PROCEDURE`, `DROP VIEW`. `SET FOREIGN_KEY_CHECKS`·`SET SQL_MODE`는 반영하고, `SET NAMES`·그 밖의 `SET`·주석·현재 Schema의 `USE`는 무시합니다. 스크립트 하나에 1,000,000자까지 |
+| 받는 문장 | `ALTER TABLE`(컬럼·인덱스·PK/FK·테이블 옵션·`RENAME`), `CREATE INDEX`, `DROP INDEX`, `CREATE`/`DROP`/`RENAME TABLE`, `CREATE`/`DROP FUNCTION`·`PROCEDURE`, `DROP VIEW`. `SET FOREIGN_KEY_CHECKS`·`SET SQL_MODE`는 반영합니다. 스키마를 바꾸지 않는 문장은 무시합니다: `SET NAMES`와 테이블 정의에 영향이 없는 그 밖의 세션 `SET`, 서버 변수 `SET GLOBAL`·`SET PERSIST`, 트랜잭션 제어(`START TRANSACTION`·`BEGIN`·`COMMIT`·`ROLLBACK`), `LOCK`·`UNLOCK TABLES`, 데이터 문장(`INSERT`·`UPDATE`·`DELETE`·`REPLACE`·`TRUNCATE`), `GRANT`·`REVOKE`, 주석, 현재 Schema의 `USE`. 이후 테이블 정의를 바꾸는 세션 변수(`default_storage_engine` 등)와 식으로 쓴 `SET SQL_MODE`는 거부합니다. 스크립트 하나에 1,000,000자까지 |
 | 기준 버전 | SQL 출처 버전만: 올린 td-export `.sql`이거나 앞선 ALTER 적용으로 만든 버전. `.md` 버전은 모델 정보가 부분적이고, 예전 파서로 저장된 버전(stale)은 모델이 현재 파서와 달라 둘 다 거부합니다 — stale이면 같은 덤프를 다시 올린 버전을 기준으로 쓰세요. 새 버전의 완전성 판정은 출력한 덤프에서 다시 하지 않고 기준 버전의 판정을 물려받습니다(위 입력 파일의 "완전성 확인" 참고) |
 | InnoDB만 | InnoDB가 아닌 `ENGINE`을 쓰는 `CREATE TABLE`·`ALTER TABLE`, 다른 엔진 테이블을 바꾸는 문장은 거부합니다. `DROP TABLE`·`RENAME TABLE`은 받습니다 |
-| 범위 밖 | "받는 문장"에 없는 문장은 모두 거부합니다. 특히 `CREATE`/`ALTER VIEW`(`DROP VIEW`는 받음), `CREATE TABLE … LIKE`·`CREATE TABLE … SELECT`, `CHECK` 추가, 생성 컬럼 정의(`GENERATED ALWAYS AS`, `AS (…)`), 식 기본값, 파티션 절, `CONVERT TO CHARACTER SET`과 테이블 `CHARACTER SET`·`COLLATE` 옵션, FK로 이어진 컬럼의 타입 변경, 데이터 문장(`INSERT`·`UPDATE` 등), 트리거·이벤트, 다른 Schema를 붙인 이름. 추측해서 적용하지 않고, 이유와 td-export로 다시 뽑아 올리라는 안내를 붙여 거부합니다 |
+| 범위 밖 | "받는 문장"에 없는 문장은 모두 거부합니다. 특히 `CREATE`/`ALTER VIEW`(`DROP VIEW`는 받음), `CREATE TABLE … LIKE`·`CREATE TABLE … SELECT`, `CHECK` 추가, 생성 컬럼 정의(`GENERATED ALWAYS AS`, `AS (…)`), 식 기본값, 파티션 절, `CONVERT TO CHARACTER SET`과 테이블 `CHARACTER SET`·`COLLATE` 옵션, FK로 이어진 컬럼의 타입 변경, 트리거·이벤트, 다른 Schema를 붙인 이름, MySQL이 다시 써서 저장하는 기본값(표준이 아닌 날짜·시간 꼴, MySQL이 반올림하거나 지수 표기로 찍는 `FLOAT`·`DOUBLE` 값), 뒤 문장을 다르게 읽게 하는 SQL_MODE(`ANSI`·`TRADITIONAL`·`REAL_AS_FLOAT`·`ANSI_QUOTES`). 추측해서 적용하지 않고, 이유와 td-export로 다시 뽑아 올리라는 안내를 붙여 거부합니다 |
+| 테이블 한도 | MySQL 한도인 테이블당 키 64개(오류 1069)·컬럼 1,017개(오류 1117)를 그대로 적용합니다. FK가 64개를 넘는 테이블은 재추출 안내와 함께 거부합니다: MySQL에는 한도가 없지만 이 도구는 문장마다 테이블의 FK를 모두 다시 확인하므로, 요청 하나의 계산량을 묶으려는 한도입니다 |
 | FK 자동 인덱스 | 덤프에는 MySQL이 FK 때문에 자동으로 만든 인덱스가 표시되지 않아 이름으로 추정합니다. FK와 같은 이름의 인덱스는 자동으로 보고(직접 만든 `KEY f`를 `CONSTRAINT f`와 함께 쓴 경우도 이렇게 잘못 봅니다) 나머지는 직접 만든 것으로 봅니다. FK 이름이 `<테이블>_ibfk_N` 꼴이고 인덱스 이름이 FK의 첫 컬럼이면 어느 쪽인지 알 수 없어, 그 인덱스에 결과가 달린 문장(`ADD`/`DROP FOREIGN KEY`·인덱스 변경·`DROP COLUMN`의 일부 꼴)은 같은 재추출 안내와 함께 거부합니다 |
-| MySQL 검사 | MySQL의 모든 검사를 재현하지는 않습니다(키 길이·행 크기 한도 등). 그래서 이 도구가 받은 스크립트도 실제 DB에서는 거부될 수 있습니다. 결과를 MySQL과 맞추려고, CI와 `npm run test:mysql`에서 시나리오 50개의 스크립트를 실제 MySQL 8.0과 8.4에 실행해 이 도구의 결과와 비교합니다 |
+| MySQL 검사 | MySQL의 모든 검사를 재현하지는 않습니다(키 길이·행 크기 한도 등). 그래서 이 도구가 받은 스크립트도 실제 DB에서는 거부될 수 있습니다. 결과를 MySQL과 맞추려고, CI와 `npm run test:mysql -w @tdm/core`에서 시나리오 57개(MySQL 8.0은 8.4 전용 시나리오 하나를 빼고 56개)의 스크립트를 실제 MySQL 8.0.46과 8.4.11에 실행해 이 도구의 결과와 비교합니다 |
+| 저장 전 확인 | 저장(과 미리보기) 전에 서버가 출력한 덤프를 다시 읽어 적용 결과와 객체마다 비교합니다. 스크립트가 건드리지 않은 객체는 기준 버전과 비교하므로, 기준에 파싱하지 못한 객체가 있어도 그 객체를 건드리지 않는 ALTER 스크립트는 적용할 수 있습니다. 어긋나면 스크립트가 아니라 이 도구의 결함이라, 어긋난 객체와 요청 ID를 알려 주며 거부하고 서버 로그에도 남깁니다 |
 
 주요 규칙과 거부하는 문장은 [설계 문서](docs/superpowers/specs/2026-10-13-alter-apply-design.md)에 있습니다.
 

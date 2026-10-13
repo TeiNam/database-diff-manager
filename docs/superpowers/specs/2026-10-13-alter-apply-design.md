@@ -43,7 +43,8 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 | ALTER TABLE 테이블 절 | `COMMENT [=] '…'`, `ENGINE [=] InnoDB`(그 밖의 엔진은 거부), `ROW_FORMAT [=] …`, `KEY_BLOCK_SIZE [=] n`, `RENAME [TO\|AS] new`, `ALGORITHM=…`·`LOCK=…`(무시) |
 | 단독 문장 | `CREATE [UNIQUE\|FULLTEXT\|SPATIAL] INDEX name ON t (…)`, `DROP INDEX name ON t`, `RENAME TABLE a TO b [, c TO d …]`, `CREATE TABLE [IF NOT EXISTS] …`, `DROP TABLE [IF EXISTS] a [, b …]`, `CREATE FUNCTION/PROCEDURE …`(DELIMITER 포함), `DROP {FUNCTION\|PROCEDURE} [IF EXISTS] …`, `DROP VIEW [IF EXISTS] …` |
 | 세션 문장 | `SET FOREIGN_KEY_CHECKS = 0\|1`(`@OLD_…` 저장·복원 포함): 0인 동안은 MySQL처럼 FK 부모 테이블이 없어도 되는 검사(FK 추가 시 부모 없음, 참조되는 테이블 삭제)를 건너뛴다. `SET [SESSION] SQL_MODE = '…'`: 뒤에 만드는 루틴의 SQL_MODE로 쓴다 |
-| 무시하는 문장 | `SET NAMES …`와 그 밖의 `SET`, 주석, 현재 스키마와 같은 `USE` |
+| 무시하는 문장 | `SET NAMES …`, 스키마에 영향이 없는 세션 변수의 `SET`(`time_zone`·`unique_checks` 등), 서버 변수의 `SET`(`SET GLOBAL`·`PERSIST`·`PERSIST_ONLY`, `@@global.x` — 이 스크립트의 세션을 바꾸지 않는다. 앞에 쓴 수식어는 MySQL처럼 뒤 대입에도 이어진다), 트랜잭션 제어(`START TRANSACTION`·`BEGIN`·`COMMIT`·`ROLLBACK`), `LOCK`·`UNLOCK TABLES`, 데이터 문장(`INSERT`·`UPDATE`·`DELETE`·`REPLACE`·`TRUNCATE`), `GRANT`·`REVOKE`, 주석, 현재 스키마와 같은 `USE`. 이미 MySQL에서 돈 스크립트에 흔하고 SHOW CREATE 결과를 바꾸지 않는다(DDL은 MySQL이 암묵적으로 커밋해 `ROLLBACK`이 되돌리지 않는다). 적용한 문장 수에 세지 않는다 |
+| 거부하는 SET | 이후 테이블 정의를 바꾸는 세션 변수(`default_storage_engine`·`explicit_defaults_for_timestamp`·`sql_require_primary_key` 등), 식으로 쓴 세션 `SQL_MODE`(`REPLACE(@@sql_mode, …)`), 알 수 없는 서버 변수 값(`@@global.x`)을 읽는 대입 |
 
 - `CREATE TABLE`의 컬럼 정의 안에 `PRIMARY KEY`, `UNIQUE [KEY]`, `KEY`(PK의 동의어)를 쓰면 인덱스로 바꾼다.
 - 컬럼 정의 안의 `REFERENCES …`는 MySQL처럼 무시한다.
@@ -59,21 +60,25 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 | 식이 들어가는 정의 | `CREATE/ALTER VIEW`, `CREATE OR REPLACE VIEW`, `CHECK (…)` 추가, 생성 컬럼(`GENERATED ALWAYS AS`, `AS (…)`), 식 기본값 `DEFAULT (…)`, 함수 인덱스 키 파트 `((…))` | MySQL이 식을 다시 써서 저장한다(``(`price` > 0)``, ``select `t`.`a` AS `a` …``). 모델에서 똑같이 만들 수 없다 |
 | 문자셋·파티션 | `CONVERT TO CHARACTER SET`, `[DEFAULT] CHARACTER SET=`·`COLLATE=` 테이블 옵션, 파티션 절 전부(`PARTITION BY`, `ADD/DROP/REORGANIZE/COALESCE/TRUNCATE PARTITION`, `REMOVE PARTITIONING`) | 컬럼 상속과 행 이동 규칙이 복잡하다 |
 | FK로 이어진 타입 변경 | FK 컬럼 또는 FK가 참조하는 컬럼의 타입·문자셋·콜레이션을 바꾸는 `MODIFY`/`CHANGE` | MySQL이 거부하는 경우(3780)와 허용하는 경우를 1차에서는 가르지 않는다 |
-| 데이터·권한·기타 | `INSERT`·`UPDATE`·`DELETE`·`REPLACE`·`TRUNCATE`, `GRANT`, `CREATE TABLE … SELECT`, `CREATE TABLE … LIKE`, `CREATE/DROP TRIGGER·EVENT`, `ALTER DATABASE`, 그 밖에 표에 없는 문장 | 범위 밖 |
+| 기타 | `CREATE TABLE … SELECT`, `CREATE TABLE … LIKE`, `CREATE/DROP TRIGGER·EVENT`, `ALTER DATABASE`, 그 밖에 3.1 표에 없는 문장 | 범위 밖 (데이터 문장·권한·트랜잭션 제어는 3.1처럼 무시한다) |
 | 정의 옵션 | FK의 `MATCH FULL\|SIMPLE` 절, 인덱스(`KEY`·`UNIQUE`·`PRIMARY KEY`) 정의의 `KEY_BLOCK_SIZE` | MySQL이 `MATCH`를 읽고 무시한다. 인덱스의 `KEY_BLOCK_SIZE`는 테이블에 `KEY_BLOCK_SIZE`가 있을 때만 저장되고 문장 순서에 따라 달라진다(8.0/8.4 실측) |
 | 날짜·시간 기본값의 비표준 꼴 | `DEFAULT '20200101'`, `'2020-1-1'`, `'2020-01-01T10:20:30'`, 숫자 리터럴(`DEFAULT 20200101`), 반올림되는 소수 초 | MySQL이 값을 다시 써서 저장한다. 표준 꼴(`YYYY-MM-DD[ HH:MM[:SS[.f]]]`, `[-]H:MM[:SS[.f]]`)만 다시 쓴다 |
 | InnoDB가 아닌 엔진 | `ENGINE=`이 InnoDB가 아닌 `CREATE TABLE`·`ALTER TABLE`, InnoDB가 아닌 기준 테이블을 바꾸는 문장 | 1차는 InnoDB만 지원한다(사용자 결정) |
 | 4바이트 문자 | 문자열 리터럴(DEFAULT·COMMENT·ENUM/SET 값)이나 루틴 COMMENT에 U+10000 이상 문자(이모지 등)가 든 문장 | SHOW CREATE가 COMMENT·ENUM·SET 값은 `?`로, 문자열 DEFAULT는 16진수(`0xF09F9880`)로 바꿔 찍는다(8.0/8.4 실측). 루틴 본문은 쓴 그대로라 받는다 |
 | YEAR·DECIMAL 기본값의 비표준 꼴 | YEAR 기본값의 한두 자리(`20`, `'0'`, `0001`)와 `'+2020'`·`2020.5`, 가수가 15자리를 넘거나 지수가 70을 넘는 DECIMAL 지수 표기 | MySQL이 세기를 붙이거나(`20`→`'2020'`, `70`→`'1970'`) DOUBLE을 거쳐 값을 다시 쓴다 |
-| 다른 스키마 | 다른 스키마를 한정한 이름(`other.t`), 다른 스키마로의 `USE` | 버전은 스키마 하나를 나타낸다. 현재 스키마 이름으로 한정한 경우(`cur.t`)는 허용한다 |
+| 다른 스키마 | 다른 스키마를 한정한 이름(`other.t`), 다른 스키마로의 `USE` | 버전은 스키마 하나를 나타낸다. 현재 스키마 이름으로 한정한 경우(`cur.t`, 루틴 `cur.f` 포함)는 허용한다 |
+| FLOAT·DOUBLE 기본값의 비표준 꼴 | MySQL이 반올림하거나 지수 표기로 다시 쓰는 값: (M,D)가 없을 때 유효숫자가 FLOAT 6·DOUBLE 15자리를 넘는 값, 지수 표기로 찍히는 값(`1e15`, `0.0000000000000001`), `-0`. (M,D)가 있을 때 소수 D자리 밖에 숫자가 있는 값, FLOAT 정밀도로 바뀌는 값, 찍는 자릿수가 DOUBLE 15자리를 넘는 값 | MySQL이 이진 부동소수점 값을 다시 찍는다(4장) |
+| 테이블 문장을 다르게 읽게 하는 SQL_MODE | `REAL_AS_FLOAT`·`ANSI_QUOTES`(묶음 모드 `ANSI`·`TRADITIONAL`과 같이), 문장 나누기와 다르게 읽은 `NO_BACKSLASH_ESCAPES`(`SET @@sql_mode`·`:=`·`@변수`·큰따옴표·`SET GLOBAL` 꼴) 뒤의 백슬래시가 든 문장, `NO_BACKSLASH_ESCAPES` 세션의 ENUM·SET 값 백슬래시 | `REAL`을 FLOAT로, `"…"`를 식별자로 읽는 규칙을 모델에 반영하지 않는다. 문장 나누기는 `SET SQL_MODE = '…'` 꼴만 따라가므로 다른 꼴에서는 문자열을 MySQL과 다르게 읽는다. ENUM·SET 값은 타입 정규화가 보통 이스케이프 규칙으로 다시 읽는다(같은 세션의 COMMENT·DEFAULT 백슬래시는 MySQL과 같다, 8.4.11 실측) |
+| FK가 많은 테이블 | FK가 64개를 넘는 테이블을 만들거나 바꾸는 문장 | MySQL에는 한도가 없지만(테이블 하나에 FK 2,000개면 MySQL도 CREATE TABLE에 16초가 걸린다, 8.4.11 실측) 문장마다 테이블의 FK를 모두 다시 확인하므로, 요청 하나의 계산량을 묶으려고 받지 않는다 |
 
 ## 4. MySQL 정규화 규칙
 
 적용 결과는 MySQL이 같은 스크립트를 실행한 뒤의 `SHOW CREATE` 모양과 같아야 한다. 판정 기준은 "기존 비교 엔진(`diffSchemas` + `generateDdl`)으로 비교했을 때 DDL 문장이 0개"이다. 아래 규칙은 각각 `test:mysql` 시나리오로 MySQL 8.0과 8.4에서 확인한다. 두 버전의 동작이 다르면 8.4를 따르고 그 차이를 시나리오에 적는다.
 
 - **이름 비교:** 테이블 이름은 대소문자를 구분한다(Linux 기본 `lower_case_table_names=0`과 같다). 컬럼·인덱스·제약 이름은 구분하지 않는다.
-- **이름 표기:** 결과에 어느 표기가 남는지(예: 기존 컬럼 `name`을 `MODIFY NAME …`으로 바꿀 때)는 시나리오로 확인한 MySQL 동작을 따른다. 결정하기 전까지 대소문자만 다른 이름을 쓰는 절은 거부한다.
-  - 8.0/8.4 실측: MySQL 은 받고 쓴 표기가 이긴다(`MODIFY NAME …` → 컬럼 `NAME`, 인덱스 파트도 따라간다). 참조(`AFTER`·키 파트·`DROP COLUMN`·`ALTER COLUMN`)는 대소문자를 무시하고 정의의 원래 표기를 쓴다. 대소문자만 다른 이름을 쓰는 절은 드물어 1차에서는 거부를 유지한다(사용자 지시: 희귀 케이스는 재추출 안내).
+- **이름 표기:** 결과에 어느 표기가 남는지는 시나리오로 확인한 MySQL 동작을 따른다.
+  - 8.0/8.4 실측: MySQL 은 받고 쓴 표기가 이긴다(`MODIFY NAME …` → 컬럼 `NAME`, 인덱스 파트도 따라간다). 참조(`AFTER`·키 파트·`DROP COLUMN`·`ALTER COLUMN`)는 대소문자를 무시하고 정의의 원래 표기를 쓴다.
+  - 대소문자만 다른 이름으로 바꾸는 `CHANGE name NAME …`·`RENAME COLUMN name TO NAME`·`RENAME INDEX a TO A`는 MySQL과 같게 새 표기로 바꾼다(rename 매핑 `name→NAME`). 같은 일을 하는 `MODIFY NAME …`만 드문 꼴이라 거부하고 이름을 바꾸려면 `CHANGE`를 쓰라고 안내한다(사용자 결정: 희귀 케이스는 받지 않는다).
 - **타입:**
   - 소문자로 쓴다. `INTEGER`→`int`, `INT(11)`→`int`
   - 정수 표시 폭은 지운다. 예외는 `tinyint(1)`과 `ZEROFILL`이다.
@@ -86,7 +91,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - `NOW()`·`CURRENT_TIMESTAMP()`·`LOCALTIME`류는 `CURRENT_TIMESTAMP[(fsp)]`로 바꾼다. `ON UPDATE` 가 잘못되면 MySQL 1294 다.
   - NULL 허용 컬럼에 기본값이 없으면 `DEFAULT NULL`을 붙인다. TEXT·BLOB 계열은 붙이지 않는다(명시한 `DEFAULT NULL`도 SHOW CREATE 에 보이지 않는다). JSON 은 붙인다(td-export 실출력 `json DEFAULT NULL`). GEOMETRY 계열도 NULL 허용이면 붙인다(8.0/8.4 실측, 시나리오 `column-geometry`).
   - 리터럴 기본값은 TEXT·BLOB·JSON·GEOMETRY 계열에 쓸 수 없다(MySQL 1101).
-  - 날짜·시간 기본값은 MySQL이 값을 다시 써서 저장한다(8.0/8.4 실측, 시나리오 `temporal-defaults`). `DATETIME DEFAULT '2020-01-01'`은 `'2020-01-01 00:00:00'`, `DATETIME(3) DEFAULT '2020-01-01 10:20:30'`은 `'2020-01-01 10:20:30.000'`, `TIME DEFAULT '12:34'`는 `'12:34:00'`이다. 표준 꼴만 다시 쓰고(3.2), 없는 날짜(`2020-02-30`)·`0000-00-00`·시각 범위 밖은 1067이다. `0000-00-00`은 `NO_ZERO_DATE`가 꺼진 `SQL_MODE`에서는 MySQL이 받지만 1차는 받지 않는다.
+  - 날짜·시간 기본값은 MySQL이 값을 다시 써서 저장한다(8.0/8.4 실측, 시나리오 `temporal-defaults`). `DATETIME DEFAULT '2020-01-01'`은 `'2020-01-01 00:00:00'`, `DATETIME(3) DEFAULT '2020-01-01 10:20:30'`은 `'2020-01-01 10:20:30.000'`, `TIME DEFAULT '12:34'`는 `'12:34:00'`이다. 음수 TIME은 소수 초까지 쳐서 0이 아니면 부호가 남는다(`TIME(3) DEFAULT '-00:00:00.123'`은 그대로, `'-00:00:00.000'`은 `'00:00:00.000'`). 표준 꼴만 다시 쓰고(3.2), 없는 날짜(`2020-02-30`)·`0000-00-00`·시각 범위 밖은 1067이다. `0000-00-00`은 `NO_ZERO_DATE`가 꺼진 `SQL_MODE`에서는 MySQL이 받지만 1차는 받지 않는다.
   - `timestamp`는 `explicit_defaults_for_timestamp=ON`(8.0 기본) 규칙을 따른다.
   - PRIMARY KEY에 들어간 컬럼은 NOT NULL이 되고, `DEFAULT NULL`은 사라진다. 다른 기본값은 남는다. `NULL`이나 `DEFAULT NULL`을 직접 쓴 컬럼이 PRIMARY KEY에 들어가면 1171이다(컬럼 안 `DEFAULT NULL PRIMARY KEY`만 1067).
   - AUTO_INCREMENT 컬럼은 `NULL`을 써도 NOT NULL이 된다. `DEFAULT NULL`은 받되 남지 않고, 다른 기본값은 1067이다. `ALTER COLUMN … SET DEFAULT 5`는 받지만 SHOW CREATE에 찍히지 않으므로 저장하지 않는다.
@@ -96,7 +101,10 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - STORED 생성 컬럼은 `AS` 없는 `MODIFY`·`CHANGE`로 일반 컬럼이 된다. VIRTUAL은 3106이다.
   - YEAR 기본값은 네 자리 연도(1901~2155)와 `0000`만 그대로 저장한다. 범위 밖(`1900`, `2156`, 세 자리, 다섯 자리 이상)은 1067이다(8.0/8.4 실측).
   - DECIMAL 기본값은 정확한 십진수로 scale 자리에 맞춘다. 반올림은 0에서 먼 쪽이다(`2.5`→`3`, `-2.5`→`-3`, `1.005`→`1.01`). 정수부가 `정밀도-scale` 자리를 넘으면(반올림해서 넘는 경우 포함) 1067이다(8.0/8.4 실측).
-  - FLOAT·DOUBLE 기본값은 MySQL이 FLOAT를 유효숫자 6자리로(`3.14159265`→`'3.14159'`), 1e15 이상인 DOUBLE을 지수 표기로 다시 쓴다. 그런 값은 재현하지 않고 거부한다.
+  - FLOAT·DOUBLE 기본값은 MySQL이 이진 부동소수점 값을 다시 찍는다(8.0/8.4 실측, 시나리오 `float-defaults`·`error-float-default`).
+    - (M,D)가 없으면 FLOAT는 유효숫자 6자리로(`3.14159265`→`'3.14159'`, `1234567`→`'1234570'`), DOUBLE은 가장 짧은 표기로 찍는다. `f` 표기가 FLOAT 12자·DOUBLE 24자(음수는 한 자 적게)를 넘거나, DOUBLE의 소수점 위치가 범위 밖(1e15 이상·1e-15 미만)이면 지수 표기다(`1e15`, `1.2345678912e-13`). 유효숫자가 FLOAT 6·DOUBLE 15자리 이하이고 `f` 표기로 찍히는 값만 그 표기로 저장한다(`'1.50'`→`'1.5'`, `1e14`→`'100000000000000'`). 나머지와 `-0`(쓴 꼴에 따라 `'-0'`·`'0'`)은 거부한다.
+    - (M,D)가 있으면 소수 D자리로 0을 채운다(`DOUBLE(10,2) DEFAULT 0`→`'0.00'`, `FLOAT(7,3) DEFAULT 1.5`→`'1.500'`). 정수부가 M-D자리를 넘으면 1067이다. D자리 밖 숫자는 이진 값의 소수부를 반올림해(`1.005`→`'1.00'`, `DOUBLE(10,0)`의 `1.5`→`'1'`) 십진 반올림과 달라 거부한다. FLOAT는 float로 바꾼 오차가 마지막 자리 단위의 1/4 이하일 때만(`FLOAT(10,2)`의 `123456.78`은 받고 `1234567.89`→`'1234567.88'`은 거부), DOUBLE은 찍는 자릿수가 15 이하일 때만 받는다.
+  - BIT 기본값은 앞쪽 0을 뗀다(`b'00000101'`→`b'101'`, `b'00000000'`→`b'0'`, 8.0/8.4 실측).
   - 문자열 리터럴의 `\%`·`\_`는 백슬래시를 남긴 두 글자로 읽는다(MySQL과 같다, 8.0/8.4 실측). 그 밖의 모르는 이스케이프(`\q`)는 백슬래시만 버린다.
 - **문자셋:**
   - 새 문자열 컬럼(그리고 문자셋 없이 쓴 `MODIFY`·`CHANGE`)은 테이블 기본 문자셋·콜레이션을 물려받는다. 예전 컬럼의 문자셋을 물려받지 않는 것도 MySQL과 같다.
@@ -130,7 +138,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - 파티션된 기준 테이블(파티션 절 자체는 3.2에서 거부하지만 덤프에는 있다): 8.0/8.4 실측으로 파티션 식이 쓰는 컬럼을 지우거나 이름을 바꾸면 3855이고, PRIMARY KEY·UNIQUE가 파티션 컬럼을 (prefix 없이) 모두 포함하지 않으면 1503이다. 파티션 절은 그대로 둔다(시나리오 `partitioned-base`).
 - **루틴:**
   - 본문은 쓴 그대로 저장한다. MySQL의 `SHOW CREATE FUNCTION`도 그렇다. 다만 `DELIMITER`를 `;`가 아닌 것으로 바꾸고 `RETURN x + 1; //`처럼 끝에 `;`를 함께 쓰면 MySQL은 그 `;`를 본문에 넣지 않는다(8.0/8.4 실측: 공백이 끼어도 `;`가 여럿이어도 같고, 뒤에 주석이 따르는 `;`는 남는다). 같은 규칙으로 끝의 `;`를 뗀다(시나리오 `routine-terminator`).
-  - `sqlMode`는 스크립트에서 그 문장 앞의 마지막 `SET [SESSION] SQL_MODE` 값을 쓴다. 없으면 MySQL 8.0/8.4 기본 모드(`ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`)를 쓴다. 모드 이름은 MySQL 순서로 정렬하고 중복을 지운다(SHOW CREATE 의 `sql_mode` 표기). 묶음 모드(`ANSI`·`TRADITIONAL`)는 거부하고 다시 추출하도록 안내한다.
+  - `sqlMode`는 스크립트에서 그 문장 앞의 마지막 `SET [SESSION] SQL_MODE` 값을 쓴다. 없으면 MySQL 8.0/8.4 기본 모드(`ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`)를 쓴다. 모드 이름은 MySQL 순서로 정렬하고 중복을 지운다(SHOW CREATE 의 `sql_mode` 표기). 묶음 모드(`ANSI`·`TRADITIONAL`)와 테이블 문장을 다르게 읽게 하는 `REAL_AS_FLOAT`·`ANSI_QUOTES`는 거부하고 다시 추출하도록 안내한다(3.2).
   - DEFINER는 저장하지 않는다. 비교 대상이 아니다.
   - 함수의 `RETURNS` 타입은 타입 규칙으로 정규화한다. 문자열 타입이면 MySQL처럼 ` CHARSET <스키마 기본 문자셋>`을 붙이고, 스키마 기본 콜레이션이 그 문자셋의 기본(`utf8mb4_0900_ai_ci`·`latin1_swedish_ci`·`utf8mb3_general_ci` …)이 아니면 ` COLLATE <콜레이션>`도 붙인다(8.0/8.4 실측, 시나리오 `schema-defaults-unicode`). `RETURNS` 안에 `CHARSET`·`COLLATE`를 직접 쓴 경우는 1차에서 거부한다.
 - **테이블 옵션:**
@@ -158,6 +166,7 @@ MySQL이 오류를 내는 다음 경우는 적용을 실패시킨다.
 - **파티션:** 파티션 식이 쓰는 컬럼을 지우거나 이름을 바꿀 때(3855), PRIMARY KEY·UNIQUE가 파티션 컬럼을 모두 포함하지 않을 때(1503)
 - **날짜·시간 기본값:** 없는 날짜·시각, `0000-00-00`(1067)
 - **8.4 규칙:** 8.4만 거부하는 문장은 8.0에서도 거부하고, 메시지에 `MySQL 8.4 NNNN`으로 적는다. 예: FLOAT·DOUBLE AUTO_INCREMENT(1063), 고유 키가 아닌 키를 참조하는 FK(6125)
+- **테이블 한도:** 키(PRIMARY·FK 자동 인덱스 포함)가 64개를 넘을 때(1069 — 없는 컬럼 1072보다 먼저), 컬럼이 1017개를 넘을 때(1117) (8.0/8.4 실측). 이 한도로 테이블 하나를 다루는 계산량도 묶인다(5.1)
 
 MySQL의 모든 검사를 재현하지는 않는다. 화면 안내와 이 문서에 "실제 DB에 적용했을 때 MySQL이 거부할 수 있는 스크립트를 이 도구가 받아들일 수 있다"고 적는다. 예를 들어 키 길이 한도나 행 크기 한도 검사는 하지 않고, TIMESTAMP의 표현 범위(서버 시간대에 따라 달라진다)도 보지 않는다.
 
@@ -191,7 +200,8 @@ type ApplyResult =
 ```
 
 - `renames`에는 스크립트의 `RENAME TABLE`·`RENAME COLUMN`·`CHANGE`(이름 변경)·`RENAME INDEX`로 생긴 기준→결과 이름 대응을 기존 `RenameMapping` 형식으로 담는다. 같은 대상의 이름이 여러 번 바뀌면 처음 이름에서 마지막 이름으로 접는다.
-- 결과 모델은 덤프 파서가 만드는 모델과 같은 불변식을 지킨다. 예를 들어 `fidelity: 'full'`이고, 정렬과 이름 규칙이 같다. 그래서 `printSqlDump` → `parseSqlDump`가 같은 모델을 돌려준다. 이 왕복이 깨지면 서버 시작 시 재판정에서 stale로 잘못 표시되므로 테스트로 고정한다.
+- 결과 모델은 덤프 파서가 만드는 모델과 같은 불변식을 지킨다. 예를 들어 `fidelity: 'full'`이고, 정렬과 이름 규칙이 같다. 그래서 `printSqlDump` → `parseSqlDump`가 같은 모델을 돌려주도록 만들었다. 이 왕복은 설계 목표이지 보장이 아니다 — 기준에 이미 있던, 파싱하지 못한 객체나 원문과 다르게 다시 찍히는 객체(`rawDdl`)는 그대로 남는다. 서버가 저장 전에 객체마다 확인한다(5.2). 모든 성공 시나리오에서 테스트로 고정한다.
+- **계산량:** 서버 한도(1,000,000자)를 채운 스크립트도 몇 초 안에 끝나야 한다(서버는 한 프로세스라 적용하는 동안 다른 요청이 멈춘다). 테이블 하나의 계산은 키 64개·컬럼 1017개·FK 64개 한도(4.1, 3.2)로 묶고, 문장마다 드는 시간이 스크립트 길이·테이블 수·FK 수에 비례하지 않게 한다(문장 줄 번호, 자동 인덱스 짝 비교, 이름 찾기). 패턴마다 1,000,000자 스크립트가 시간 안에 끝나는지 단위 테스트(`test/apply/apply-performance-*.test.ts`)가 본다.
 
 ### 5.2 서버
 
@@ -204,6 +214,7 @@ type ApplyResult =
   - 스크립트 적용이 실패해도 400이다. 메시지는 `N번째 문장 (줄 L): 이유`이고(특정 문장이 아닌 실패는 이유만), `details.error`에 `{ index, line, statement, reason }`을 담는다.
   - `dryRun: true`면 저장하지 않고 `{ status: 'preview', applied, changes, renames }`를 돌려준다. `changes`는 기준과 결과를 기존 비교 엔진으로 비교해 바뀌는 객체를 모은 목록이고 항목은 `{ kind, name, op }`이다(`kind`는 table·view·function·procedure, `op`는 add·drop·modify·rename). `renames`는 `applyScript`가 모은 이름 대응이다. 저장하면 `{ status: 'ok' | 'duplicate', versionId, versionNo, applied, changes }`를 돌려준다.
   - 결과 모델을 `printSqlDump`로 출력하고 다시 파싱한 모델을 쓴다. 그래야 저장 모델과 원문 재파싱 모델이 항상 같아서 서버 시작 시 stale로 잘못 표시되지 않는다.
+  - **안전망:** 다시 파싱한 모델이 적용 결과와 객체마다 같아야 저장한다(미리보기도 같다). 객체 목록이 같아야 하고, 스크립트가 바꾼 객체는 적용 결과와, 건드리지 않은 객체는 기준 버전의 객체와 같아야 한다. 파싱한 객체의 `rawDdl`은 보지 않는다(파생 버전의 원문은 출력한 덤프다). 파싱하지 못한 객체(`parseError`)만은 기준을 그대로 출력·다시 읽은 결과와 비교하고, 그 객체의 경고가 기준을 다시 읽을 때도 똑같이 났으면 받는다. 그래서 기준에 이상한 객체가 있어도 그 객체를 건드리지 않는 ALTER는 쓸 수 있다. 어긋나면 400이고, 이 도구의 출력·읽기가 어긋난 것이라 다시 뽑아 올리라고 안내하지 않는다: 메시지에 어긋난 객체와 요청 ID를 적고, 같은 내용을 서버 로그(warn)에 남긴다(스크립트는 남기지 않는다).
   - "변경 없음" 판정은 모델 해시가 아니라 기존 비교 엔진으로 한다(`diffSchemas(기준, 결과, renames)`의 변경이 0개).
   - 저장할 때는 출력한 텍스트를 원문으로 기존 `ingest` 경로에 넘겨 새 버전을 만든다. `source_filename`은 업로드한 파일 이름 또는 `alter.sql`이다. 같은 트랜잭션에서 아래를 기록한다.
     - (a) `schema_version_derivations` 행
@@ -234,10 +245,11 @@ type ApplyResult =
 - **`test:mysql` ALTER 시나리오:**
   - 위치는 `packages/core/test/fixtures/alter-scenarios/<이름>/`이고, 파일은 `script.sql`(필수)과 `base.sql`(td-export 형식, 없으면 공용 `_base.sql`)이다. 실패 시나리오에는 `expect-error.txt`(MySQL 오류 번호)를 둔다. `only.txt`(`MySQL 8.4`처럼 그 버전에서만 실행)와 `defaults.json`(스키마 기본 문자셋·콜레이션, DB도 그 값으로 만든다)은 선택이다.
   - 성공 시나리오는 다음을 확인한다.
-    - MySQL 8.0/8.4에 `base.sql`을 적용하고 `script.sql`을 mysql 클라이언트로 실행한 뒤, `SHOW CREATE` 결과를 덤프 파서로 읽는다.
+    - MySQL 8.0/8.4에 `base.sql`을 적용하고 `script.sql`을 문장 나누기(`splitStatements`)로 나눠 mysql2로 한 문장씩 실행한 뒤, `SHOW CREATE` 결과를 덤프 파서로 읽는다. 이미지는 실측한 8.0.46·8.4.11로 고정한다(CI·`docker-compose.test.yml`).
     - `applyScript(parse(base), script)` 결과와 비교해 `generateDdl(diffSchemas(ours, mysql))`이 0문장이어야 한다.
     - 반대 방향 비교도 0문장이어야 한다.
-  - 실패 시나리오는 MySQL이 거부하고 `applyScript`도 거부해야 한다.
+  - 실패 시나리오는 MySQL이 거부하고 `applyScript`도 같은 문장에서 같은 MySQL 오류 번호로 거부해야 한다(`re-export.txt`가 있으면 오류 번호 대신 `RE_EXPORT` 안내).
+  - 실행 명령은 `npm run test:mysql -w @tdm/core`이다.
   - 처음 시나리오 묶음은 다음과 같다.
     - 3.1의 각 절
     - 4장의 각 정규화 규칙(타입 별칭, 숫자 기본값, NULL 기본값, timestamp, PK NOT NULL, 자동 인덱스·FK 이름, FK 자동 인덱스)

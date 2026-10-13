@@ -14,7 +14,7 @@ const NUMERIC: ReadonlySet<string> = new Set([...INT_TYPES, 'decimal', 'float', 
 // 문자셋·콜레이션이 붙는 타입
 export const CHARSET_TYPES: ReadonlySet<string> = new Set(['char', 'varchar', 'tinytext', 'text', 'mediumtext', 'longtext', 'enum', 'set']);
 export const BLOB_TYPES: ReadonlySet<string> = new Set(['tinytext', 'text', 'mediumtext', 'longtext', 'tinyblob', 'blob', 'mediumblob', 'longblob']);
-// 리터럴 기본값을 쓸 수 없는 타입 (MySQL 1101). NULL 허용이어도 SHOW CREATE 에 DEFAULT NULL 이 없다
+// 리터럴 기본값을 쓸 수 없는 타입 (MySQL 1101). 그중 TEXT·BLOB 계열(BLOB_TYPES)만 NULL 허용이어도 SHOW CREATE 에 DEFAULT NULL 이 없고, JSON·GEOMETRY 계열은 찍힌다
 export const NO_LITERAL_DEFAULT: ReadonlySet<string> = new Set([...BLOB_TYPES, 'json',
   'geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection', 'geomcollection']);
 const KNOWN: ReadonlySet<string> = new Set([...NUMERIC, ...CHARSET_TYPES, ...NO_LITERAL_DEFAULT, 'bit', 'date', 'datetime', 'timestamp', 'time', 'year', 'binary', 'varbinary']);
