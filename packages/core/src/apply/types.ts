@@ -11,7 +11,7 @@ export interface ApplyDefaults {
 
 export interface ApplyOptions {
   schemaName: string; // `cur`.`t` 처럼 한정한 이름과 USE 는 이 스키마일 때만 받는다
-  defaults?: Partial<ApplyDefaults>;
+  defaults?: Partial<ApplyDefaults>; // 안 준 값(undefined 포함)은 MYSQL_DEFAULTS. 문자셋만 주면 그 기본 콜레이션, 콜레이션만 주면 그 문자셋 (resolveDefaults)
 }
 
 export interface ApplyError {

@@ -5,7 +5,7 @@ import { LexError, tokenize } from '../lexer';
 import type { SchemaModel } from '../model';
 import { splitDump } from '../parse-dump';
 import { UnsafeValueError } from '../sql-safety';
-import { canonicalCharset, canonicalCollation, charsetOfCollation } from './normalize-mysql';
+import { canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
 import { applySet } from './session';
 import { initialState, type State } from './state';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
@@ -20,7 +20,7 @@ export function applyScript(base: SchemaModel, script: string, opts: ApplyOption
   let defaults: ApplyDefaults;
   try {
     statements = splitDump(script.replace(/^\uFEFF/, ''));
-    defaults = checkDefaults({ ...MYSQL_DEFAULTS, ...opts.defaults });
+    defaults = resolveDefaults(opts.defaults);
   } catch (e) {
     if (e instanceof LexError) return failure(0, 1, '', `스크립트를 문장으로 나누지 못했습니다: ${e.message}`);
     if (e instanceof ApplyFailure) return failure(0, 1, '', e.message);
@@ -43,10 +43,13 @@ export function applyScript(base: SchemaModel, script: string, opts: ApplyOption
 const failure = (index: number, line: number, statement: string, reason: string): ApplyResult =>
   ({ ok: false, error: { index, line, statement: statement.slice(0, MAX_STATEMENT_TEXT), reason } });
 
-// 스키마 기본 문자셋·콜레이션: 이름을 MySQL 표기로 맞추고 서로 맞는지 본다
-function checkDefaults(d: ApplyDefaults): ApplyDefaults {
-  const charset = canonicalCharset(d.charset);
-  const collation = canonicalCollation(d.collation);
+// 스키마 기본 문자셋·콜레이션: 이름을 MySQL 표기로 맞춘다. 안 준 값(undefined 포함)은 MySQL 기본값으로 채우되,
+// 문자셋만 주면 그 문자셋의 기본 콜레이션을, 콜레이션만 주면 그 콜레이션의 문자셋을 쓴다. 둘 다 주면 서로 맞는지 본다
+export function resolveDefaults(given: Partial<ApplyDefaults> = {}): ApplyDefaults {
+  const collation = given.collation === undefined ? undefined : canonicalCollation(given.collation);
+  if (given.charset === undefined) return collation === undefined ? { ...MYSQL_DEFAULTS } : { charset: charsetOfCollation(collation), collation };
+  const charset = canonicalCharset(given.charset);
+  if (collation === undefined) return { charset, collation: primaryCollation(charset) };
   if (charsetOfCollation(collation) !== charset) fail(`스키마 기본 콜레이션 ${collation} 은 문자셋 ${charset} 의 콜레이션이 아닙니다 (MySQL 1253)`);
   return { charset, collation };
 }

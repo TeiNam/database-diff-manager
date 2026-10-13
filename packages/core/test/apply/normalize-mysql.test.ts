@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalCharset, canonicalCollation, columnCharset, finalizeColumn, normalizeDefault, normalizeUserType, routineReturns, tableCharset } from '../../src/apply/normalize-mysql';
+import { canonicalCharset, canonicalCollation, columnCharset, finalizeColumn, normalizeDefault, normalizeUserType, routineReturns, tableCharset, trimTrailingSpaces } from '../../src/apply/normalize-mysql';
 import { ApplyFailure, RE_EXPORT, type ColumnSpec, type DefaultSpec } from '../../src/apply/types';
 import { parseCreateTable } from '../../src/parse-table';
 
@@ -252,5 +252,34 @@ describe('finalizeColumn', () => {
     expect(() => finalizeColumn(spec({ primaryKey: true, nullable: true }), T)).toThrow(/1171/);
     expect(() => finalizeColumn(spec({ type: 'varchar(1)', autoIncrement: true }), T)).toThrow(/1063/);
     expect(() => finalizeColumn(spec({ autoIncrement: true, default: { kind: 'number', value: '1' } }), T)).toThrow(/1067/);
+  });
+});
+
+// MySQL 은 ENUM·SET 값 끝의 공백(U+0020)만 지운다. `/ +$/` 는 값 가운데 공백이 길면 시작 위치마다 끝까지 훑어 O(n^2) (10만 칸 ≈ 5 초)
+describe('ENUM·SET 값 끝 공백', () => {
+  it.each([
+    ['', ''], ['a', 'a'], ['a  ', 'a'], ['   ', ''], [' a ', ' a'], ['a b  ', 'a b'],
+    ['a\t', 'a\t'], ['a \t ', 'a \t'], ['a\n ', 'a\n'], ['a\u00a0', 'a\u00a0'], ['a\u3000 ', 'a\u3000'],
+  ])('trimTrailingSpaces(%j) → %j: U+0020 만 지운다', (input, out) => {
+    expect(trimTrailingSpaces(input)).toBe(out);
+  });
+
+  it('긴 공백이 값 가운데 있어도 선형이다 (ENUM 타입)', () => {
+    const gap = ' '.repeat(200000);
+    const started = performance.now();
+    expect(normalizeUserType(`ENUM('a${gap}b')`)).toBe(`enum('a${gap}b')`);
+    expect(normalizeUserType(`SET('a${gap}b ')`)).toBe(`set('a${gap}b')`);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it('긴 공백이 값 가운데 있어도 선형이다 (ENUM 기본값)', () => {
+    const started = performance.now();
+    expect(() => normalizeDefault({ kind: 'string', value: `a${' '.repeat(200000)}b` }, col("enum('a','b')"))).toThrow(ApplyFailure);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it('ENUM 기본값의 끝 공백은 지우고 비교한다', () => {
+    expect(normalizeDefault({ kind: 'string', value: 'B   ' }, col("enum('a','b')"))).toBe("'b'");
+    expect(() => normalizeDefault({ kind: 'string', value: 'b\t' }, col("enum('a','b')"))).toThrow(/ENUM 값이 아닙니다/);
   });
 });

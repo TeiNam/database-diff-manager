@@ -75,3 +75,23 @@ describe('이름 찾기', () => {
     expect(() => objectNameList(cursor('other.t'), st)).toThrow(ApplyFailure);
   });
 });
+
+describe('보완', () => {
+  it('moveOrigins: 같은 이름으로 옮기면 아무것도 바뀌지 않는다', () => {
+    const st = fresh();
+    moveOrigins(st.origins, 'a', 'a');
+    expect(entries(st.origins.tables)).toEqual([['a', 'a'], ['b', 'b']]);
+    expect(entries(st.origins.columns.get('a'))).toEqual([['id', 'id'], ['name', 'name']]);
+    expect(entries(st.origins.indexes.get('a'))).toEqual([['PRIMARY', 'PRIMARY'], ['idx_name', 'idx_name']]);
+  });
+
+  // MySQL 8.0.46 실측: DROP TABLE a RESTRICT, b · DROP TABLE a CASCADE, b CASCADE · DROP VIEW a RESTRICT, b 는 1064
+  it('objectNameList: RESTRICT·CASCADE 는 마지막 이름 뒤에만 쓸 수 있다', () => {
+    const st = fresh();
+    expect(objectNameList(cursor('a, b RESTRICT'), st)).toEqual(['a', 'b']);
+    expect(objectNameList(cursor('a, b CASCADE'), st)).toEqual(['a', 'b']);
+    for (const src of ['a RESTRICT, b', 'a CASCADE, b CASCADE', 'a RESTRICT, b RESTRICT']) {
+      expect(() => objectNameList(cursor(src), st), src).toThrow(/\(MySQL 1064\)/);
+    }
+  });
+});

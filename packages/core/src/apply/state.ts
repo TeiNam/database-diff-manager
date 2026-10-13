@@ -41,6 +41,7 @@ export function trackNew(origins: Origins, t: Table, fromBase: boolean): void {
 }
 
 export function moveOrigins(origins: Origins, from: string, to: string): void {
+  if (from === to) return; // 옮긴 뒤 from 을 지우므로 같은 이름이면 항목이 사라진다
   for (const m of [origins.tables, origins.columns, origins.indexes] as Map<string, unknown>[]) {
     if (!m.has(from)) continue;
     m.set(to, m.get(from));
@@ -80,13 +81,15 @@ export function objectName(c: Cursor, st: State): string {
   return c.ident();
 }
 
-// 'a [, b …] [RESTRICT|CASCADE]' 이름 목록 (DROP TABLE·DROP VIEW). c 는 목록 앞
+// 'a [, b …] [RESTRICT|CASCADE]' 이름 목록 (DROP TABLE·DROP VIEW). c 는 목록 앞. RESTRICT·CASCADE 는 마지막 이름 뒤에만 쓸 수 있다
 export function objectNameList(c: Cursor, st: State): string[] {
-  return splitList(c.toks.slice(c.i), '이름').map((toks) => {
+  const items = splitList(c.toks.slice(c.i), '이름');
+  return items.map((toks, k) => {
     const one = new Cursor(toks, c.src);
     const name = objectName(one, st);
-    if (!one.acceptWord('RESTRICT')) one.acceptWord('CASCADE');
-    if (!one.done) fail(`알 수 없는 내용입니다: ${one.peek()!.v}`);
+    const isLast = k === items.length - 1;
+    if (isLast && !one.acceptWord('RESTRICT')) one.acceptWord('CASCADE');
+    if (!one.done) fail(`알 수 없는 내용입니다: ${one.peek()!.v} (MySQL 1064)`);
     return name;
   });
 }

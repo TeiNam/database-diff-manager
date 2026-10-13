@@ -78,9 +78,17 @@ function withArgs(name: string, inner: Token[] | undefined, src: string): string
   }
 }
 
+// 끝의 공백(U+0020)만 지운다 — MySQL 이 ENUM·SET 값에 하는 일이라 탭·줄바꿈·NBSP 는 남는다.
+// `/ +$/` 로 지우면 값 가운데 공백이 길 때 시작 위치마다 끝까지 훑어 O(n^2) (10만 칸 ≈ 5 초)라 뒤에서부터 센다
+export function trimTrailingSpaces(text: string): string {
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 0x20) end--;
+  return text.slice(0, end);
+}
+
 // MySQL 은 ENUM·SET 값 끝 공백을 지운다. 대소문자만 다른 같은 값이면 1291
 function enumValues(inner: Token[] | undefined, src: string): string[] {
-  const values = (inner ? splitList(inner, 'ENUM·SET 값') : []).map((part) => (part.length === 1 && part[0].t === 'string' ? part[0].v.replace(/ +$/, '') : fail(`ENUM·SET 값은 문자열이어야 합니다: ${src}`)));
+  const values = (inner ? splitList(inner, 'ENUM·SET 값') : []).map((part) => (part.length === 1 && part[0].t === 'string' ? trimTrailingSpaces(part[0].v) : fail(`ENUM·SET 값은 문자열이어야 합니다: ${src}`)));
   if (!values.length) fail(`ENUM·SET 값이 없습니다: ${src}`);
   const seen = new Set<string>();
   for (const v of values) {
@@ -181,7 +189,10 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   if (base === 'bit') return spec.kind === 'bit' ? spec.value : /^\d+$/.test(spec.value) ? `b'${BigInt(spec.value).toString(2)}'` : bad(spec.value);
   if (spec.kind === 'bit') return bad(spec.value);
   if (NUMERIC.has(base) || base === 'year') return quoteString(numericDefault(spec.value, col.type, bad));
-  if (base === 'enum') return quoteString(enumMembers(col.type).find((m) => m.toLowerCase() === spec.value.replace(/ +$/, '').toLowerCase()) ?? bad(`'${spec.value}' 은 ENUM 값이 아닙니다`));
+  if (base === 'enum') {
+    const wanted = trimTrailingSpaces(spec.value).toLowerCase();
+    return quoteString(enumMembers(col.type).find((m) => m.toLowerCase() === wanted) ?? bad(`'${spec.value}' 은 ENUM 값이 아닙니다`));
+  }
   if (base === 'set') return quoteString(setDefault(spec.value, col.type, bad));
   return quoteString(spec.value);
 }
