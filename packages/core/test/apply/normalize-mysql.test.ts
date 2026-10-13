@@ -1,10 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { columnCharset, finalizeColumn, normalizeDefault, normalizeUserType, routineReturns, tableCharset } from '../../src/apply/normalize-mysql';
-import { ApplyFailure, type ColumnSpec, type DefaultSpec } from '../../src/apply/types';
+import { canonicalCharset, canonicalCollation, columnCharset, finalizeColumn, normalizeDefault, normalizeUserType, routineReturns, tableCharset } from '../../src/apply/normalize-mysql';
+import { ApplyFailure, RE_EXPORT, type ColumnSpec, type DefaultSpec } from '../../src/apply/types';
+import { parseCreateTable } from '../../src/parse-table';
 
 const spec = (over: Partial<ColumnSpec>): ColumnSpec => ({ name: 'c', type: 'int', autoIncrement: false, invisible: false, primaryKey: false, unique: false, ...over });
 const T = { charset: 'utf8mb4', collation: 'utf8mb4_general_ci' };
 const col = (type: string, nullable = true) => ({ name: 'c', type, nullable });
+// Object.prototype 에 있는 이름: 사전(객체) 조회가 이 이름을 '있는 키'로 착각하면 안 된다
+const PROTOTYPE_KEYS = ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf'];
+const messageOf = (fn: () => unknown): string => {
+  try {
+    fn();
+  } catch (e) {
+    return (e as Error).message;
+  }
+  throw new Error('예외가 나지 않았습니다');
+};
 
 describe('normalizeUserType', () => {
   it.each([
@@ -13,10 +24,42 @@ describe('normalizeUserType', () => {
     ['VARCHAR (20)', 'varchar(20)'], ['DOUBLE PRECISION', 'double'], ['REAL', 'double'], ['FLOAT(30)', 'double'], ['FLOAT(7,4)', 'float(7,4)'],
     ['DATETIME(0)', 'datetime'], ['TIMESTAMP(3)', 'timestamp(3)'], ['YEAR(4)', 'year'], ['BIT', 'bit(1)'], ['BIGINT SIGNED', 'bigint'],
     ["ENUM('a' , \"b\", 'c  ')", "enum('a','b','c')"], ["SET('x','it''s')", "set('x','it''s')"], ['JSON', 'json'], ['LONGTEXT', 'longtext'],
+    ['CHARACTER VARYING(20)', 'varchar(20)'], ['char varying (10)', 'varchar(10)'], ['CHARACTER(3)', 'char(3)'],
   ])('%s → %s', (src, out) => expect(normalizeUserType(src)).toBe(out));
 
   it.each([['VARCHAR'], ['SERIAL'], ['INT ZEROFILL'], ['TEXT(100)'], ['NCHAR(2)'], ['FOO'], ["ENUM('a','A')"], ['VARCHAR(10) UNSIGNED'], ['YEAR(2)'], ['CHAR(1,2)']])('%s 는 거부', (src) => {
     expect(() => normalizeUserType(src)).toThrow(ApplyFailure);
+  });
+
+  it.each([['VARCHAR()'], ['INT()'], ['DATETIME()'], ['DECIMAL()'], ['CHAR VARYING()']])('%s: 빈 괄호는 거부', (src) => {
+    expect(() => normalizeUserType(src)).toThrow(/타입 인자가 비었습니다.*\(MySQL 1064\)/);
+  });
+
+  it.each([['CHARACTER VARYING'], ['CHAR VARYING'], ['CHAR VARYING(5) UNSIGNED']])('%s: VARCHAR 와 같게 길이가 없거나 UNSIGNED 면 거부', (src) => {
+    expect(() => normalizeUserType(src)).toThrow(ApplyFailure);
+  });
+
+  it.each(PROTOTYPE_KEYS)('%s: Object.prototype 의 이름도 모르는 타입으로 거부', (src) => {
+    expect(() => normalizeUserType(src)).toThrow(/지원하지 않는 타입입니다/);
+  });
+});
+
+describe('1차 지원 범위 밖 안내', () => {
+  it('RE_EXPORT 문구', () => {
+    expect(RE_EXPORT).toBe('td-export 로 다시 뽑아 올려 주세요');
+  });
+
+  it.each([['NCHAR(2)'], ['NATIONAL VARCHAR(10)'], ['SERIAL'], ['INT ZEROFILL'], ['TEXT(100)'], ['LONG']])('%s: 메시지가 다시 뽑아 올리라는 안내로 끝난다', (src) => {
+    const message = messageOf(() => normalizeUserType(src));
+    expect(message).toContain('1차 지원 범위가 아닙니다');
+    expect(message.endsWith(` — ${RE_EXPORT}`), message).toBe(true);
+  });
+
+  it('RETURNS 안의 CHARSET·COLLATE 도 같은 안내로 끝난다', () => {
+    for (const raw of ['VARCHAR(20) CHARSET latin1', 'TEXT COLLATE utf8mb4_bin', 'CHAR(3) CHARACTER SET ascii']) {
+      const message = messageOf(() => routineReturns(raw, 'utf8mb4'));
+      expect(message.endsWith(` — ${RE_EXPORT}`), message).toBe(true);
+    }
   });
 });
 
@@ -35,6 +78,8 @@ describe('normalizeDefault', () => {
     [{ kind: 'string', value: 'y,x' }, "set('x','y')", "'x,y'"],
     [{ kind: 'number', value: '1' }, 'bit(1)', "b'1'"],
     [{ kind: 'null' }, 'int', 'NULL'],
+    [{ kind: 'null' }, 'json', 'NULL'],
+    [{ kind: 'null' }, 'point', 'NULL'],
   ] as const)('%j on %s → %s', (s, type, out) => expect(normalizeDefault(s as DefaultSpec, col(type))).toBe(out));
 
   it.each([
@@ -42,6 +87,26 @@ describe('normalizeDefault', () => {
     [{ kind: 'now' }, col('datetime(3)')], [{ kind: 'number', value: '1.5' }, col('int')], [{ kind: 'string', value: 'z' }, col("enum('a')")],
     [{ kind: 'number', value: '-1' }, col('int unsigned')], [{ kind: 'string', value: 'abc' }, col('int')],
   ] as const)('%j 는 거부', (s, c) => expect(() => normalizeDefault(s as DefaultSpec, c)).toThrow(ApplyFailure));
+
+  it('TEXT·BLOB 계열의 명시한 DEFAULT NULL 은 저장되는 기본값이 없다 (SHOW CREATE 에 보이지 않는다)', () => {
+    for (const type of ['text', 'tinytext', 'mediumtext', 'longtext', 'blob', 'tinyblob', 'mediumblob', 'longblob']) {
+      expect(normalizeDefault({ kind: 'null' }, col(type)), type).toBeUndefined();
+    }
+  });
+
+  it('NOT NULL 인 TEXT 에 DEFAULT NULL 은 여전히 거부 (1067)', () => {
+    expect(() => normalizeDefault({ kind: 'null' }, col('text', false))).toThrow(/1067/);
+  });
+
+  it.each([
+    [{ kind: 'string', value: 'x' }, col('text')], [{ kind: 'string', value: 'x' }, col('blob')], [{ kind: 'string', value: 'x' }, col('json')],
+    [{ kind: 'number', value: '1' }, col('point')], [{ kind: 'string', value: 'x' }, col('geometry')], [{ kind: 'now' }, col('json')],
+  ] as const)('%j 는 리터럴 기본값이라 거부 (1101)', (s, c) => expect(() => normalizeDefault(s as DefaultSpec, c)).toThrow(/1101/));
+
+  it('DEFAULT CURRENT_TIMESTAMP 가 잘못되면 1067', () => {
+    expect(() => normalizeDefault({ kind: 'now' }, col('date'))).toThrow(/1067/);
+    expect(() => normalizeDefault({ kind: 'now' }, col('datetime(3)'))).toThrow(/1067/);
+  });
 });
 
 describe('문자셋 (SHOW CREATE 표기)', () => {
@@ -63,6 +128,15 @@ describe('문자셋 (SHOW CREATE 표기)', () => {
     expect(() => columnCharset('varchar(1)', { charset: 'klingon' }, T)).toThrow(/1115/);
   });
 
+  it.each(PROTOTYPE_KEYS)('%s: Object.prototype 의 이름은 모르는 문자셋·콜레이션으로 거부 (TypeError 가 아니다)', (name) => {
+    expect(() => canonicalCharset(name)).toThrow(ApplyFailure);
+    expect(() => canonicalCollation(name)).toThrow(ApplyFailure);
+    expect(() => columnCharset('varchar(10)', { charset: name }, T)).toThrow(ApplyFailure);
+    expect(() => columnCharset('varchar(10)', { collation: name }, T)).toThrow(ApplyFailure);
+    expect(() => tableCharset([{ key: 'DEFAULT CHARSET', value: name }], T)).toThrow(ApplyFailure);
+    expect(() => tableCharset([{ key: 'COLLATE', value: name }], T)).toThrow(ApplyFailure);
+  });
+
   it('tableCharset: 옵션의 문자셋·콜레이션, 없으면 기본값', () => {
     expect(tableCharset([{ key: 'DEFAULT CHARSET', value: 'latin1' }], T)).toEqual({ charset: 'latin1', collation: 'latin1_swedish_ci' });
     expect(tableCharset([{ key: 'DEFAULT CHARSET', value: 'utf8mb4' }, { key: 'COLLATE', value: 'utf8mb4_bin' }], T)).toEqual({ charset: 'utf8mb4', collation: 'utf8mb4_bin' });
@@ -77,10 +151,45 @@ describe('문자셋 (SHOW CREATE 표기)', () => {
 });
 
 describe('finalizeColumn', () => {
-  it('NULL 허용 컬럼은 DEFAULT NULL (TEXT·JSON 제외), NOT NULL 은 기본값 없음', () => {
+  it('NULL 허용 컬럼은 DEFAULT NULL (TEXT·BLOB 제외), NOT NULL 은 기본값 없음', () => {
     expect(finalizeColumn(spec({ type: 'int' }), T)).toEqual({ name: 'c', type: 'int', nullable: true, invisible: false, autoIncrement: false, default: 'NULL' });
     expect(finalizeColumn(spec({ type: 'text' }), T)).toEqual({ name: 'c', type: 'text', collation: 'utf8mb4_general_ci', nullable: true, invisible: false, autoIncrement: false });
     expect(finalizeColumn(spec({ type: 'int', nullable: false }), T).default).toBeUndefined();
+  });
+
+  it('기본값을 쓰지 않은 NULL 허용 컬럼: JSON·GEOMETRY 는 DEFAULT NULL 을 붙이고 TEXT·BLOB 은 붙이지 않는다', () => {
+    expect(finalizeColumn(spec({ type: 'json' }), T).default).toBe('NULL');
+    expect(finalizeColumn(spec({ type: 'point' }), T).default).toBe('NULL');
+    expect(finalizeColumn(spec({ type: 'geometry' }), T).default).toBe('NULL');
+    for (const type of ['text', 'longtext', 'blob', 'longblob']) expect(finalizeColumn(spec({ type }), T).default, type).toBeUndefined();
+    expect(finalizeColumn(spec({ type: 'json', nullable: false }), T).default).toBeUndefined();
+  });
+
+  it('SHOW CREATE 를 읽은 모델과 같다 (td-export 실출력: json 은 DEFAULT NULL, text 는 DEFAULT 없음)', () => {
+    const showCreate = [
+      'CREATE TABLE `t` (',
+      '  `n` int DEFAULT NULL,',
+      '  `j` json DEFAULT NULL,',
+      '  `x` text COLLATE utf8mb4_general_ci',
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci',
+    ].join('\n');
+    const made = [spec({ name: 'n', type: 'int' }), spec({ name: 'j', type: 'json' }), spec({ name: 'x', type: 'text' })].map((s) => finalizeColumn(s, T));
+    expect(made).toEqual(parseCreateTable(showCreate).columns);
+  });
+
+  it('명시한 DEFAULT NULL: TEXT·BLOB 은 기본값이 저장되지 않고 JSON·GEOMETRY 는 NULL', () => {
+    const explicit = (type: string) => finalizeColumn(spec({ type, default: { kind: 'null' } }), T);
+    expect(explicit('text')).not.toHaveProperty('default');
+    expect(explicit('blob')).not.toHaveProperty('default');
+    expect(explicit('json').default).toBe('NULL');
+    expect(explicit('point').default).toBe('NULL');
+    expect(explicit('int').default).toBe('NULL');
+  });
+
+  it('TEXT·BLOB·JSON·GEOMETRY 의 리터럴 기본값은 거부 (1101)', () => {
+    for (const type of ['text', 'blob', 'json', 'point']) {
+      expect(() => finalizeColumn(spec({ type, default: { kind: 'string', value: 'x' } }), T), type).toThrow(/1101/);
+    }
   });
 
   it('컬럼 안 PRIMARY KEY 는 NOT NULL, AUTO_INCREMENT 는 DEFAULT 없음', () => {
@@ -93,6 +202,13 @@ describe('finalizeColumn', () => {
     const c = finalizeColumn(spec({ type: 'datetime', nullable: false, default: { kind: 'now' }, onUpdate: {}, comment: '' }), T);
     expect(c).toMatchObject({ default: 'CURRENT_TIMESTAMP', onUpdate: 'CURRENT_TIMESTAMP' });
     expect(c.comment).toBeUndefined();
+  });
+
+  it('ON UPDATE 가 잘못되면 1294, DEFAULT CURRENT_TIMESTAMP 가 잘못되면 1067', () => {
+    expect(() => finalizeColumn(spec({ type: 'int', onUpdate: {} }), T)).toThrow(/ON UPDATE.*\(MySQL 1294\)/);
+    expect(() => finalizeColumn(spec({ type: 'datetime(3)', onUpdate: {} }), T)).toThrow(/ON UPDATE.*\(MySQL 1294\)/);
+    expect(() => finalizeColumn(spec({ type: 'int', default: { kind: 'now' } }), T)).toThrow(/\(MySQL 1067\)/);
+    expect(() => finalizeColumn(spec({ type: 'datetime(3)', default: { kind: 'now' } }), T)).toThrow(/\(MySQL 1067\)/);
   });
 
   it('PRIMARY KEY NULL·문자열 AUTO_INCREMENT·AUTO_INCREMENT 기본값은 거부', () => {

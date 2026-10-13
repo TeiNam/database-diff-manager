@@ -32,6 +32,9 @@ export const fail = (reason: string): never => {
   throw new ApplyFailure(reason);
 };
 
+// 1차 지원 범위 밖이라 거부하는 메시지의 끝에 ' — ' 로 붙이는 안내 (화면에 그대로 보인다)
+export const RE_EXPORT = 'td-export 로 다시 뽑아 올려 주세요';
+
 export const MYSQL_DEFAULTS: ApplyDefaults = { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' };
 // 스크립트에 SET SQL_MODE 가 없을 때 루틴에 붙는 SQL_MODE (MySQL 8.0/8.4 기본값)
 export const DEFAULT_SQL_MODE = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';

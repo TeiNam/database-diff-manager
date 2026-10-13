@@ -4,7 +4,7 @@ import { Cursor, splitTopLevel } from '../cursor';
 import { quoteString, tokenize, type Token } from '../lexer';
 import type { Column, TableOption } from '../model';
 import { normalizeType } from '../normalize';
-import { fail, type ColumnSpec, type DefaultSpec, type NowSpec } from './types';
+import { fail, RE_EXPORT, type ColumnSpec, type DefaultSpec, type NowSpec } from './types';
 
 export const INT_TYPES: ReadonlySet<string> = new Set(['tinyint', 'smallint', 'mediumint', 'int', 'bigint']);
 const NUMERIC: ReadonlySet<string> = new Set([...INT_TYPES, 'decimal', 'float', 'double']);
@@ -17,16 +17,17 @@ export const NO_LITERAL_DEFAULT: ReadonlySet<string> = new Set([...BLOB_TYPES, '
 const KNOWN: ReadonlySet<string> = new Set([...NUMERIC, ...CHARSET_TYPES, ...NO_LITERAL_DEFAULT, 'bit', 'date', 'datetime', 'timestamp', 'time', 'year', 'binary', 'varbinary']);
 const TWO_ARGS: ReadonlySet<string> = new Set(['decimal', 'float', 'double']);
 const AUTO_INCREMENT_TYPES: ReadonlySet<string> = new Set([...INT_TYPES, 'float', 'double']);
-const ALIASES: Readonly<Record<string, string>> = {
+// 사전은 Map: 객체 조회는 'constructor'·'__proto__' 같은 Object.prototype 이름을 '있는 키'로 읽는다
+const ALIASES: ReadonlyMap<string, string> = new Map(Object.entries({
   integer: 'int', int1: 'tinyint', int2: 'smallint', int3: 'mediumint', int4: 'int', int8: 'bigint', middleint: 'mediumint',
   dec: 'decimal', numeric: 'decimal', fixed: 'decimal', real: 'double', character: 'char',
-};
-const NATIONAL = 'NATIONAL·NCHAR 타입은 문자셋이 따로 붙어 1차 지원 범위가 아닙니다';
-const REJECTED: Readonly<Record<string, string>> = {
-  serial: 'SERIAL 은 UNIQUE 인덱스가 따로 생겨 1차 지원 범위가 아닙니다',
+}));
+const NATIONAL = `NATIONAL·NCHAR 타입은 문자셋이 따로 붙어 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`;
+const REJECTED: ReadonlyMap<string, string> = new Map(Object.entries({
+  serial: `SERIAL 은 UNIQUE 인덱스가 따로 생겨 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`,
   national: NATIONAL, nchar: NATIONAL, nvarchar: NATIONAL,
-  long: 'LONG·LONG VARCHAR 는 1차 지원 범위가 아닙니다 — MEDIUMTEXT 로 쓰세요',
-};
+  long: `LONG·LONG VARCHAR 는 1차 지원 범위가 아닙니다 (MEDIUMTEXT 로 쓰면 됩니다) — ${RE_EXPORT}`,
+}));
 
 export const baseType = (type: string): string => /^\w+/.exec(type)?.[0] ?? '';
 
@@ -36,17 +37,19 @@ export function normalizeUserType(src: string): string {
   const first = c.next();
   if (first.t !== 'word') return fail(`타입이 필요합니다: ${src}`);
   const word = first.v.toLowerCase();
-  if (REJECTED[word]) return fail(REJECTED[word]);
+  const rejected = REJECTED.get(word);
+  if (rejected) return fail(rejected);
   if (word === 'bool' || word === 'boolean') return c.done ? 'tinyint(1)' : fail(`BOOLEAN 뒤에는 수식어를 쓸 수 없습니다: ${src}`);
   if (word === 'double') c.acceptWord('PRECISION');
-  const name = ALIASES[word] ?? word;
+  const varying = (word === 'char' || word === 'character') && c.acceptWord('VARYING'); // CHARACTER VARYING(n)·CHAR VARYING(n) = VARCHAR(n)
+  const name = varying ? 'varchar' : (ALIASES.get(word) ?? word);
   if (!KNOWN.has(name)) return fail(`지원하지 않는 타입입니다: ${first.v}`);
   const inner = c.isOp('(') ? c.parenTokens() : undefined;
   let unsigned = false;
   while (!c.done) {
     if (c.acceptWord('UNSIGNED')) unsigned = true;
     else if (c.acceptWord('SIGNED')) unsigned = false;
-    else if (c.isWord('ZEROFILL')) fail('ZEROFILL 은 1차 지원 범위가 아닙니다 (MySQL 8.0.17 부터 폐기 예정)');
+    else if (c.isWord('ZEROFILL')) fail(`ZEROFILL 은 1차 지원 범위가 아닙니다 (MySQL 8.0.17 부터 폐기 예정) — ${RE_EXPORT}`);
     else fail(`알 수 없는 타입 수식어: ${c.peek()!.v}`);
   }
   if (unsigned && !NUMERIC.has(name)) fail(`UNSIGNED 는 숫자 타입에만 쓸 수 있습니다: ${src}`);
@@ -56,6 +59,7 @@ export function normalizeUserType(src: string): string {
 function withArgs(name: string, inner: Token[] | undefined, src: string): string {
   if (name === 'enum' || name === 'set') return `${name}(${enumValues(inner, src).map(quoteString).join(',')})`;
   const args = inner && splitTopLevel(inner).map((part) => (part.length === 1 && part[0].t === 'number' && /^\d+$/.test(part[0].v) ? String(Number(part[0].v)) : fail(`타입 인자가 올바르지 않습니다: ${src}`)));
+  if (args && !args.length) fail(`타입 인자가 비었습니다: ${src} (MySQL 1064)`);
   if (args && args.length > (TWO_ARGS.has(name) ? 2 : 1)) fail(`타입 인자가 너무 많습니다: ${src}`);
   switch (name) {
     case 'decimal': return `decimal(${args?.[0] ?? 10},${args?.[1] ?? 0})`;
@@ -69,7 +73,7 @@ function withArgs(name: string, inner: Token[] | undefined, src: string): string
       return args && args[0] !== '0' ? `${name}(${args[0]})` : name;
     default:
       if (INT_TYPES.has(name)) return normalizeType(args ? `${name}(${args[0]})` : name); // int(11) → int, tinyint(1) 유지
-      return args ? fail(`${name.toUpperCase()}(n) 은 1차 지원 범위가 아닙니다 (MySQL 이 길이로 타입을 고릅니다)`) : name;
+      return args ? fail(`${name.toUpperCase()}(n) 은 1차 지원 범위가 아닙니다 (MySQL 이 길이로 타입을 고릅니다) — ${RE_EXPORT}`) : name;
   }
 }
 
@@ -88,18 +92,18 @@ function enumValues(inner: Token[] | undefined, src: string): string[] {
 export const enumMembers = (type: string): string[] => tokenize(type).filter((t) => t.t === 'string').map((t) => t.v);
 
 // 문자셋의 기본(primary) 콜레이션 — MySQL 8.0/8.4 SHOW CHARACTER SET 의 Default collation
-const PRIMARY_COLLATION: Readonly<Record<string, string>> = {
+const PRIMARY_COLLATION: ReadonlyMap<string, string> = new Map(Object.entries({
   utf8mb4: 'utf8mb4_0900_ai_ci', utf8mb3: 'utf8mb3_general_ci', latin1: 'latin1_swedish_ci', latin2: 'latin2_general_ci', ascii: 'ascii_general_ci',
   binary: 'binary', ucs2: 'ucs2_general_ci', utf16: 'utf16_general_ci', utf16le: 'utf16le_general_ci', utf32: 'utf32_general_ci',
   euckr: 'euckr_korean_ci', gbk: 'gbk_chinese_ci', gb2312: 'gb2312_chinese_ci', gb18030: 'gb18030_chinese_ci', big5: 'big5_chinese_ci',
   sjis: 'sjis_japanese_ci', ujis: 'ujis_japanese_ci', cp932: 'cp932_japanese_ci', eucjpms: 'eucjpms_japanese_ci', cp1250: 'cp1250_general_ci',
   cp1251: 'cp1251_general_ci', cp1256: 'cp1256_general_ci', cp1257: 'cp1257_general_ci', greek: 'greek_general_ci', hebrew: 'hebrew_general_ci',
   tis620: 'tis620_thai_ci', koi8r: 'koi8r_general_ci', koi8u: 'koi8u_general_ci',
-};
+}));
 
 export function canonicalCharset(name: string): string {
   const cs = name.toLowerCase() === 'utf8' ? 'utf8mb3' : name.toLowerCase();
-  return PRIMARY_COLLATION[cs] ? cs : fail(`알 수 없는 문자셋입니다: ${name} (MySQL 1115)`);
+  return PRIMARY_COLLATION.has(cs) ? cs : fail(`알 수 없는 문자셋입니다: ${name} (MySQL 1115)`);
 }
 
 export function canonicalCollation(name: string): string {
@@ -110,10 +114,10 @@ export function canonicalCollation(name: string): string {
 
 export function charsetOfCollation(coll: string): string {
   const cs = coll === 'binary' ? 'binary' : coll.split('_')[0];
-  return PRIMARY_COLLATION[cs] ? cs : fail(`알 수 없는 콜레이션입니다: ${coll} (MySQL 1273)`);
+  return PRIMARY_COLLATION.has(cs) ? cs : fail(`알 수 없는 콜레이션입니다: ${coll} (MySQL 1273)`);
 }
 
-export const primaryCollation = (cs: string): string => PRIMARY_COLLATION[cs];
+export const primaryCollation = (cs: string): string => PRIMARY_COLLATION.get(cs) ?? fail(`알 수 없는 문자셋입니다: ${cs} (MySQL 1115)`);
 
 export interface TableCharset {
   charset: string;
@@ -148,19 +152,27 @@ export function effectiveCollation(col: Pick<Column, 'type' | 'charset' | 'colla
 
 const fspOf = (type: string): number => Number(/^(?:datetime|timestamp|time)\((\d)\)/.exec(type)?.[1] ?? 0);
 
-// CURRENT_TIMESTAMP 기본값·ON UPDATE: DATETIME·TIMESTAMP 에만, 소수 초 자릿수는 컬럼과 같아야 한다
-export function nowText(type: string, now: NowSpec, what: string): string {
+const ER_INVALID_DEFAULT = 1067;
+const ER_INVALID_ON_UPDATE = 1294;
+
+// CURRENT_TIMESTAMP 기본값·ON UPDATE: DATETIME·TIMESTAMP 에만, 소수 초 자릿수는 컬럼과 같아야 한다.
+// errno: 기본값이 잘못되면 1067, ON UPDATE 가 잘못되면 1294
+export function nowText(type: string, now: NowSpec, what: string, errno = ER_INVALID_DEFAULT): string {
   const base = baseType(type);
-  if (base !== 'datetime' && base !== 'timestamp') fail(`${what} CURRENT_TIMESTAMP 은 DATETIME·TIMESTAMP 에만 쓸 수 있습니다 (MySQL 1067)`);
-  if ((now.fsp ?? 0) !== fspOf(type)) fail(`${what} CURRENT_TIMESTAMP 의 소수 초 자릿수가 컬럼(${type})과 다릅니다 (MySQL 1067)`);
+  if (base !== 'datetime' && base !== 'timestamp') fail(`${what} CURRENT_TIMESTAMP 은 DATETIME·TIMESTAMP 에만 쓸 수 있습니다 (MySQL ${errno})`);
+  if ((now.fsp ?? 0) !== fspOf(type)) fail(`${what} CURRENT_TIMESTAMP 의 소수 초 자릿수가 컬럼(${type})과 다릅니다 (MySQL ${errno})`);
   return now.fsp ? `CURRENT_TIMESTAMP(${now.fsp})` : 'CURRENT_TIMESTAMP';
 }
 
-// 기본값 원문 (SHOW CREATE 표기): 숫자도 따옴표로 감싸고 타입 자릿수에 맞춘다
-export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | 'type' | 'nullable'>): string {
+// 기본값 원문 (SHOW CREATE 표기): 숫자도 따옴표로 감싸고 타입 자릿수에 맞춘다.
+// undefined: 저장되는 기본값이 없다 — TEXT·BLOB 계열에 명시한 DEFAULT NULL 은 SHOW CREATE 에 보이지 않는다 (JSON·GEOMETRY 는 'NULL')
+export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | 'type' | 'nullable'>): string | undefined {
   const base = baseType(col.type);
   const bad = (why: string): never => fail(`컬럼 \`${col.name}\` 의 기본값이 올바르지 않습니다: ${why} (MySQL 1067)`);
-  if (spec.kind === 'null') return col.nullable ? 'NULL' : bad('NOT NULL 컬럼에 NULL');
+  if (spec.kind === 'null') {
+    if (!col.nullable) return bad('NOT NULL 컬럼에 NULL');
+    return BLOB_TYPES.has(base) ? undefined : 'NULL';
+  }
   if (NO_LITERAL_DEFAULT.has(base)) return fail(`${base.toUpperCase()} 컬럼에는 리터럴 기본값을 쓸 수 없습니다 (MySQL 1101)`);
   if (spec.kind === 'now') return nowText(col.type, spec, `컬럼 \`${col.name}\` 의 기본값`);
   if (base === 'bit') return spec.kind === 'bit' ? spec.value : /^\d+$/.test(spec.value) ? `b'${BigInt(spec.value).toString(2)}'` : bad(spec.value);
@@ -200,16 +212,18 @@ export function finalizeColumn(spec: ColumnSpec, table: TableCharset): Column {
   if (spec.srid !== undefined) col.srid = spec.srid;
   if (spec.storage) col.storage = spec.storage;
   if (spec.columnFormat) col.columnFormat = spec.columnFormat;
-  if (spec.default) col.default = normalizeDefault(spec.default, col);
-  else if (nullable && !spec.autoIncrement && !NO_LITERAL_DEFAULT.has(base)) col.default = 'NULL';
-  if (spec.onUpdate) col.onUpdate = nowText(spec.type, spec.onUpdate, `컬럼 \`${spec.name}\` 의 ON UPDATE`);
+  if (spec.default) {
+    const value = normalizeDefault(spec.default, col);
+    if (value !== undefined) col.default = value;
+  } else if (nullable && !spec.autoIncrement && !BLOB_TYPES.has(base)) col.default = 'NULL';
+  if (spec.onUpdate) col.onUpdate = nowText(spec.type, spec.onUpdate, `컬럼 \`${spec.name}\` 의 ON UPDATE`, ER_INVALID_ON_UPDATE);
   if (spec.comment) col.comment = spec.comment;
   return col;
 }
 
 // 함수 RETURNS 타입: 타입 규칙으로 맞추고 문자열 타입이면 MySQL 처럼 ' CHARSET <스키마 기본 문자셋>' 을 붙인다
 export function routineReturns(raw: string, charset: string): string {
-  if (/\b(CHARSET|CHARACTER\s+SET|COLLATE)\b/i.test(raw)) fail(`RETURNS 안의 CHARSET·COLLATE 는 1차 지원 범위가 아닙니다: ${raw}`);
+  if (/\b(CHARSET|CHARACTER\s+SET|COLLATE)\b/i.test(raw)) fail(`RETURNS 안의 CHARSET·COLLATE 는 1차 지원 범위가 아닙니다: ${raw} — ${RE_EXPORT}`);
   const type = normalizeUserType(raw);
   return CHARSET_TYPES.has(baseType(type)) ? `${type} CHARSET ${canonicalCharset(charset)}` : type;
 }

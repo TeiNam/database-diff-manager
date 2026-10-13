@@ -2,14 +2,15 @@
 import type { TableOption } from '../model';
 import { fail } from './types';
 
-const ENGINES: Readonly<Record<string, string>> = {
+// Map: 객체 조회는 'constructor'·'__proto__' 같은 Object.prototype 이름을 '있는 키'로 읽는다
+const ENGINES: ReadonlyMap<string, string> = new Map(Object.entries({
   innodb: 'InnoDB', myisam: 'MyISAM', memory: 'MEMORY', heap: 'MEMORY', csv: 'CSV', archive: 'ARCHIVE', blackhole: 'BLACKHOLE',
-};
+}));
 const ROW_FORMATS: ReadonlySet<string> = new Set(['DEFAULT', 'DYNAMIC', 'FIXED', 'COMPRESSED', 'REDUNDANT', 'COMPACT']);
 // SHOW CREATE TABLE 의 옵션 순서 (모르는 키는 COLLATE 와 ROW_FORMAT 사이)
 const ORDER = ['ENGINE', 'DEFAULT CHARSET', 'COLLATE', 'ROW_FORMAT', 'KEY_BLOCK_SIZE', 'COMMENT'];
 
-export const engineName = (v: string): string => ENGINES[v.toLowerCase()] ?? fail(`지원하지 않는 엔진입니다: ${v}`);
+export const engineName = (v: string): string => ENGINES.get(v.toLowerCase()) ?? fail(`지원하지 않는 엔진입니다: ${v}`);
 
 export function rowFormatName(v: string): string {
   const f = v.toUpperCase();

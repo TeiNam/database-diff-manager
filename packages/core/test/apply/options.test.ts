@@ -18,4 +18,11 @@ describe('테이블 옵션', () => {
     expect(() => engineName('foo')).toThrow(ApplyFailure);
     expect(() => rowFormatName('weird')).toThrow(ApplyFailure);
   });
+
+  // Object.prototype 에 있는 이름을 엔진으로 착각하면 안 된다
+  it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf'])('엔진 이름 %s 는 거부', (name) => {
+    expect(() => engineName(name)).toThrow(ApplyFailure);
+    expect(() => engineName(name)).toThrow(/지원하지 않는 엔진입니다/);
+    expect(() => rowFormatName(name)).toThrow(ApplyFailure);
+  });
 });
