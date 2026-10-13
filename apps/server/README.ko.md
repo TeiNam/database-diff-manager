@@ -53,6 +53,8 @@ nginx·ALB 같은 리버스 프록시 뒤에 두면 모든 요청의 소켓 주�
 | POST | `/uploads` (multipart: `meta` JSON + `files`) | admin, dba |
 | GET | `/versions/:id`, `/versions/:id/source` | 로그인 |
 | DELETE | `/versions/:id` | admin, dba |
+| POST | `/versions/:id/alter` (JSON: `script`, `filename?`, `note?`, `dryRun?`, `defaults?: { charset?, collation? }` — SQL 출처 버전에 ALTER 스크립트를 적용해 새 버전을 만든다. `dryRun` 은 저장하지 않고 변경 목록만) | admin, dba |
+| GET | `/versions/:id/derivation` (ALTER 적용으로 만든 버전의 기준 버전·스크립트) | 로그인 |
 | GET | `/diff?base=&target=` | 로그인 |
 | PUT | `/diff/renames` | admin, dba |
 | GET | `/objects/:id/history` | 로그인 |

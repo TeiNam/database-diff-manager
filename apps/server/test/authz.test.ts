@@ -43,6 +43,10 @@ const CASES: Case[] = [
   { method: 'GET', url: '/api/versions/1', anon: 401, viewer: 200, dba: 200, admin: 200 },
   { method: 'GET', url: '/api/versions/abc', anon: 401, viewer: 400, dba: 400, admin: 400 },
   { method: 'GET', url: '/api/versions/1/source', anon: 401, viewer: 200, dba: 200, admin: 200 },
+  { method: 'POST', url: '/api/versions/1/alter', payload: {}, anon: 401, viewer: 403, dba: 400, admin: 400 },
+  { method: 'POST', url: '/api/versions/abc/alter', payload: { script: 'x' }, anon: 401, viewer: 403, dba: 400, admin: 400 },
+  { method: 'GET', url: '/api/versions/1/derivation', anon: 401, viewer: 404, dba: 404, admin: 404 },
+  { method: 'GET', url: '/api/versions/abc/derivation', anon: 401, viewer: 400, dba: 400, admin: 400 },
   { method: 'DELETE', url: '/api/versions/abc', anon: 401, viewer: 403, dba: 400, admin: 400 },
   { method: 'DELETE', url: '/api/versions/99999', anon: 401, viewer: 403, dba: 404, admin: 404 },
 

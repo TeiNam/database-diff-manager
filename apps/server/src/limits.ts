@@ -5,3 +5,6 @@ export const JSON_BODY_LIMIT = 1024 * 1024;
 export const UPLOAD_BODY_LIMIT = MAX_UPLOAD_BYTES * MAX_UPLOAD_FILES + 1024 * 1024;
 // 전환 매핑은 JSON 본문에 원문을 문자열로 담는다. 따옴표 이스케이프로 늘어나는 만큼 여유를 둔다
 export const MIGRATION_BODY_LIMIT = MAX_UPLOAD_BYTES * 2;
+// ALTER 적용 스크립트 (JSON 문자열). 본문 한도는 이스케이프로 늘어나는 만큼 여유를 둔다
+export const MAX_ALTER_SCRIPT = 1_000_000;
+export const ALTER_BODY_LIMIT = 4 * 1024 * 1024;
