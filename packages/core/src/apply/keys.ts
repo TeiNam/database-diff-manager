@@ -34,11 +34,26 @@ export function uniqueIndexName(t: Pick<Table, 'indexes'>, base: string): string
   for (let n = 2; ; n++) if (!taken(`${base}_${n}`)) return `${base}_${n}`;
 }
 
+// 자동 FK 이름 '<테이블>_ibfk_<N>' 의 N 중 가장 큰 값 (없으면 0). 접두어는 대소문자를 구분하고 (`T_IBFK_9` 는 세지 않는다), 숫자로만 된 꼬리만 센다 (`_x`·`_` 는 세지 않는다)
+function highestFkNumber(table: string, names: readonly string[]): number {
+  const prefix = `${table}_ibfk_`;
+  const numbers = names.filter((n) => n.startsWith(prefix) && /^\d+$/.test(n.slice(prefix.length))).map((n) => Number(n.slice(prefix.length)));
+  return Math.max(0, ...numbers);
+}
+
 // '<테이블>_ibfk_<N>': N 은 이 테이블의 같은 꼴 FK 번호 중 가장 큰 값 + 1
 export function nextFkName(t: Pick<Table, 'name' | 'foreignKeys'>): string {
-  const prefix = `${t.name}_ibfk_`;
-  const used = t.foreignKeys.filter((f) => f.name.startsWith(prefix)).map((f) => Number(f.name.slice(prefix.length))).filter((n) => Number.isInteger(n));
-  return `${prefix}${Math.max(0, ...used) + 1}`;
+  return `${t.name}_ibfk_${highestFkNumber(t.name, t.foreignKeys.map((f) => f.name)) + 1}`;
+}
+
+// SHOW CREATE 가 FK 를 찍는 순서 (MySQL 8.0.46·8.4.11 실측): 제약 이름을 소문자로 바꿔 코드 포인트 순으로 비교한다. 선언한 순서와 상관없다.
+//   fk0 < fk1 < fk_1 < fk_a < fka (숫자 < '_' < 글자), t_ibfk_1 < t_ibfk_10 < t_ibfk_2 (숫자로 읽지 않는다), Beta < beta_1 < gamma (대소문자 무시),
+//   fk_가 < fk_주문 < fk_힣 (한글·CJK 는 코드 포인트 순). 한계: 라틴 확장 문자(ä·é·ß)·그리스·키릴 문자는 MySQL 이 코드 포인트 순이 아니다
+//   (실측 `ä, é, ñ, ß, Ä, É`, 그리스 대문자·소문자는 뒤섞인다) — 그 이름끼리의 순서는 맞추지 못한다. 그래서 FK 를 더하거나 테이블 이름을 바꿔 FK 이름이 달라질 때만 부른다.
+//   입력은 바꾸지 않고, 소문자가 같은 이름은 원래 순서를 지킨다 (안정 정렬)
+export function sortForeignKeys(fks: readonly ForeignKey[]): ForeignKey[] {
+  const key = (f: ForeignKey) => f.name.toLowerCase();
+  return [...fks].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
 }
 
 // 식(생성 컬럼·CHECK·함수 인덱스)이 컬럼을 쓰는지. SHOW CREATE 의 식은 컬럼을 늘 백틱으로 쓴다
@@ -126,6 +141,20 @@ function checkKeyParts(t: Table, index: Index): void {
   }
 }
 
+// 문장 끝 검사: PRIMARY KEY 에 든 컬럼은 NOT NULL 이다 — `DEFAULT NULL` 은 없어지고 다른 기본값은 남는다 (MySQL 8.0.46·8.4.11 실측). 기존 PK 컬럼을 NOT NULL 없이 MODIFY·CHANGE 한 경우,
+// ADD PRIMARY KEY 로 새 키를 더한 경우, CREATE TABLE 의 PRIMARY KEY 가 모두 이 함수 하나로 처리된다 (키가 다 정해진 뒤에 부른다).
+// explicitNull: 이 문장의 컬럼 정의가 NULL 이나 DEFAULT NULL 을 명시한 컬럼의 (최종) 이름, 소문자. 그런 컬럼이 PRIMARY KEY 에 있으면 MySQL 은 1171 로 거부한다
+// (절 순서·키를 더한 절과 상관없이; 같은 문장에서 PRIMARY KEY 를 지웠으면 키가 없으니 걸리지 않는다). AUTO_INCREMENT 컬럼의 NOT NULL 은 finalizeColumn 이 만든다
+export function enforcePrimaryKeyNotNull(t: Table, explicitNull: ReadonlySet<string> = new Set()): Table {
+  const pk = t.indexes.find((i) => i.kind === 'PRIMARY');
+  if (!pk) return t;
+  const members = new Set(pk.parts.flatMap((p) => (p.column === undefined ? [] : [p.column.toLowerCase()])));
+  const isMember = (c: Column) => members.has(c.name.toLowerCase());
+  const bad = t.columns.find((c) => isMember(c) && explicitNull.has(c.name.toLowerCase()));
+  if (bad) fail(`PRIMARY KEY 컬럼 \`${bad.name}\` 은 NULL 일 수 없습니다 (MySQL 1171)`);
+  return { ...t, columns: t.columns.map((c) => (isMember(c) ? notNull(c) : c)) };
+}
+
 // 컬럼 정의를 바꾼(MODIFY·CHANGE) 뒤 그 컬럼을 쓰는 기존 키를 새 정의에 맞춘다 (MySQL 8.0.46·8.4.11 실측, sql_table.cc mysql_prepare_alter_table):
 // - 키 파트 길이(prefix)는 새 타입이 prefix 를 가질 수 없거나(INT·ENUM …) 새 길이가 prefix 이하이면 오류 없이 없어진다 (varchar(20) 의 c(10) 을
 //   varchar(5) 로 줄이면 KEY (c)). 키를 새로 쓸 때(addIndex)와 달리 거부하지 않는다. 새 길이가 더 길거나 TEXT·BLOB 이면 prefix 가 남는다
@@ -155,13 +184,31 @@ function withoutOutgrownLength(col: Column, part: IndexPart): IndexPart {
   return next;
 }
 
+// 키 모양: 정수 부호는 키 길이에 영향이 없다 (`int` ≡ `int unsigned`). 나머지는 타입 원문이 같아야 같은 모양이다
+const keyShape = (type: string): string => type.replace(/ unsigned$/, '');
+
+// 같은 문장에서 지우고 같은 이름으로 다시 더한 컬럼에도 그 컬럼을 쓰던 키 파트가 따라온다. 이때 MySQL 은 옛 키 파트의 바이트 길이를 새 컬럼에 prefix 로 넘긴다
+// (8.0.46·8.4.11 실측: `age int` → `ADD age VARCHAR(5)` 는 `KEY (age(4))`, `varchar(10)` 키 → `varchar(300)` 은 `KEY (code(10))`, prefix 10 → `varchar(5)`·정수는 1089).
+// 모양이 같은 타입이면 키 파트가 그대로라 문제없고 (FULLTEXT 는 길이를 보지 않는다), 그 밖의 타입으로 바꾸면 결과를 재현하지 못하므로 거부한다.
+// t: 키 삭제·컬럼 반영을 마친 테이블, readded: 지우고 다시 더한 컬럼 이름(소문자)
+export function assertReaddedKeysFit(before: Table, t: Table, readded: ReadonlySet<string>): void {
+  for (const name of readded) {
+    const oldCol = findColumn(before, name);
+    const newCol = findColumn(t, name);
+    const isKeyed = t.indexes.some((i) => i.kind !== 'FULLTEXT' && i.parts.some((p) => p.column !== undefined && sameName(p.column, name)));
+    if (oldCol && newCol && isKeyed && keyShape(oldCol.type) !== keyShape(newCol.type)) {
+      fail(`키에 든 컬럼 \`${newCol.name}\` 을 지우고 같은 문장에서 다른 타입(${oldCol.type} → ${newCol.type})으로 다시 더하면 MySQL 이 옛 키 파트 길이를 prefix 로 넘겨 결과가 달라집니다 — MODIFY·CHANGE 를 쓰거나 ${RE_EXPORT}`);
+    }
+  }
+}
+
 // FK 를 붙인다 (받치는 인덱스는 ensureFkIndexes 가 문장 끝에 만든다)
-export function addForeignKey(st: State, t: Table, item: FkItem): Table {
+export function addForeignKey(st: State, t: Table, item: FkItem, generatedName?: string): Table {
   const { refSchema, ...rest } = item.fk;
   if (refSchema !== undefined && refSchema !== st.schemaName) fail(`다른 스키마 \`${refSchema}\` 를 참조하는 FK 는 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
   const columns = rest.columns.map((n) => (findColumn(t, n) ?? fail(`FK 컬럼 \`${n}\` 이 없습니다 (MySQL 1072)`)).name);
   assertDistinct(columns);
-  const name = item.named ? rest.name : nextFkName(t);
+  const name = item.named ? rest.name : generatedName ?? nextFkName(t);
   checkSetNull(t, columns, rest, name);
   const parent = rest.refTable === t.name ? t : findTable(st, rest.refTable);
   if (!parent && st.fkChecks) fail(`참조하는 테이블 \`${rest.refTable}\` 이 없습니다 (MySQL 1824)`);
@@ -238,14 +285,17 @@ export function ensureFkIndexes(t: Table, added: readonly { name: string; indexN
   return next;
 }
 
-// 인덱스·FK 정의를 차례로 붙이고, 붙인 FK 에 받치는 인덱스가 없으면 만든다 (ALTER TABLE ADD·CREATE TABLE 공용)
-export function addKeys(st: State, t: Table, items: readonly ConstraintItem[]): Table {
+// 인덱스·FK 정의를 차례로 붙이고, 붙인 FK 에 받치는 인덱스가 없으면 만든다 (ALTER TABLE ADD·CREATE TABLE 공용).
+// fkNamesBefore: 이 문장이 시작할 때 있던 FK 이름 (지우는 FK 포함) — 이름 없는 FK 는 이 중 가장 큰 번호 + 1 부터 하나씩 번호를 받는다 (MySQL 8.0.46·8.4.11 실측: 같은 문장에서
+// 직접 쓴 이름은 번호에 영향을 주지 않고, 겹치면 1826). 안 주면 t 에 있는 FK 이름 (CREATE TABLE 은 빈 테이블로 부른다). FK 를 붙인 뒤 sortForeignKeys 를 부르는 것은 부른 쪽의 몫이다
+export function addKeys(st: State, t: Table, items: readonly ConstraintItem[], fkNamesBefore: readonly string[] = t.foreignKeys.map((f) => f.name)): Table {
   let next = t;
+  let generated = highestFkNumber(t.name, fkNamesBefore);
   const added: { name: string; indexName?: string; named: boolean }[] = [];
   for (const item of items) {
     if (item.kind === 'index') next = addIndex(next, item);
     else {
-      next = addForeignKey(st, next, item);
+      next = addForeignKey(st, next, item, item.named ? undefined : `${t.name}_ibfk_${++generated}`);
       added.push({ name: next.foreignKeys.at(-1)!.name, ...(item.indexName !== undefined ? { indexName: item.indexName } : {}), named: item.named });
     }
   }

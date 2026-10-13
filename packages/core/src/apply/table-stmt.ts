@@ -1,6 +1,7 @@
 // CREATE·DROP·RENAME TABLE
 import { fkAutoNameCollides, renamedAutoName } from '../auto-name';
 import type { Table } from '../model';
+import { sortForeignKeys } from './keys';
 import { moveOrigins, nameTaken, needTable, type State } from './state';
 import { fail } from './types';
 
@@ -13,10 +14,12 @@ export function renameTable(st: State, from: string, to: string): void {
   }
   const t = needTable(st, from);
   if (fkAutoNameCollides(t.foreignKeys, from, to)) fail(`이름을 바꾸면 자동 FK 이름이 다른 FK 와 겹칩니다: \`${from}\` → \`${to}\` (MySQL 1826)`);
+  const foreignKeys = t.foreignKeys.map((f) => ({ ...f, name: renamedAutoName(f.name, from, to, 'ibfk') }));
   const renamed: Table = {
     ...t,
     name: to,
-    foreignKeys: t.foreignKeys.map((f) => ({ ...f, name: renamedAutoName(f.name, from, to, 'ibfk') })),
+    // 자동 이름이 바뀌면 SHOW CREATE 의 FK 순서(이름 순)도 달라진다 (MySQL 8.0.46·8.4.11 실측). 이름이 안 바뀌면 순서를 건드리지 않는다
+    foreignKeys: foreignKeys.some((f, i) => f.name !== t.foreignKeys[i].name) ? sortForeignKeys(foreignKeys) : foreignKeys,
     checks: t.checks.map((k) => ({ ...k, name: renamedAutoName(k.name, from, to, 'chk') })),
   };
   st.model.tables = st.model.tables

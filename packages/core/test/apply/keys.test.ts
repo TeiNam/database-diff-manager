@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addForeignKey, addIndex, addKeys, checkNowNotNull, checkTable, columnKeyItems, dropKeys, ensureFkIndexes, exprUses, leadsWith, nextFkName, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
+import { addForeignKey, addIndex, addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, ensureFkIndexes, enforcePrimaryKeyNotNull, exprUses, leadsWith, nextFkName, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
 import { initialState, replaceTable, type State } from '../../src/apply/state';
 import { DEFAULT_SQL_MODE, MYSQL_DEFAULTS, RE_EXPORT, type ColumnSpec, type FkItem, type IndexItem } from '../../src/apply/types';
 import type { Column, ForeignKey, Index, IndexKind, Table } from '../../src/model';
@@ -367,5 +367,119 @@ describe('columnKeyItems — 컬럼 정의 안의 PRIMARY KEY·UNIQUE', () => {
     expect(columnKeyItems(spec({ primaryKey: true }))).toEqual([{ kind: 'index', named: true, index: { name: 'PRIMARY', kind: 'PRIMARY', parts: [{ column: 'c', desc: false }], invisible: false } }]);
     expect(columnKeyItems(spec({ unique: true }))).toEqual([{ kind: 'index', named: false, index: { name: '', kind: 'UNIQUE', parts: [{ column: 'c', desc: false }], invisible: false } }]);
     expect(columnKeyItems(spec({ primaryKey: true, unique: true })).map((i) => i.index.kind)).toEqual(['PRIMARY', 'UNIQUE']);
+  });
+});
+
+describe('enforcePrimaryKeyNotNull — PRIMARY KEY 컬럼은 NOT NULL (MySQL 8.0.46·8.4.11 실측)', () => {
+  const nullablePk = (): Table => {
+    const t = table(fresh(), 'child');
+    return { ...t, columns: t.columns.map((c) => (c.name === 'id' ? { ...c, nullable: true, autoIncrement: false, default: 'NULL' } : c)) };
+  };
+
+  it('PRIMARY KEY 의 컬럼만 NOT NULL 로 만든다: DEFAULT NULL 은 없애고 다른 기본값은 남기며, 입력은 그대로다', () => {
+    const t = nullablePk();
+    const before = JSON.stringify(t);
+    const next = enforcePrimaryKeyNotNull(t);
+    expect(next.columns.find((c) => c.name === 'id')).toEqual({ name: 'id', type: 'int', nullable: false, invisible: false, autoIncrement: false });
+    expect(next.columns.find((c) => c.name === 'name')).toEqual(t.columns.find((c) => c.name === 'name')); // PK 밖 컬럼은 그대로
+    expect(JSON.stringify(t)).toBe(before);
+    const withDefault: Table = { ...t, columns: t.columns.map((c) => (c.name === 'id' ? { ...c, default: "'7'" } : c)) };
+    expect(enforcePrimaryKeyNotNull(withDefault).columns.find((c) => c.name === 'id')).toMatchObject({ nullable: false, default: "'7'" });
+  });
+
+  it('PRIMARY KEY 가 없으면 아무것도 하지 않는다', () => {
+    const noPk: Table = { ...table(fresh(), 'child'), indexes: [] };
+    expect(enforcePrimaryKeyNotNull(noPk, new Set(['id']))).toBe(noPk);
+  });
+
+  it('NULL 을 명시한 컬럼(explicitNull, 소문자)이 PRIMARY KEY 에 있으면 1171, 다른 컬럼이면 상관없다', () => {
+    expect(() => enforcePrimaryKeyNotNull(nullablePk(), new Set(['id']))).toThrow(/1171/);
+    expect(() => enforcePrimaryKeyNotNull(nullablePk(), new Set(['name']))).not.toThrow();
+  });
+});
+
+describe('FK 정렬·자동 번호 (MySQL 8.0.46·8.4.11 실측)', () => {
+  const fkNamed = (name: string): ForeignKey => ({ name, columns: ['pid'], refTable: 'parent', refColumns: ['id'] });
+  const sortedNames = (names: string[]) => sortForeignKeys(names.map(fkNamed)).map((f) => f.name);
+
+  // SHOW CREATE 가 찍은 순서: 제약 이름을 소문자로 바꿔 코드 포인트 순 (선언 순서와 상관없다)
+  it.each([
+    [['fkc', 'fk_b', 'fka'], ['fk_b', 'fka', 'fkc']], // '_' < 글자
+    [['fk1', 'fk_1', 'fk_a', 'fka', 'fk0'], ['fk0', 'fk1', 'fk_1', 'fk_a', 'fka']], // 숫자 < '_' < 글자
+    [['t_ibfk_10', 't_ibfk_2', 't_ibfk_1', 't_ibfk_9', 't_ibfk_20', 't_ibfk_100'], ['t_ibfk_1', 't_ibfk_10', 't_ibfk_100', 't_ibfk_2', 't_ibfk_20', 't_ibfk_9']], // 숫자로 읽지 않는다
+    [['Zeta', 'alpha', 'Beta', 'gamma', 'ALPHA2', 'beta_1', 'Beta0', 'aLPHA_'], ['alpha', 'ALPHA2', 'aLPHA_', 'Beta', 'Beta0', 'beta_1', 'gamma', 'Zeta']], // 대소문자 무시
+    [['a_1', 'a1', 'a_a', 'aa', 'a0', 'a$', 'a-', 'a.', 'a[', 'a^', 'a~', 'a]', 'a@', 'a#'], ['a#', 'a$', 'a-', 'a.', 'a0', 'a1', 'a@', 'a[', 'a]', 'a^', 'a_1', 'a_a', 'aa', 'a~']], // ASCII 구두점은 코드 포인트 순
+    [['a9', 'aa', 'a10', 'a1', 'ab', 'A2', 'b0'], ['a1', 'a10', 'A2', 'a9', 'aa', 'ab', 'b0']],
+    [['fk_회원', 'fk_주문', 'fk_가', 'fk_힣', 'fk_a', 'fk_z'], ['fk_a', 'fk_z', 'fk_가', 'fk_주문', 'fk_회원', 'fk_힣']], // 한글은 코드 포인트 순
+    [['한', '漢', 'あ', 'ア', '가'], ['あ', 'ア', '漢', '가', '한']],
+  ])('sortForeignKeys %j', (names, expected) => {
+    expect(sortedNames(names)).toEqual(expected);
+    expect(sortedNames([...names].reverse())).toEqual(expected);
+  });
+
+  it('sortForeignKeys: 안정 정렬이고 (소문자가 같으면 원래 순서) 입력을 바꾸지 않는다', () => {
+    const fks = [fkNamed('zz'), fkNamed('ä'), fkNamed('Ä'), fkNamed('aa')];
+    const before = JSON.stringify(fks);
+    expect(sortForeignKeys(fks).map((f) => f.name)).toEqual(['aa', 'zz', 'ä', 'Ä']);
+    expect(JSON.stringify(fks)).toBe(before);
+    expect(sortForeignKeys([])).toEqual([]);
+  });
+
+  // 이름 없는 FK 번호: 문장 앞의 FK 이름(지우는 것 포함) 중 가장 큰 번호 + 1 부터, 이 문장에서 이름 없이 더한 FK 마다 하나씩. 같은 문장에서 직접 쓴 이름은 세지 않는다
+  const unnamed = (column: string) => fk(false, [column], 'parent', ['id']);
+  const withCols = (t: Table, ...names: string[]): Table => withColumns(t, ...names.map((n) => ({ ...col(n, 'int unsigned') })));
+  const numbersAfter = (before: string[], items: FkItem[], columns: string[]) => {
+    const st = fresh();
+    const base = withCols({ ...table(st, 'child'), foreignKeys: [] , indexes: table(st, 'child').indexes.filter((i) => i.name !== 'pid')}, ...columns);
+    return addKeys(st, base, items, before).foreignKeys.map((f) => f.name);
+  };
+
+  it('addKeys: 문장 앞 FK 이름 중 가장 큰 번호 + 1 부터 이름 없는 FK 마다 하나씩 (빈 번호는 되쓰지 않는다)', () => {
+    expect(numbersAfter([], [unnamed('a'), unnamed('b')], ['a', 'b'])).toEqual(['child_ibfk_1', 'child_ibfk_2']);
+    expect(numbersAfter(['child_ibfk_1', 'child_ibfk_3'], [unnamed('a')], ['a'])).toEqual(['child_ibfk_4']); // 빈 번호(2)를 되쓰지 않는다
+    expect(numbersAfter(['child_ibfk_1', 'child_ibfk_2'], [unnamed('a'), unnamed('b')], ['a', 'b'])).toEqual(['child_ibfk_3', 'child_ibfk_4']); // 지우는 FK 도 센다
+  });
+
+  it('addKeys: 같은 문장에서 직접 쓴 이름은 번호에 영향을 주지 않는다 (이름이 겹치면 1826), 접두어는 대소문자를 구분하고 숫자가 아닌 꼬리는 세지 않는다', () => {
+    const explicit = (column: string, name: string) => fk(true, [column], 'parent', ['id'], name);
+    expect(numbersAfter([], [explicit('a', 'child_ibfk_7'), unnamed('b')], ['a', 'b'])).toEqual(['child_ibfk_7', 'child_ibfk_1']);
+    expect(() => numbersAfter([], [unnamed('a'), explicit('b', 'child_ibfk_1')], ['a', 'b'])).toThrow(/1826/);
+    expect(() => numbersAfter([], [explicit('a', 'child_ibfk_1'), unnamed('b')], ['a', 'b'])).toThrow(/1826/);
+    expect(numbersAfter(['CHILD_IBFK_9', 'child_ibfk_x', 'child_ibfk_'], [unnamed('a')], ['a'])).toEqual(['child_ibfk_1']);
+  });
+
+  it('addKeys: 문장 앞 이름을 주지 않으면 그 테이블에 있는 FK 이름을 쓴다 (child_ibfk_1 다음은 _2)', () => {
+    const st = fresh();
+    const c = withCols(table(st, 'child'), 'extra');
+    expect(addKeys(st, c, [unnamed('extra')]).foreignKeys.map((f) => f.name)).toEqual(['child_ibfk_1', 'child_ibfk_2']);
+  });
+});
+
+describe('assertReaddedKeysFit — 지우고 같은 이름으로 다시 더한 컬럼 (MySQL 8.0.46·8.4.11 실측)', () => {
+  const keyed = (): Table => table(fresh(), 'child'); // pid int unsigned 는 KEY pid 와 FK 에 든다
+  const retypeTo = (t: Table, name: string, type: string): Table => ({ ...t, columns: t.columns.map((c) => (c.name === name ? { ...c, type } : c)) });
+  const fitting = (t: Table, next: Table) => () => assertReaddedKeysFit(t, next, new Set(['pid']));
+
+  it('키 모양이 같은 타입은 받는다: 같은 타입 원문, 정수 부호만 다른 경우', () => {
+    const t = keyed();
+    expect(fitting(t, t)).not.toThrow();
+    expect(fitting(t, retypeTo(t, 'pid', 'int'))).not.toThrow(); // int unsigned → int
+  });
+
+  it('타입이 다르면 재추출 안내로 거부한다 (정수 크기·문자열 변경 포함)', () => {
+    const t = keyed();
+    expect(fitting(t, retypeTo(t, 'pid', 'bigint unsigned'))).toThrow(RE_EXPORT);
+    expect(fitting(t, retypeTo(t, 'pid', 'varchar(5)'))).toThrow(RE_EXPORT);
+  });
+
+  it('키에 들지 않은 컬럼·FULLTEXT 키의 컬럼·옛 컬럼이 없는 이름은 상관없다', () => {
+    const t = keyed();
+    const noKey: Table = { ...t, indexes: t.indexes.filter((i) => i.name !== 'pid') };
+    expect(() => assertReaddedKeysFit(t, retypeTo(noKey, 'pid', 'varchar(5)'), new Set(['pid']))).not.toThrow();
+    const p = table(fresh(), 'parent'); // note text 에 FULLTEXT
+    const ft = addIndex(p, idx('ft_note', 'FULLTEXT', ['note']));
+    expect(() => assertReaddedKeysFit(ft, retypeTo(ft, 'note', 'varchar(30)'), new Set(['note']))).not.toThrow();
+    expect(() => assertReaddedKeysFit(t, t, new Set(['nope']))).not.toThrow();
+    expect(() => assertReaddedKeysFit(t, retypeTo(t, 'pid', 'varchar(5)'), new Set())).not.toThrow(); // 다시 더하지 않은 컬럼은 보지 않는다
   });
 });

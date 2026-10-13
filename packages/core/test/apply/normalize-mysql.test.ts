@@ -139,11 +139,62 @@ describe('문자셋 (SHOW CREATE 표기)', () => {
     expect(columnCharset('varchar(10)', {}, { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' })).toEqual({});
   });
 
-  it('다른 콜레이션이면 CHARACTER SET, COLLATE 를 직접 쓰면 둘 다', () => {
-    expect(columnCharset('varchar(10)', { charset: 'latin1' }, T)).toEqual({ charset: 'latin1' });
-    expect(columnCharset('varchar(10)', { charset: 'utf8mb4' }, T)).toEqual({ charset: 'utf8mb4' }); // utf8mb4_0900_ai_ci ≠ 테이블 general_ci
+  // MySQL 8.0.46·8.4.11 실측: CHARACTER SET·COLLATE 를 하나라도 쓴 컬럼은 테이블 기본과 같아도 둘 다 찍는다 (문자셋만 써도 그 문자셋의 기본 콜레이션이 붙는다)
+  it('CHARACTER SET·COLLATE 를 직접 쓰면 둘 다 남는다', () => {
+    expect(columnCharset('varchar(10)', { charset: 'latin1' }, T)).toEqual({ charset: 'latin1', collation: 'latin1_swedish_ci' });
+    expect(columnCharset('varchar(10)', { charset: 'utf8mb4' }, T)).toEqual({ charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' }); // 테이블 콜레이션(general_ci)이 아니라 문자셋의 기본 콜레이션
     expect(columnCharset('varchar(10)', { collation: 'utf8mb4_bin' }, T)).toEqual({ charset: 'utf8mb4', collation: 'utf8mb4_bin' });
-    expect(columnCharset('text', { charset: 'utf8' }, T)).toEqual({ charset: 'utf8mb3' });
+    expect(columnCharset('varchar(10)', { collation: 'utf8mb4_general_ci' }, T)).toEqual({ charset: 'utf8mb4', collation: 'utf8mb4_general_ci' }); // 테이블 기본과 같아도
+    expect(columnCharset('text', { charset: 'utf8' }, T)).toEqual({ charset: 'utf8mb3', collation: 'utf8mb3_general_ci' });
+  });
+
+  // SHOW CREATE 가 컬럼 줄에 찍는 모양 (실측): 쓰지 않으면 테이블 기본을 물려받아 그 콜레이션이 문자셋 기본이 아닐 때만 `COLLATE x`, 쓰면 `CHARACTER SET a COLLATE b`.
+  // 기대값은 MySQL 이 찍은 컬럼 줄을 덤프 파서(parseCreateTable)로 읽은 모델이다 — 적용 결과가 재추출한 덤프와 같아야 한다
+  const T1 = { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' };
+  const T2 = { charset: 'utf8mb4', collation: 'utf8mb4_unicode_ci' };
+  const T3 = { charset: 'latin1', collation: 'latin1_swedish_ci' };
+  const T4 = { charset: 'latin1', collation: 'latin1_bin' };
+  const T5 = { charset: 'utf8mb4', collation: 'utf8mb4_bin' };
+  const dumped = (table: { charset: string; collation: string }, printed: string) => {
+    const c = parseCreateTable(`CREATE TABLE \`t\` (\n  \`c\` varchar(10) ${printed}DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=${table.charset} COLLATE=${table.collation}`).columns[0];
+    return { ...(c.charset === undefined ? {} : { charset: c.charset }), ...(c.collation === undefined ? {} : { collation: c.collation }) };
+  };
+  it.each([
+    // 테이블 이름 | 컬럼에 쓴 것 | 테이블 | MySQL 이 찍은 줄 (타입과 DEFAULT NULL 사이)
+    ['T1', {}, T1, ''],
+    ['T2', {}, T2, 'COLLATE utf8mb4_unicode_ci '],
+    ['T3', {}, T3, ''],
+    ['T4', {}, T4, 'COLLATE latin1_bin '],
+    ['T5', {}, T5, 'COLLATE utf8mb4_bin '],
+    ['T1', { charset: 'utf8mb4' }, T1, 'CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci '], // E.2: 테이블과 같은 문자셋
+    ['T3', { charset: 'latin1' }, T3, 'CHARACTER SET latin1 COLLATE latin1_swedish_ci '],
+    ['T1', { charset: 'latin1' }, T1, 'CHARACTER SET latin1 COLLATE latin1_swedish_ci '], // E.1: 테이블과 다른 문자셋, COLLATE 없음
+    ['T2', { charset: 'latin1' }, T2, 'CHARACTER SET latin1 COLLATE latin1_swedish_ci '],
+    ['T4', { charset: 'latin1' }, T4, 'CHARACTER SET latin1 COLLATE latin1_swedish_ci '], // 문자셋만 쓰면 테이블 콜레이션(latin1_bin)이 아니라 문자셋의 기본
+    ['T2', { charset: 'utf8mb4' }, T2, 'CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci '], // E.4: 테이블 콜레이션이 unicode_ci 인 테이블 + CHARACTER SET utf8mb4
+    ['T5', { charset: 'utf8mb4' }, T5, 'CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci '],
+    ['T1', { collation: 'utf8mb4_0900_ai_ci' }, T1, 'CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci '], // E.3: 문자셋의 기본 콜레이션을 직접 쓴 경우, 테이블 콜레이션과 같을 때
+    ['T2', { collation: 'utf8mb4_0900_ai_ci' }, T2, 'CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci '], // E.3: 테이블 콜레이션과 다를 때
+    ['T3', { collation: 'latin1_swedish_ci' }, T3, 'CHARACTER SET latin1 COLLATE latin1_swedish_ci '],
+    ['T2', { collation: 'utf8mb4_unicode_ci' }, T2, 'CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci '], // 테이블 콜레이션을 직접 쓴 경우도 둘 다
+    ['T4', { collation: 'latin1_bin' }, T4, 'CHARACTER SET latin1 COLLATE latin1_bin '],
+    ['T1', { charset: 'utf8mb4', collation: 'utf8mb4_unicode_ci' }, T1, 'CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci '],
+    ['T1', { charset: 'latin1', collation: 'latin1_bin' }, T1, 'CHARACTER SET latin1 COLLATE latin1_bin '],
+    ['T1', { collation: 'latin1_swedish_ci' }, T1, 'CHARACTER SET latin1 COLLATE latin1_swedish_ci '], // COLLATE 만 써도 문자셋이 붙는다
+    ['T1', { charset: 'ascii' }, T1, 'CHARACTER SET ascii COLLATE ascii_general_ci '],
+    ['T1', { collation: 'utf8_general_ci' }, T1, 'CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci '],
+  ])('실측 모양: 테이블 %s, 컬럼에 쓴 것 %j', (_name, written, table, printed) => {
+    const expected = dumped(table, printed);
+    expect(columnCharset('varchar(10)', written, table)).toEqual(expected);
+    expect(columnCharset('text', written, table)).toEqual(expected); // TEXT·ENUM·CHAR 도 같다
+    expect(columnCharset("enum('a','b')", written, table)).toEqual(expected);
+    expect(columnCharset('char(3)', written, table)).toEqual(expected);
+  });
+
+  // MySQL 은 CHARACTER SET binary 를 VARBINARY·BLOB 타입으로 바꾼다 (varchar(10) → varbinary(10), text → blob) — 타입이 바뀌므로 1차 범위 밖
+  it('CHARACTER SET binary·COLLATE binary 는 거부 (타입이 바뀐다)', () => {
+    expect(() => columnCharset('varchar(10)', { charset: 'binary' }, T1)).toThrow(RE_EXPORT);
+    expect(() => columnCharset('varchar(10)', { collation: 'binary' }, T1)).toThrow(RE_EXPORT);
   });
 
   it('문자열이 아닌 타입·맞지 않는 콜레이션·모르는 문자셋은 거부', () => {
@@ -246,6 +297,17 @@ describe('finalizeColumn', () => {
     expect(() => finalizeColumn(spec({ type: 'datetime(3)', onUpdate: {} }), T)).toThrow(/ON UPDATE.*\(MySQL 1294\)/);
     expect(() => finalizeColumn(spec({ type: 'int', default: { kind: 'now' } }), T)).toThrow(/\(MySQL 1067\)/);
     expect(() => finalizeColumn(spec({ type: 'datetime(3)', default: { kind: 'now' } }), T)).toThrow(/\(MySQL 1067\)/);
+  });
+
+  // MySQL 8.0.46·8.4.11 실측: AUTO_INCREMENT 컬럼은 NULL 을 써도 NOT NULL 이고 DEFAULT NULL 은 조용히 없어진다 (NOT NULL DEFAULT NULL 도 받는다).
+  // 다른 기본값은 1067. 컬럼 안 PRIMARY KEY 와 NULL 은 1171
+  it('AUTO_INCREMENT 컬럼은 NULL·DEFAULT NULL 을 써도 NOT NULL 이고 기본값이 없다', () => {
+    const plain = { type: 'int', autoIncrement: true };
+    expect(finalizeColumn(spec(plain), T)).toEqual({ name: 'c', type: 'int', nullable: false, invisible: false, autoIncrement: true });
+    expect(finalizeColumn(spec({ ...plain, nullable: true }), T)).toMatchObject({ nullable: false });
+    expect(finalizeColumn(spec({ ...plain, default: { kind: 'null' } }), T)).toEqual({ name: 'c', type: 'int', nullable: false, invisible: false, autoIncrement: true });
+    expect(finalizeColumn(spec({ ...plain, nullable: false, default: { kind: 'null' } }), T).default).toBeUndefined();
+    expect(finalizeColumn(spec({ ...plain, nullable: true, default: { kind: 'null' } }), T)).toMatchObject({ nullable: false });
   });
 
   it('PRIMARY KEY NULL·문자열 AUTO_INCREMENT·AUTO_INCREMENT 기본값은 거부', () => {

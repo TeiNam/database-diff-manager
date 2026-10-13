@@ -144,15 +144,17 @@ export function tableCharset(options: readonly TableOption[], defaults: TableCha
   return { charset: charsetOfCollation(collation), collation };
 }
 
-// 컬럼 문자셋 표기 (SHOW CREATE 규칙): 콜레이션이 테이블 기본과 다르면 CHARACTER SET, 문자셋 기본 콜레이션이 아니면 COLLATE.
-// COLLATE 를 직접 쓰면 둘 다 붙인다 (MySQL 은 명시한 콜레이션을 기억한다 — 비교 엔진은 COLLATE 만 있는 표기와 같게 본다)
+// 컬럼 문자셋 표기 (SHOW CREATE 규칙, MySQL 8.0.46·8.4.11 실측): CHARACTER SET·COLLATE 를 하나라도 쓴 컬럼은 테이블 기본과 같아도 둘 다 남긴다
+// (`CHARACTER SET a COLLATE b` — 문자셋만 쓰면 테이블 콜레이션이 아니라 그 문자셋의 기본 콜레이션, COLLATE 만 쓰면 그 콜레이션의 문자셋이 붙는다).
+// 쓰지 않은 컬럼은 테이블 기본을 물려받고, 그 콜레이션이 문자셋의 기본(primary)이 아닐 때만 COLLATE 하나가 남는다. MODIFY·CHANGE 도 옛 컬럼의 문자셋을 물려받지 않는다
 export function columnCharset(type: string, written: Pick<ColumnSpec, 'charset' | 'collation'>, table: TableCharset): Pick<Column, 'charset' | 'collation'> {
   if (!CHARSET_TYPES.has(baseType(type))) return written.charset || written.collation ? fail(`문자열이 아닌 타입에는 CHARACTER SET·COLLATE 를 쓸 수 없습니다: ${type}`) : {};
-  const charset = written.charset ? canonicalCharset(written.charset) : written.collation ? charsetOfCollation(canonicalCollation(written.collation)) : table.charset;
-  const collation = written.collation ? canonicalCollation(written.collation) : written.charset ? primaryCollation(charset) : table.collation;
+  if (!written.charset && !written.collation) return table.collation === primaryCollation(table.charset) ? {} : { collation: table.collation };
+  const charset = written.charset ? canonicalCharset(written.charset) : charsetOfCollation(canonicalCollation(written.collation!));
+  const collation = written.collation ? canonicalCollation(written.collation) : primaryCollation(charset);
   if (charsetOfCollation(collation) !== charset) fail(`COLLATE ${collation} 은 문자셋 ${charset} 의 콜레이션이 아닙니다 (MySQL 1253)`);
-  if (written.collation) return { charset, collation };
-  return { ...(collation !== table.collation ? { charset } : {}), ...(collation !== primaryCollation(charset) ? { collation } : {}) };
+  if (charset === 'binary') fail(`CHARACTER SET binary 는 MySQL 이 컬럼 타입을 VARBINARY·BLOB 으로 바꿔 1차 지원 범위가 아닙니다 (VARBINARY·BLOB 타입을 직접 쓰세요) — ${RE_EXPORT}`);
+  return { charset, collation };
 }
 
 // 컬럼의 실제 콜레이션 (문자열 타입이 아니면 '')
@@ -224,16 +226,18 @@ export function finalizeColumn(spec: ColumnSpec, table: TableCharset): Column {
   const base = baseType(spec.type);
   if (spec.primaryKey && spec.nullable === true) fail(`PRIMARY KEY 컬럼 \`${spec.name}\` 은 NULL 일 수 없습니다 (MySQL 1171)`);
   if (spec.autoIncrement && !AUTO_INCREMENT_TYPES.has(base)) fail(`AUTO_INCREMENT 는 정수·실수 컬럼에만 쓸 수 있습니다: \`${spec.name}\` (MySQL 1063)`);
-  if (spec.autoIncrement && spec.default) fail(`AUTO_INCREMENT 컬럼 \`${spec.name}\` 에는 기본값을 쓸 수 없습니다 (MySQL 1067)`);
-  const nullable = spec.primaryKey ? false : spec.nullable ?? true;
+  // AUTO_INCREMENT 컬럼은 NULL 을 써도 NOT NULL 이 되고, DEFAULT NULL 은 조용히 없어진다 (MySQL 8.0.46·8.4.11 실측). 다른 기본값은 1067.
+  // PRIMARY KEY 에 든 컬럼의 NULL·DEFAULT NULL(1171)은 키가 다 정해진 문장 끝에서 enforcePrimaryKeyNotNull 이 본다
+  if (spec.autoIncrement && spec.default && spec.default.kind !== 'null') fail(`AUTO_INCREMENT 컬럼 \`${spec.name}\` 에는 기본값을 쓸 수 없습니다 (MySQL 1067)`);
+  const nullable = spec.primaryKey || spec.autoIncrement ? false : spec.nullable ?? true;
   const col: Column = { name: spec.name, type: spec.type, ...columnCharset(spec.type, spec, table), nullable, invisible: spec.invisible, autoIncrement: spec.autoIncrement };
   if (spec.srid !== undefined) col.srid = spec.srid;
   if (spec.storage) col.storage = spec.storage;
   if (spec.columnFormat) col.columnFormat = spec.columnFormat;
-  if (spec.default) {
+  if (spec.default && !spec.autoIncrement) {
     const value = normalizeDefault(spec.default, col);
     if (value !== undefined) col.default = value;
-  } else if (nullable && !spec.autoIncrement && !BLOB_TYPES.has(base)) col.default = 'NULL';
+  } else if (nullable && !BLOB_TYPES.has(base)) col.default = 'NULL';
   if (spec.onUpdate) col.onUpdate = nowText(spec.type, spec.onUpdate, `컬럼 \`${spec.name}\` 의 ON UPDATE`, ER_INVALID_ON_UPDATE);
   if (spec.comment) col.comment = spec.comment;
   return col;

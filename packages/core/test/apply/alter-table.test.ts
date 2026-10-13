@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { applyScript } from '../../src/apply';
+import { RE_EXPORT } from '../../src/apply/types';
 import type { SchemaModel, Table } from '../../src/model';
 import { parseSqlDump } from '../../src/parse-dump';
 import { tdExport } from '../helpers';
@@ -49,7 +50,7 @@ describe('ALTER TABLE — 컬럼', () => {
   it('ALTER COLUMN SET/DROP DEFAULT·SET INVISIBLE', () => {
     const r = ok('ALTER TABLE member ALTER COLUMN age SET DEFAULT 20, ALTER name DROP DEFAULT, ALTER COLUMN email SET INVISIBLE;');
     expect(col(r, 'member', 'age').default).toBe("'20'");
-    expect(col(r, 'member', 'name').default).toBe('NULL');
+    expect(col(r, 'member', 'name').default).toBeUndefined(); // MySQL 8.0.46·8.4.11 실측: DROP DEFAULT 는 NULL 허용 컬럼에도 DEFAULT 절을 남기지 않는다 (코디네이터 승인으로 'NULL' 에서 바꿈)
     expect(col(r, 'member', 'email').invisible).toBe(true);
   });
 
@@ -275,5 +276,347 @@ describe('ALTER TABLE — 컬럼 정의 안의 PRIMARY KEY·UNIQUE', () => {
     expect(tbl(r, 'doc').indexes[0]).toMatchObject({ kind: 'PRIMARY', name: 'PRIMARY', parts: [{ column: 'x', desc: false }] });
     expect(col(r, 'doc', 'x')).toMatchObject({ nullable: false });
     expect(col(r, 'doc', 'x').default).toBeUndefined();
+  });
+});
+
+// MySQL 8.0.46·8.4.11 실측: ALTER COLUMN … DROP DEFAULT 는 컬럼 종류와 상관없이 DEFAULT 절을 없앤다 (NULL 허용 컬럼도 `DEFAULT NULL` 이 사라진다).
+// 그 뒤 SET DEFAULT NULL 이면 `DEFAULT NULL` 이 다시 보인다
+describe('ALTER TABLE — ALTER COLUMN … DROP DEFAULT', () => {
+  const DEFAULTS_BASE = parseSqlDump(tdExport(
+    "CREATE TABLE `d` (\n  `id` int NOT NULL,\n  `n1` varchar(10) DEFAULT NULL,\n  `n2` varchar(10) NOT NULL,\n  `n3` text,\n  `n4` int DEFAULT '5',\n  `n5` int NOT NULL AUTO_INCREMENT,\n  `n6` json DEFAULT NULL,\n  `n7` datetime DEFAULT CURRENT_TIMESTAMP,\n  `n9` int NOT NULL DEFAULT '7',\n  `n10` varchar(5) DEFAULT 'x',\n  `n11` timestamp NULL DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `n5` (`n5`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",
+  )).model;
+  const run = (script: string) => {
+    const r = applyScript(DEFAULTS_BASE, script, { schemaName: 'shop' });
+    if (!r.ok) throw new Error(`${r.error.index}: ${r.error.reason}`);
+    return r;
+  };
+
+  it.each([
+    ['n1', 'varchar(10)'], ['n3', 'text'], ['n4', 'int'], ['n6', 'json'], ['n7', 'datetime'], ['n10', 'varchar(5)'], ['n11', 'timestamp'],
+  ])('NULL 허용·기본값 있는 컬럼 %s 는 DEFAULT 절이 없어진다 (키 자체가 없다)', (name, type) => {
+    const c = col(run(`ALTER TABLE d ALTER COLUMN ${name} DROP DEFAULT;`), 'd', name);
+    expect(c.type).toBe(type);
+    expect(c.nullable).toBe(true);
+    expect('default' in c).toBe(false);
+  });
+
+  it('NOT NULL 컬럼은 기본값만 없어지고, AUTO_INCREMENT 컬럼은 그대로다', () => {
+    const r = run('ALTER TABLE d ALTER COLUMN n9 DROP DEFAULT, ALTER COLUMN n2 DROP DEFAULT, ALTER COLUMN n5 DROP DEFAULT;');
+    expect(col(r, 'd', 'n9')).toMatchObject({ nullable: false });
+    expect('default' in col(r, 'd', 'n9')).toBe(false);
+    expect(col(r, 'd', 'n5')).toMatchObject({ nullable: false, autoIncrement: true });
+    expect('default' in col(r, 'd', 'n5')).toBe(false);
+  });
+
+  it('DROP DEFAULT 뒤 SET DEFAULT NULL 은 DEFAULT NULL 을 되살린다', () => {
+    const r = run('ALTER TABLE d ALTER COLUMN n1 DROP DEFAULT;\nALTER TABLE d ALTER COLUMN n1 SET DEFAULT NULL;');
+    expect(col(r, 'd', 'n1').default).toBe('NULL');
+  });
+});
+
+// MySQL 8.0.46·8.4.11 실측: PRIMARY KEY 에 든 컬럼은 문장이 끝났을 때 NOT NULL 이다 (`DEFAULT NULL` 은 없어지고 다른 기본값은 남는다).
+// 컬럼 정의가 NULL 이나 DEFAULT NULL 을 명시했는데 PRIMARY KEY 에 있으면 1171. AUTO_INCREMENT 컬럼은 NULL 을 써도 NOT NULL
+describe('ALTER TABLE — 암묵적 NOT NULL (PRIMARY KEY·AUTO_INCREMENT)', () => {
+  const PK_BASE = parseSqlDump(tdExport([
+    'CREATE TABLE `pk1` (\n  `id` int NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `v` (`v`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    'CREATE TABLE `pk2` (\n  `a` int NOT NULL,\n  `b` int NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`a`,`b`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    "CREATE TABLE `np` (\n  `c` int DEFAULT NULL,\n  `d` int DEFAULT '5',\n  `v` int DEFAULT NULL,\n  UNIQUE KEY `uq_c` (`c`),\n  KEY `v` (`v`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",
+  ].join('\n\n'))).model;
+  const run = (script: string) => applyScript(PK_BASE, script, { schemaName: 'shop' });
+  const runOk = (script: string) => {
+    const r = run(script);
+    if (!r.ok) throw new Error(`${r.error.index}: ${r.error.reason}`);
+    return r;
+  };
+  const rejects = (script: string, errno: string) => expect(run(script)).toMatchObject({ ok: false, error: { reason: expect.stringContaining(errno) } });
+  const notNullNoDefault = (r: { model: SchemaModel }, table: string, name: string) => {
+    const c = col(r, table, name);
+    expect(c.nullable).toBe(false);
+    expect('default' in c).toBe(false);
+  };
+
+  it('PRIMARY KEY 컬럼을 NOT NULL 없이 MODIFY·CHANGE 하면 NOT NULL 로 남고, 명시한 다른 기본값은 남는다', () => {
+    notNullNoDefault(runOk('ALTER TABLE pk1 MODIFY id bigint;'), 'pk1', 'id');
+    notNullNoDefault(runOk('ALTER TABLE pk2 MODIFY b bigint;'), 'pk2', 'b');
+    expect(col(runOk('ALTER TABLE pk1 MODIFY id int DEFAULT 5;'), 'pk1', 'id')).toMatchObject({ nullable: false, default: "'5'" });
+    const changed = runOk('ALTER TABLE pk1 CHANGE id id2 bigint;');
+    notNullNoDefault(changed, 'pk1', 'id2');
+    expect(tbl(changed, 'pk1').indexes[0]).toMatchObject({ kind: 'PRIMARY', parts: [{ column: 'id2' }] });
+  });
+
+  it.each([
+    ['ALTER TABLE pk1 MODIFY id int NULL;'],
+    ['ALTER TABLE pk1 CHANGE id id2 int NULL;'],
+    ['ALTER TABLE pk1 MODIFY id int DEFAULT NULL;'], // DEFAULT NULL 도 NULL 을 명시한 것
+    ['ALTER TABLE pk1 MODIFY id int NULL DEFAULT NULL;'],
+    ['ALTER TABLE pk2 MODIFY b int NULL;'],
+    ['ALTER TABLE pk1 MODIFY id int NULL AUTO_INCREMENT;'], // AUTO_INCREMENT 가 NOT NULL 을 만들어도 PK 에서는 명시한 NULL 이 먼저 걸린다
+    ['ALTER TABLE pk1 MODIFY id int DEFAULT NULL AUTO_INCREMENT;'],
+  ])('PRIMARY KEY 컬럼에 NULL 을 명시하면 1171: %s', (script) => {
+    rejects(script, '1171');
+  });
+
+  it('새 PRIMARY KEY 도 같다: NULL 을 명시한 컬럼은 1171 (절 순서·MODIFY/ADD COLUMN 무관), 명시하지 않았으면 NOT NULL', () => {
+    rejects('ALTER TABLE np MODIFY c INT NULL, ADD PRIMARY KEY (c);', '1171');
+    rejects('ALTER TABLE np ADD PRIMARY KEY (c), MODIFY c INT NULL;', '1171');
+    rejects('ALTER TABLE np MODIFY c INT DEFAULT NULL, ADD PRIMARY KEY (c);', '1171');
+    rejects('ALTER TABLE np ADD COLUMN x INT NULL, ADD PRIMARY KEY (x);', '1171');
+    rejects('ALTER TABLE np ADD COLUMN x INT DEFAULT NULL, ADD PRIMARY KEY (x);', '1171');
+    rejects('ALTER TABLE np ADD COLUMN x INT NULL AUTO_INCREMENT, ADD PRIMARY KEY (x);', '1171');
+    notNullNoDefault(runOk('ALTER TABLE np MODIFY c INT, ADD PRIMARY KEY (c);'), 'np', 'c');
+    notNullNoDefault(runOk('ALTER TABLE np ADD COLUMN x INT, ADD PRIMARY KEY (x);'), 'np', 'x');
+    notNullNoDefault(runOk('ALTER TABLE np ADD PRIMARY KEY (c);'), 'np', 'c'); // 문장에 쓰지 않은 기존 컬럼은 NULL 허용이었어도 조용히 NOT NULL
+    expect(col(runOk('ALTER TABLE np ADD PRIMARY KEY (d);'), 'np', 'd')).toMatchObject({ nullable: false, default: "'5'" });
+  });
+
+  it('컬럼 정의 안의 PRIMARY KEY: NULL 은 1171, DEFAULT NULL 은 1067 (표 수준 PRIMARY KEY 와 번호가 다르다)', () => {
+    rejects('ALTER TABLE np ADD COLUMN x INT NULL PRIMARY KEY;', '1171');
+    rejects('ALTER TABLE np ADD COLUMN x INT DEFAULT NULL PRIMARY KEY;', '1067');
+    rejects('ALTER TABLE np ADD COLUMN x INT DEFAULT NULL AUTO_INCREMENT PRIMARY KEY;', '1171'); // AUTO_INCREMENT 가 있으면 1171
+    notNullNoDefault(runOk('ALTER TABLE np ADD COLUMN x INT PRIMARY KEY;'), 'np', 'x');
+  });
+
+  it('같은 문장에서 PRIMARY KEY 를 지우면 NULL 을 명시해도 된다 (절 순서 무관), 다시 더하면 1171', () => {
+    const a = runOk('ALTER TABLE pk1 MODIFY id int NULL, DROP PRIMARY KEY;');
+    expect(col(a, 'pk1', 'id')).toMatchObject({ nullable: true, default: 'NULL' });
+    expect(col(runOk('ALTER TABLE pk1 DROP PRIMARY KEY, MODIFY id int NULL;'), 'pk1', 'id').nullable).toBe(true);
+    rejects('ALTER TABLE pk1 MODIFY id int NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (id);', '1171');
+    const other = runOk('ALTER TABLE pk1 MODIFY id int NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (v);');
+    expect(col(other, 'pk1', 'id').nullable).toBe(true);
+    notNullNoDefault(other, 'pk1', 'v');
+  });
+
+  it('UNIQUE 키 컬럼은 NULL 허용으로 남는다', () => {
+    expect(col(runOk('ALTER TABLE np MODIFY c bigint;'), 'np', 'c')).toMatchObject({ nullable: true, default: 'NULL' });
+  });
+
+  it('AUTO_INCREMENT 컬럼은 NULL·DEFAULT NULL 을 써도 NOT NULL 이고 기본값이 없다 (PRIMARY KEY 가 아니어도)', () => {
+    notNullNoDefault(runOk('ALTER TABLE np MODIFY v int AUTO_INCREMENT;'), 'np', 'v');
+    notNullNoDefault(runOk('ALTER TABLE np MODIFY v int NULL AUTO_INCREMENT;'), 'np', 'v');
+    notNullNoDefault(runOk('ALTER TABLE np MODIFY v int DEFAULT NULL AUTO_INCREMENT;'), 'np', 'v');
+    notNullNoDefault(runOk('ALTER TABLE np MODIFY v int NOT NULL DEFAULT NULL AUTO_INCREMENT;'), 'np', 'v');
+    notNullNoDefault(runOk('ALTER TABLE np ADD COLUMN x int AUTO_INCREMENT UNIQUE;'), 'np', 'x');
+    notNullNoDefault(runOk('ALTER TABLE pk1 MODIFY id bigint AUTO_INCREMENT;'), 'pk1', 'id');
+    rejects('ALTER TABLE np MODIFY v int DEFAULT 5 AUTO_INCREMENT;', '1067');
+  });
+
+  it('NOT NULL 로 바꾸면 암묵적 DEFAULT NULL 은 없어진다', () => {
+    notNullNoDefault(runOk('ALTER TABLE np MODIFY v int NOT NULL;'), 'np', 'v');
+  });
+});
+
+// MySQL 8.0.46·8.4.11 실측: SHOW CREATE 는 FK 를 이름 순(소문자 코드 포인트 순)으로 찍고, 이름 없는 FK 의 번호는 문장 앞의 FK 이름 중 가장 큰 번호 + 1 부터다
+describe('ALTER TABLE — FK 목록 순서와 자동 번호', () => {
+  const fkNames = (r: { model: SchemaModel }, table = 'child') => tbl(r, table).foreignKeys.map((f) => f.name);
+  const ADD_RID = 'ADD COLUMN rid int unsigned';
+
+  it('직접 이름을 붙인 FK 는 이름 순 자리에 들어간다 (끝에 붙지 않는다)', () => {
+    expect(fkNames(okKeys(`ALTER TABLE child ${ADD_RID}, ADD CONSTRAINT child_fk FOREIGN KEY (rid) REFERENCES parent (id);`))).toEqual(['child_fk', 'child_ibfk_1', 'child_ibfk_2']);
+    expect(fkNames(okKeys(`ALTER TABLE child ${ADD_RID}, ADD CONSTRAINT Child_ZZ FOREIGN KEY (rid) REFERENCES parent (id);`))).toEqual(['child_ibfk_1', 'child_ibfk_2', 'Child_ZZ']);
+    expect(fkNames(okKeys(`ALTER TABLE child ${ADD_RID}, ADD CONSTRAINT CHILD_A FOREIGN KEY (rid) REFERENCES parent (id);`))).toEqual(['CHILD_A', 'child_ibfk_1', 'child_ibfk_2']);
+  });
+
+  it('이름 없는 FK 는 문장 앞 번호 다음이다: 지우는 FK 의 번호도 센다, 빈 번호는 되쓰지 않는다', () => {
+    expect(fkNames(okKeys(`ALTER TABLE child DROP FOREIGN KEY child_ibfk_2, ${ADD_RID}, ADD FOREIGN KEY (rid) REFERENCES parent (id);`))).toEqual(['child_ibfk_1', 'child_ibfk_3']);
+    expect(fkNames(okKeys(`ALTER TABLE child DROP FOREIGN KEY child_ibfk_1, DROP FOREIGN KEY child_ibfk_2, ${ADD_RID}, ADD FOREIGN KEY (rid) REFERENCES parent (id);`))).toEqual(['child_ibfk_3']);
+    expect(fkNames(okKeys(`ALTER TABLE child DROP CONSTRAINT child_ibfk_2, ${ADD_RID}, ADD FOREIGN KEY (rid) REFERENCES parent (id);`))).toEqual(['child_ibfk_1', 'child_ibfk_3']);
+    expect(fkNames(okKeys(`ALTER TABLE child ${ADD_RID}, ADD FOREIGN KEY (rid) REFERENCES parent (id), DROP FOREIGN KEY child_ibfk_1;`))).toEqual(['child_ibfk_2', 'child_ibfk_3']);
+    // 앞 문장에서 지운 번호는 문장이 끝났으니 센다 → 그 뒤 문장은 남은 FK 기준
+    expect(fkNames(okKeys(`ALTER TABLE child DROP FOREIGN KEY child_ibfk_2;\nALTER TABLE child ${ADD_RID}, ADD FOREIGN KEY (rid) REFERENCES parent (id);`))).toEqual(['child_ibfk_1', 'child_ibfk_2']);
+  });
+
+  it('번호에 빈 자리가 있어도 가장 큰 번호 + 1, 한 문장에서 이름 없이 여러 개 더하면 차례로', () => {
+    const gap = 'ALTER TABLE child ADD COLUMN r1 int unsigned, ADD CONSTRAINT child_ibfk_5 FOREIGN KEY (r1) REFERENCES parent (id);\n';
+    expect(fkNames(okKeys(`${gap}ALTER TABLE child ${ADD_RID}, ADD FOREIGN KEY (rid) REFERENCES parent (id);`))).toEqual(['child_ibfk_1', 'child_ibfk_2', 'child_ibfk_5', 'child_ibfk_6']);
+    expect(fkNames(okKeys('ALTER TABLE child ADD COLUMN r1 int unsigned, ADD COLUMN r2 int unsigned, ADD FOREIGN KEY (r1) REFERENCES parent (id), ADD FOREIGN KEY (r2) REFERENCES parent (id);'))).toEqual(['child_ibfk_1', 'child_ibfk_2', 'child_ibfk_3', 'child_ibfk_4']);
+  });
+
+  it('같은 문장에서 직접 쓴 이름은 번호에 영향을 주지 않는다: 이름 없는 FK 는 앞 번호 + 1, 이름이 겹치면 1826', () => {
+    expect(fkNames(okKeys('ALTER TABLE child ADD COLUMN r1 int unsigned, ADD COLUMN r2 int unsigned, ADD CONSTRAINT child_ibfk_7 FOREIGN KEY (r1) REFERENCES parent (id), ADD FOREIGN KEY (r2) REFERENCES parent (id);')))
+      .toEqual(['child_ibfk_1', 'child_ibfk_2', 'child_ibfk_3', 'child_ibfk_7']);
+    expect(applyKeys('ALTER TABLE child ADD COLUMN r1 int unsigned, ADD COLUMN r2 int unsigned, ADD FOREIGN KEY (r1) REFERENCES parent (id), ADD CONSTRAINT child_ibfk_3 FOREIGN KEY (r2) REFERENCES parent (id);'))
+      .toMatchObject({ ok: false, error: { reason: expect.stringContaining('1826') } });
+  });
+
+  it('테이블 이름을 바꾸면 자동 이름이 바뀌어 순서도 다시 정해진다 (RENAME TO 와 같은 문장에서 더한 FK 는 바뀐 이름으로 번호만 이어간다)', () => {
+    const named = `ALTER TABLE child ${ADD_RID}, ADD CONSTRAINT fk_m FOREIGN KEY (rid) REFERENCES parent (id);\n`;
+    expect(fkNames(okKeys(named), 'child')).toEqual(['child_ibfk_1', 'child_ibfk_2', 'fk_m']);
+    expect(fkNames(okKeys(`${named}ALTER TABLE child RENAME TO zzz;`), 'zzz')).toEqual(['fk_m', 'zzz_ibfk_1', 'zzz_ibfk_2']);
+    expect(fkNames(okKeys(`ALTER TABLE child ${ADD_RID}, ADD FOREIGN KEY (rid) REFERENCES parent (id), RENAME TO zzz;`), 'zzz')).toEqual(['zzz_ibfk_1', 'zzz_ibfk_2', 'zzz_ibfk_3']);
+    expect(fkNames(okKeys(`${named}ALTER TABLE child RENAME TO bbb;`), 'bbb')).toEqual(['bbb_ibfk_1', 'bbb_ibfk_2', 'fk_m']);
+  });
+
+  it('FK 를 더하거나 이름을 바꾸지 않는 문장은 순서를 건드리지 않는다', () => {
+    const r = okKeys("ALTER TABLE child COMMENT = 'x';");
+    expect(fkNames(r)).toEqual(['child_ibfk_1', 'child_ibfk_2']);
+  });
+});
+
+// MySQL 8.0.46·8.4.11 실측: 컬럼을 더하거나 FIRST·AFTER 를 준 MODIFY·CHANGE 는 절 순서대로 하나씩 목록에 들어간다.
+// AFTER 는 그때까지 목록에 든 컬럼(바뀐 컬럼은 새 이름)만 보므로, 뒤 절에서 더하거나 옮기는 컬럼을 앞서 가리키면 1054
+describe('ALTER TABLE — 컬럼 위치(FIRST·AFTER)는 절 순서대로', () => {
+  const POS_BASE = parseSqlDump(tdExport(
+    'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `a` int DEFAULT NULL,\n  `b` int DEFAULT NULL,\n  `c` int DEFAULT NULL,\n  `d` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+  )).model;
+  const order = (script: string) => {
+    const r = applyScript(POS_BASE, script, { schemaName: 'shop' });
+    if (!r.ok) throw new Error(`${r.error.index}: ${r.error.reason}`);
+    return tbl(r, 't').columns.map((c) => c.name).join(' ');
+  };
+
+  it.each([
+    ['ALTER TABLE t ADD x INT AFTER b, MODIFY a INT AFTER x;', 'id b x a c d'], // 앞 절이 더한 컬럼은 뒤 절의 AFTER 가 본다
+    ['ALTER TABLE t MODIFY a INT AFTER c, MODIFY b INT AFTER a;', 'id c a b d'],
+    ['ALTER TABLE t MODIFY b INT AFTER a, MODIFY a INT AFTER c;', 'id b c a d'], // 옮기기 전 위치의 a 를 b 가 본다
+    ['ALTER TABLE t ADD x INT, ADD y INT AFTER x;', 'id a b c d x y'],
+    ['ALTER TABLE t ADD x INT FIRST, ADD y INT FIRST;', 'y x id a b c d'],
+    ['ALTER TABLE t MODIFY c INT FIRST, MODIFY d INT FIRST;', 'd c id a b'],
+    ['ALTER TABLE t CHANGE b b2 INT, MODIFY a INT AFTER b2;', 'id b2 a c d'], // 위치 없는 CHANGE 는 제자리에서 새 이름이 된다
+    ['ALTER TABLE t CHANGE b b2 INT AFTER d, ADD y INT AFTER b2;', 'id a c d b2 y'],
+    ['ALTER TABLE t ADD y INT AFTER b2, CHANGE b b2 INT AFTER d;', 'id a y c d b2'], // 옮기기 전 자리의 b2 를 y 가 본다
+    ['ALTER TABLE t MODIFY a INT AFTER d, ADD x INT;', 'id b c d a x'],
+    ['ALTER TABLE t ADD x INT, MODIFY a INT AFTER x;', 'id b c d x a'],
+    ['ALTER TABLE t RENAME COLUMN a TO a2, ADD y INT AFTER a2;', 'id a2 y b c d'],
+    ['ALTER TABLE t MODIFY b INT FIRST, ADD x INT AFTER b;', 'b x id a c d'],
+    ['ALTER TABLE t ADD x INT AFTER b, MODIFY b INT FIRST;', 'b id a x c d'],
+    ['ALTER TABLE t MODIFY d INT AFTER a, MODIFY c INT AFTER a;', 'id a c d b'],
+    ['ALTER TABLE t ADD (x INT, y INT), MODIFY a INT AFTER y;', 'id b c d x y a'],
+    ['ALTER TABLE t MODIFY a BIGINT, MODIFY b INT AFTER a;', 'id a b c d'],
+    ['ALTER TABLE t MODIFY a INT FIRST, MODIFY b INT AFTER a;', 'a b id c d'],
+    ['ALTER TABLE t MODIFY b INT AFTER a, MODIFY a INT FIRST;', 'a id b c d'],
+  ])('%s → %s', (script, expected) => {
+    expect(order(script)).toBe(expected);
+  });
+
+  it.each([
+    ['ALTER TABLE t MODIFY a INT AFTER x, ADD x INT AFTER b;'], // 뒤 절이 더하는 컬럼
+    ['ALTER TABLE t ADD y INT AFTER x, ADD x INT;'],
+    ['ALTER TABLE t MODIFY a INT AFTER a;'], // 자기 자신
+    ['ALTER TABLE t CHANGE b b2 INT, MODIFY a INT AFTER b;'], // 옛 이름
+    ['ALTER TABLE t RENAME COLUMN a TO a2, ADD y INT AFTER a;'],
+    ['ALTER TABLE t DROP COLUMN b, ADD y INT AFTER b;'], // 지운 컬럼
+    ['ALTER TABLE t ADD y INT AFTER nope;'],
+  ])('AFTER 가 아직 목록에 없는 컬럼을 가리키면 1054: %s', (script) => {
+    expect(applyScript(POS_BASE, script, { schemaName: 'shop' })).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1054') } });
+  });
+});
+
+// MySQL 8.0.46·8.4.11 실측: 같은 컬럼을 두 번 지우면 1091, 같은 문장의 두 번째 참조(MODIFY·ALTER COLUMN·RENAME COLUMN 의 어떤 짝이든)는 1054
+describe('ALTER TABLE — 컬럼 중복 절', () => {
+  it.each([
+    ['ALTER TABLE member DROP COLUMN age, DROP COLUMN age;', '1091'],
+    ['ALTER TABLE member DROP COLUMN age, DROP COLUMN AGE;', '1091'],
+    ['ALTER TABLE member MODIFY age INT, ALTER COLUMN age SET DEFAULT 1;', '1054'],
+    ['ALTER TABLE member MODIFY age INT, MODIFY age BIGINT;', '1054'],
+    ['ALTER TABLE member ALTER COLUMN age SET DEFAULT 1, ALTER COLUMN age DROP DEFAULT;', '1054'],
+    ['ALTER TABLE member ALTER COLUMN age SET INVISIBLE, ALTER COLUMN age SET DEFAULT 1;', '1054'],
+    ['ALTER TABLE member MODIFY age INT, RENAME COLUMN age TO a2;', '1054'],
+    ['ALTER TABLE member RENAME COLUMN age TO a2, RENAME COLUMN a2 TO a3;', '1054'], // a2 는 이 문장 앞에는 없는 이름
+    ['ALTER TABLE member DROP COLUMN age, MODIFY age INT;', '1054'],
+  ])('%s → %s', (script, errno) => {
+    expect(apply(script)).toMatchObject({ ok: false, error: { reason: expect.stringContaining(`(MySQL ${errno})`) } });
+  });
+});
+
+// MySQL 8.0.46·8.4.11 실측: 스토리지 엔진을 InnoDB 가 아닌 것으로 바꾸려면 테이블이 FK 에 참여하지 않아야 한다 (3776) —
+// 자기 FK 가 있거나 다른 테이블 FK 가 참조해도 거부이고, 같은 문장에서 FK 를 지워도·FOREIGN_KEY_CHECKS=0 이어도 같다. InnoDB 로의 변경은 그대로 받는다
+describe('ALTER TABLE — ENGINE 변경과 FK', () => {
+  const engineOf = (r: { model: SchemaModel }, table: string) => tbl(r, table).options.find((o) => o.key === 'ENGINE')!.value;
+  const rejects3776 = (script: string) => expect(applyKeys(script)).toMatchObject({ ok: false, error: { reason: expect.stringMatching(/3776/) } });
+
+  it.each([
+    ['ALTER TABLE child ENGINE=MyISAM;'], // 자기 FK
+    ['ALTER TABLE parent ENGINE=MyISAM;'], // 다른 테이블 FK 가 참조
+    ['ALTER TABLE child ENGINE=MEMORY;'],
+    ['ALTER TABLE child DROP FOREIGN KEY child_ibfk_1, DROP FOREIGN KEY child_ibfk_2, ENGINE=MyISAM;'], // 같은 문장에서 FK 를 지워도
+    ['SET FOREIGN_KEY_CHECKS = 0; ALTER TABLE parent ENGINE=MyISAM;'],
+    ['SET FOREIGN_KEY_CHECKS = 0; ALTER TABLE child ENGINE=CSV;'],
+    ['ALTER TABLE doc ADD COLUMN pid int, ADD FOREIGN KEY (pid) REFERENCES doc (id);\nALTER TABLE doc ENGINE=MyISAM;'], // 자기 참조 FK
+  ])('FK 에 참여하는 테이블의 엔진을 바꾸면 3776: %s', (script) => {
+    rejects3776(script);
+  });
+
+  it('FK 가 없고 참조도 받지 않는 테이블은 바꾼다 (이름은 MySQL 표기), InnoDB 로의 변경은 FK 가 있어도 그대로 받는다', () => {
+    expect(engineOf(okKeys('ALTER TABLE doc ENGINE=myisam;'), 'doc')).toBe('MyISAM');
+    expect(engineOf(okKeys('ALTER TABLE doc ENGINE=MyISAM;\nALTER TABLE doc ENGINE=InnoDB;'), 'doc')).toBe('InnoDB');
+    expect(engineOf(okKeys('ALTER TABLE child ENGINE=InnoDB;'), 'child')).toBe('InnoDB');
+    expect(engineOf(okKeys('ALTER TABLE parent ENGINE=innodb;'), 'parent')).toBe('InnoDB');
+  });
+
+  it('앞 문장에서 FK 를 모두 지웠으면 그 뒤 문장에서는 바꾼다', () => {
+    const r = okKeys('ALTER TABLE child DROP FOREIGN KEY child_ibfk_1, DROP FOREIGN KEY child_ibfk_2;\nALTER TABLE parent ENGINE=MyISAM;\nALTER TABLE child ENGINE=MyISAM;');
+    expect(engineOf(r, 'parent')).toBe('MyISAM');
+    expect(engineOf(r, 'child')).toBe('MyISAM');
+  });
+});
+
+// MySQL 8.0.46·8.4.11 실측: 같은 문장에서 컬럼을 지우고 같은 이름으로 다시 더하면 그 컬럼을 쓰던 키 파트가 새 컬럼에 남는다 (컬럼은 목록 끝으로 간다).
+// 같은 타입이면 키는 그대로이고, 타입이 다르면 MySQL 이 옛 키 파트의 바이트 길이를 prefix 로 넘겨 결과가 갈린다 (모델에서 재현하지 않고 거부한다)
+describe('ALTER TABLE — 컬럼을 지우고 같은 이름으로 다시 더하기', () => {
+  const RE_BASE = parseSqlDump(tdExport([
+    'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `name` varchar(50) DEFAULT NULL,\n  `age` int DEFAULT NULL,\n  `title` varchar(20) DEFAULT NULL,\n  `code` varchar(10) NOT NULL,\n  `v` varchar(20) DEFAULT NULL,\n  `note` text,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `uq_age` (`age`),\n  KEY `name_age` (`name`,`age`),\n  KEY `ix_title` (`title`(10)),\n  KEY `ix_code` (`code`),\n  FULLTEXT KEY `ft` (`v`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+  ].join('\n\n'))).model;
+  const runRe = (script: string) => applyScript(RE_BASE, script, { schemaName: 'shop' });
+  const okRe = (script: string) => {
+    const r = runRe(script);
+    if (!r.ok) throw new Error(`${r.error.index}: ${r.error.reason}`);
+    return r;
+  };
+  const keyOf = (r: { model: SchemaModel }, name: string) => tbl(r, 't').indexes.find((i) => i.name === name);
+  const names = (r: { model: SchemaModel }) => tbl(r, 't').columns.map((c) => c.name).join(' ');
+
+  it('같은 타입으로 다시 더하면 키 파트가 따라온다: 컬럼은 끝으로 가고 UNIQUE·복합 키·PRIMARY KEY 가 그대로다', () => {
+    const r = okRe('ALTER TABLE t DROP COLUMN age, ADD age INT;');
+    expect(names(r)).toBe('id name title code v note age');
+    expect(keyOf(r, 'uq_age')).toMatchObject({ kind: 'UNIQUE', parts: [{ column: 'age' }] });
+    expect(keyOf(r, 'name_age')!.parts.map((p) => p.column)).toEqual(['name', 'age']);
+    const reversed = okRe('ALTER TABLE t ADD age INT, DROP COLUMN age;'); // 절 순서와 상관없다
+    expect(names(reversed)).toBe('id name title code v note age');
+    expect(keyOf(reversed, 'uq_age')).toBeDefined();
+    const pk = okRe('ALTER TABLE t DROP COLUMN id, ADD id INT;');
+    expect(names(pk)).toBe('name age title code v note id');
+    expect(col(pk, 't', 'id')).toMatchObject({ nullable: false });
+    expect(tbl(pk, 't').indexes[0]).toMatchObject({ kind: 'PRIMARY', parts: [{ column: 'id' }] });
+  });
+
+  it('타입 모양이 같으면(정수 부호·문자셋·NULL 허용·위치는 상관없다) 받는다, prefix 도 그대로다', () => {
+    expect(col(okRe('ALTER TABLE t DROP COLUMN age, ADD age INT UNSIGNED;'), 't', 'age').type).toBe('int unsigned');
+    expect(names(okRe('ALTER TABLE t DROP COLUMN age, ADD age INT NOT NULL FIRST;'))).toBe('age id name title code v note');
+    expect(keyOf(okRe('ALTER TABLE t DROP COLUMN title, ADD title varchar(20) CHARACTER SET latin1;'), 'ix_title')!.parts).toEqual([{ column: 'title', length: 10, desc: false }]);
+    expect(keyOf(okRe('ALTER TABLE t DROP COLUMN v, ADD v varchar(30);'), 'ft')).toMatchObject({ kind: 'FULLTEXT' }); // FULLTEXT 는 길이와 상관없다
+  });
+
+  it('키를 같은 문장에서 지우면 그 키만 없어지고, 다른 컬럼 이름이 바뀌어 같은 이름이 된 경우는 따라오지 않는다', () => {
+    const dropped = okRe('ALTER TABLE t DROP COLUMN age, ADD age INT, DROP INDEX name_age;');
+    expect(keyOf(dropped, 'name_age')).toBeUndefined();
+    expect(keyOf(dropped, 'uq_age')).toBeDefined();
+    const renamedOnto = okRe('ALTER TABLE t DROP COLUMN age, CHANGE name age VARCHAR(50);'); // 지운 age 의 파트만 빠지고 name 의 파트는 이름을 따라간다
+    expect(keyOf(renamedOnto, 'uq_age')).toBeUndefined();
+    expect(keyOf(renamedOnto, 'name_age')!.parts.map((p) => p.column)).toEqual(['age']);
+    const swapped = okRe('ALTER TABLE t DROP COLUMN name, RENAME COLUMN age TO name;');
+    expect(keyOf(swapped, 'uq_age')!.parts.map((p) => p.column)).toEqual(['name']);
+    expect(keyOf(swapped, 'name_age')!.parts.map((p) => p.column)).toEqual(['name']);
+  });
+
+  it('키에 든 컬럼을 다른 타입으로 다시 더하면 거부한다 (재추출 안내), 키에 없는 컬럼은 무엇으로든 다시 더한다', () => {
+    for (const script of [
+      'ALTER TABLE t DROP COLUMN age, ADD age VARCHAR(5);', // MySQL: KEY (age(4))
+      'ALTER TABLE t DROP COLUMN age, ADD age SMALLINT;', // MySQL: 1089
+      'ALTER TABLE t DROP COLUMN id, ADD id BIGINT;', // MySQL: 1089
+      'ALTER TABLE t DROP COLUMN title, ADD title varchar(5);', // MySQL: 1089 (prefix 10)
+      'ALTER TABLE t DROP COLUMN title, ADD title varchar(30);', // MySQL: KEY (title(10)) 유지 — 타입 문자열이 달라 거부
+      'ALTER TABLE t DROP COLUMN code, ADD code text;', // MySQL: KEY (code(10))
+      'ALTER TABLE t DROP COLUMN code, ADD code varchar(300);', // MySQL: KEY (code(10))
+    ]) {
+      expect(runRe(script), script).toMatchObject({ ok: false, error: { reason: expect.stringContaining(RE_EXPORT) } });
+    }
+    expect(col(okRe('ALTER TABLE t DROP COLUMN note, ADD note int;'), 't', 'note').type).toBe('int');
+  });
+
+  it('FULLTEXT 컬럼을 문자열이 아닌 타입으로 다시 더하면 1283, PRIMARY KEY 에 NULL 을 명시하면 1171, FK 컬럼이면 1828·1829', () => {
+    expect(runRe('ALTER TABLE t DROP COLUMN v, ADD v int;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1283') } });
+    expect(runRe('ALTER TABLE t DROP COLUMN id, ADD id INT NULL;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1171') } });
+    expect(applyKeys('ALTER TABLE child DROP COLUMN pid, ADD pid int unsigned;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1828') } });
+    expect(applyKeys('ALTER TABLE parent DROP COLUMN id, ADD id int unsigned;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1829') } });
   });
 });

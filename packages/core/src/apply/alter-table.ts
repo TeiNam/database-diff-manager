@@ -1,15 +1,16 @@
 // ALTER TABLE 한 문장. 절 순서와 무관하게 MySQL 과 같은 단계로 적용한다 (sql_table.cc mysql_prepare_alter_table):
 // 1) 기존 컬럼 삭제 2) 기존 컬럼 변경 — 이름은 문장 전 컬럼 기준 (RENAME COLUMN a TO b, b TO a 맞바꾸기가 된다) 3) 컬럼 추가
-// 4) 위치(FIRST·AFTER) 5) 키 삭제 → 남은 키에 컬럼 삭제·이름 변경 반영, 바꾼(MODIFY·CHANGE) 컬럼의 키 파트 길이·타입 맞춤 → 인덱스 이름 변경·가시성
-// 6) 키 추가(컬럼 정의 안의 PRIMARY KEY·UNIQUE 포함), FK 자동 인덱스 7) 검사(NOT NULL 이 된 SET NULL FK 컬럼 포함)·키 순서 8) 테이블 옵션
-// 9) 다른 테이블 FK 가 참조하는 컬럼 이름 10) 테이블 이름 변경
+// 4) 위치(FIRST·AFTER) — 3·4 는 컬럼을 더하는 절과 위치를 준 절을 절 순서대로 하나씩 5) 키 삭제 → 남은 키에 컬럼 삭제·이름 변경 반영
+// (지우고 같은 이름으로 다시 더한 컬럼의 키는 남는다), 바꾼(MODIFY·CHANGE) 컬럼의 키 파트 길이·타입 맞춤 → 인덱스 이름 변경·가시성
+// 6) 키 추가(컬럼 정의 안의 PRIMARY KEY·UNIQUE 포함), FK 자동 인덱스, FK 이름 순 정렬 7) PRIMARY KEY 컬럼 NOT NULL, 검사(NOT NULL 이 된 SET NULL FK 컬럼 포함)·키 순서
+// 8) 테이블 옵션 9) 다른 테이블 FK 가 참조하는 컬럼 이름 10) 테이블 이름 변경
 import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
-import { addKeys, checkNowNotNull, checkTable, columnKeyItems, dropKeys, exprUses, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortIndexes, type KeyDrop } from './keys';
+import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, enforcePrimaryKeyNotNull, exprUses, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
 import { splitList } from './lists';
-import { baseType, BLOB_TYPES, effectiveCollation, finalizeColumn, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
+import { effectiveCollation, finalizeColumn, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { engineName, optionValue, parseCommonOption, setOption } from './options';
 import { findColumn, needTable, objectName, replaceTable, sameName, type State } from './state';
 import { renameTable } from './table-stmt';
@@ -37,7 +38,6 @@ type Clause =
 interface Entry {
   from?: string; // 문장 전 이름 (새 컬럼은 없음)
   col: Column;
-  pos: Position;
 }
 
 export function alterTable(st: State, c: Cursor): void {
@@ -176,9 +176,9 @@ function withDefault(col: Column, value: string | undefined): Column {
   return value === undefined ? next : { ...next, default: value };
 }
 
-// DROP DEFAULT: 기본값이 없어진다. NULL 허용 컬럼은 SHOW CREATE 에 DEFAULT NULL 로 보인다 (TEXT·BLOB 계열은 DEFAULT 가 보이지 않는다)
-const dropDefault = (col: Column): Column =>
-  withDefault(col, col.nullable && !col.autoIncrement && !BLOB_TYPES.has(baseType(col.type)) ? 'NULL' : undefined);
+// DROP DEFAULT: DEFAULT 절이 없어진다. NULL 허용 컬럼도 `DEFAULT NULL` 이 사라진다 (MySQL 8.0.46·8.4.11 실측: `n1 varchar(10)` 으로 찍힌다).
+// 그 뒤 SET DEFAULT NULL 을 하면 다시 `DEFAULT NULL` 이 보인다
+const dropDefault = (col: Column): Column => withDefault(col, undefined);
 
 // 테이블 옵션 (쉼표 없이 이어 쓸 수 있다). ROW_FORMAT=DEFAULT·KEY_BLOCK_SIZE=0·COMMENT='' 는 옵션을 지운다
 function parseOptions(c: Cursor): Clause[] {
@@ -202,30 +202,21 @@ function parseOptions(c: Cursor): Clause[] {
 function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { table: Table; renamed: Map<string, string> } {
   const charset = tableCharset(before.options, st.defaults);
   const pick = <K extends Clause['k']>(k: K) => clauses.filter((x): x is Extract<Clause, { k: K }> => x.k === k);
-  const keyDrops = pick('dropKey');
-  // 1) 기존 컬럼 삭제
-  const dropped = new Set(pick('dropColumn').map((d) => (findColumn(before, d.name) ?? fail(`컬럼 \`${d.name}\` 이 없습니다 (MySQL 1091)`)).name.toLowerCase()));
-  // 2) 기존 컬럼 변경 (이름은 문장 전 기준)
-  const entries: Entry[] = before.columns.filter((col) => !dropped.has(col.name.toLowerCase())).map((col) => ({ from: col.name, col, pos: undefined }));
-  changeColumns(st, before, entries, clauses, charset);
-  // 3) 컬럼 추가 4) 위치
-  for (const a of pick('add')) entries.push({ col: finalizeColumn(a.spec, charset), pos: a.pos });
-  for (const e of entries.filter((x) => x.pos)) placeEntry(entries, e);
+  assertEngineChangeAllowed(st, before, pick('option'));
+  const dropped = droppedColumns(before, pick('dropColumn')); // 1) 기존 컬럼 삭제
+  const entries = arrangeColumns(st, before, clauses, charset, dropped); // 2) 기존 컬럼 변경 (이름은 문장 전 기준) 3) 컬럼 추가 4) 위치
   assertUniqueColumns(entries);
   const renamed = new Map(entries.filter((e) => e.from !== undefined && e.from !== e.col.name).map((e) => [e.from!.toLowerCase(), e.col.name]));
-  assertNoDependents(st, before, dropped, renamed, keyDrops);
+  assertNoDependents(st, before, dropped, renamed, pick('dropKey'));
   updateColumnOrigins(st, before.name, entries);
-  // 5) 키 삭제 → 컬럼 변화 반영(바꾼 컬럼의 키 파트 길이·타입 맞춤 포함) → 인덱스 이름 변경·가시성
-  let t = remapKeys(dropKeys({ ...before, columns: entries.map((e) => e.col) }, keyDrops), dropped, renamed);
-  t = refitKeyParts(t, new Set(pick('modify').map((m) => m.spec.name.toLowerCase())));
+  let t = keepKeys(before, entries, clauses, dropped, renamed); // 5) 키 삭제 → 컬럼 변화 반영 → 인덱스 이름 변경·가시성
   for (const r of pick('renameIndex')) {
     t = renameIndex(t, r.old, r.to);
     moveIndexOrigin(st, before.name, r.old, r.to);
   }
   for (const v of pick('indexVisibility')) t = setIndexVisibility(t, v.name, v.invisible);
-  // 6) 키 추가와 FK 자동 인덱스
-  t = addKeys(st, t, pick('key').map((x) => x.item));
-  // 7) 검사·키 순서 8) 테이블 옵션
+  t = addConstraints(st, before, t, pick('key').map((x) => x.item)); // 6) 키 추가와 FK 자동 인덱스
+  t = enforcePrimaryKeyNotNull(t, explicitNullColumns(clauses)); // 7) PRIMARY KEY 컬럼 NOT NULL·검사·키 순서 8) 테이블 옵션
   checkNowNotNull(before, t, renamed);
   checkTable(st, t, renamed);
   t = { ...t, indexes: sortIndexes(t) };
@@ -234,12 +225,74 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   return { table: t, renamed };
 }
 
-function changeColumns(st: State, before: Table, entries: Entry[], clauses: readonly Clause[], charset: TableCharset): void {
+// 지우는 컬럼 (소문자 이름). 같은 컬럼을 두 번 지우면 MySQL 은 1091 (대소문자 무시, 실측)
+function droppedColumns(before: Table, drops: readonly Extract<Clause, { k: 'dropColumn' }>[]): Set<string> {
+  const dropped = new Set<string>();
+  for (const d of drops) {
+    const name = (findColumn(before, d.name) ?? fail(`컬럼 \`${d.name}\` 이 없습니다 (MySQL 1091)`)).name.toLowerCase();
+    if (dropped.has(name)) fail(`컬럼 \`${d.name}\` 을 두 번 지울 수 없습니다 (MySQL 1091)`);
+    dropped.add(name);
+  }
+  return dropped;
+}
+
+// 5) 키 삭제 → 남은 키에 컬럼 삭제·이름 변경 반영 → 바꾼 컬럼의 키 파트 길이·타입 맞춤. 같은 문장에서 지우고 같은 이름으로 다시 더한 컬럼의 키 파트는
+// 새 컬럼에 남는다 (컬럼 이름이 같아졌을 뿐인 CHANGE·RENAME COLUMN 대상에는 안 남는다 — MySQL 8.0.46·8.4.11 실측)
+function keepKeys(before: Table, entries: readonly Entry[], clauses: readonly Clause[], dropped: ReadonlySet<string>, renamed: ReadonlyMap<string, string>): Table {
+  const added = new Set(clauses.flatMap((x) => (x.k === 'add' ? [x.spec.name.toLowerCase()] : [])));
+  const readded = new Set([...dropped].filter((n) => added.has(n)));
+  const keyDrops = clauses.filter((x): x is Extract<Clause, { k: 'dropKey' }> => x.k === 'dropKey');
+  const t = remapKeys(dropKeys({ ...before, columns: entries.map((e) => e.col) }, keyDrops), new Set([...dropped].filter((n) => !readded.has(n))), renamed);
+  assertReaddedKeysFit(before, t, readded);
+  const modified = clauses.flatMap((x) => (x.k === 'modify' ? [x.spec.name.toLowerCase()] : []));
+  return refitKeyParts(t, new Set([...modified, ...readded]));
+}
+
+// 6) 키 추가와 FK 자동 인덱스. 이름 없는 FK 번호는 이 문장 앞의 FK 이름(지우는 것 포함) 기준이고, FK 를 더했으면 SHOW CREATE 순서(이름 순)로 다시 놓는다
+function addConstraints(st: State, before: Table, t: Table, items: readonly ConstraintItem[]): Table {
+  const next = addKeys(st, t, items, before.foreignKeys.map((f) => f.name));
+  return items.some((i) => i.kind === 'fk') ? { ...next, foreignKeys: sortForeignKeys(next.foreignKeys) } : next;
+}
+
+// ENGINE 를 InnoDB 가 아닌 것으로 바꾸려면 테이블이 FK 에 참여하지 않아야 한다 (MySQL 8.0.46·8.4.11 실측 3776): 자기 FK 가 있거나 다른 테이블 FK 가 참조하면 거부이고,
+// 같은 문장에서 FK 를 지워도·FOREIGN_KEY_CHECKS=0 이어도 같다. InnoDB 로의 변경은 FK 가 있어도 받는다
+function assertEngineChangeAllowed(st: State, before: Table, options: readonly Extract<Clause, { k: 'option' }>[]): void {
+  const engine = options.filter((o) => o.key === 'ENGINE').at(-1)?.value;
+  if (engine === undefined || engine === 'InnoDB') return;
+  const isReferenced = st.model.tables.some((x) => x.foreignKeys.some((f) => f.refTable === before.name && f.refSchema === undefined));
+  if (before.foreignKeys.length || isReferenced) fail(`테이블 \`${before.name}\` 은 FK 에 참여해서 스토리지 엔진을 InnoDB 에서 ${engine} 엔진으로 바꿀 수 없습니다 (MySQL 3776)`);
+}
+
+// 이 문장의 컬럼 정의가 NULL 이나 DEFAULT NULL 을 쓴 컬럼의 (최종) 이름, 소문자 — PRIMARY KEY 에 있으면 1171 (enforcePrimaryKeyNotNull)
+function explicitNullColumns(clauses: readonly Clause[]): Set<string> {
+  const specs = clauses.flatMap((x) => (x.k === 'add' || x.k === 'modify' ? [x.spec] : []));
+  return new Set(specs.filter((s) => s.nullable === true || s.default?.kind === 'null').map((s) => s.name.toLowerCase()));
+}
+
+// 2) 기존 컬럼 변경 3) 컬럼 추가 4) 위치. 컬럼을 더하는 절과 FIRST·AFTER 를 준 MODIFY·CHANGE 는 절 순서대로 하나씩 목록에 넣는다 — MySQL 8.0.46·8.4.11 실측:
+// AFTER 는 그때까지 목록에 든 컬럼(바뀐 컬럼은 새 이름)만 보므로, 뒤 절에서 더하거나 옮기는 컬럼을 앞서 가리키면 1054. 옮기는 컬럼은 옮기기 전 자리에 있다가 자기 절 차례에 빠져나온다
+function arrangeColumns(st: State, before: Table, clauses: readonly Clause[], charset: TableCharset, dropped: ReadonlySet<string>): Entry[] {
+  const list: Entry[] = before.columns.filter((col) => !dropped.has(col.name.toLowerCase())).map((col) => ({ from: col.name, col }));
+  const moved = changeColumns(st, before, list, clauses, charset);
+  for (const ch of clauses) {
+    if (ch.k === 'add') insertEntry(list, { col: finalizeColumn(ch.spec, charset) }, ch.pos);
+    else if (ch.k === 'modify' && moved.has(ch)) {
+      const e = moved.get(ch)!;
+      list.splice(list.indexOf(e), 1);
+      insertEntry(list, e, ch.pos);
+    }
+  }
+  return list;
+}
+
+// 위치가 있는 MODIFY·CHANGE 절 → 그 컬럼. 컬럼 정의(타입·이름)는 여기서 바뀌고, 자리는 arrangeColumns 가 정한다
+function changeColumns(st: State, before: Table, entries: Entry[], clauses: readonly Clause[], charset: TableCharset): Map<Clause, Entry> {
   const touched = new Set<string>();
+  const moved = new Map<Clause, Entry>();
   for (const ch of clauses) {
     if (ch.k !== 'modify' && ch.k !== 'renameColumn' && ch.k !== 'alterColumn') continue;
     const e = entries.find((x) => x.from !== undefined && sameName(x.from, ch.old)) ?? fail(`컬럼 \`${ch.old}\` 이 없습니다 (MySQL 1054)`);
-    if (touched.has(e.from!)) fail(`한 문장에서 컬럼 \`${ch.old}\` 을 두 번 바꿀 수 없습니다`);
+    if (touched.has(e.from!)) fail(`한 문장에서 컬럼 \`${ch.old}\` 을 두 번 바꿀 수 없습니다 (MySQL 1054)`);
     touched.add(e.from!);
     if (ch.k === 'renameColumn') e.col = { ...e.col, name: ch.to };
     else if (ch.k === 'alterColumn') e.col = ch.set(e.col);
@@ -248,21 +301,20 @@ function changeColumns(st: State, before: Table, entries: Entry[], clauses: read
       const next = finalizeColumn(ch.spec, charset);
       assertRetypeAllowed(st, before, e.col, next, charset);
       e.col = next;
-      e.pos = ch.pos;
+      if (ch.pos) moved.set(ch, e);
     }
   }
+  return moved;
 }
 
-function placeEntry(entries: Entry[], e: Entry): void {
-  entries.splice(entries.indexOf(e), 1);
-  if (e.pos && 'first' in e.pos) {
-    entries.unshift(e);
-    return;
+function insertEntry(list: Entry[], e: Entry, pos: Position): void {
+  if (!pos) list.push(e);
+  else if ('first' in pos) list.unshift(e);
+  else {
+    const at = list.findIndex((x) => sameName(x.col.name, pos.after));
+    if (at < 0) fail(`AFTER 에 쓴 컬럼 \`${pos.after}\` 이 없습니다 (MySQL 1054)`);
+    list.splice(at + 1, 0, e);
   }
-  const after = (e.pos as { after: string }).after;
-  const at = entries.findIndex((x) => sameName(x.col.name, after));
-  if (at < 0) fail(`AFTER 에 쓴 컬럼 \`${after}\` 이 없습니다 (MySQL 1054)`);
-  entries.splice(at + 1, 0, e);
 }
 
 function assertUniqueColumns(entries: readonly Entry[]): void {
