@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyScript } from '../../src/apply';
+import { applyScript, printSqlDump } from '../../src/apply';
 import { isCreateRoutine } from '../../src/apply/object-stmt';
 import { DEFAULT_SQL_MODE, RE_EXPORT } from '../../src/apply/types';
 import { canonicalJson } from '../../src/canonical';
@@ -79,6 +79,36 @@ describe('CREATE FUNCTION·PROCEDURE', () => {
     expect(SHOP.routines).toHaveLength(2);
   });
 
+  // MySQL 8.0.46·8.4.11 실측 (mysql2 로 보낸 문장, information_schema.routines.routine_definition): DELIMITER 를 ';' 가 아닌 것으로 바꾸고 'RETURN x + 1; //' 처럼
+  // 끝에 ';' 를 함께 쓰면 본문에 ';' 가 들어가지 않는다 ('RETURN x + 1'). 공백이 끼어도(' ;'), ';' 가 여럿이어도(';;') 같다.
+  // 본문 안의 ';'(BEGIN … END)·문자열 속 ';' 와, 뒤에 주석이 따르는 ';' 는 그대로다
+  it("문장 끝의 ';' 는 본문이 아니다 (구분자를 바꾼 스크립트의 '…; //' 꼴)", () => {
+    const r = ok([
+      'DELIMITER //',
+      'CREATE FUNCTION fn_t(x INT) RETURNS INT DETERMINISTIC RETURN x + 1; //',
+      'CREATE PROCEDURE sp_t() SELECT 1 ; //',
+      'CREATE PROCEDURE sp_u()', 'BEGIN', '  SELECT 2;', 'END; //',
+      'CREATE FUNCTION fn_v() RETURNS INT DETERMINISTIC RETURN 1;; //',
+      "CREATE FUNCTION fn_w() RETURNS VARCHAR(5) DETERMINISTIC RETURN 'a;'; //",
+      'DELIMITER ;',
+    ].join('\n'));
+    const body = (name: string) => r.model.routines.find((x) => x.name === name)!.body;
+    expect(['fn_t', 'sp_t', 'sp_u', 'fn_v', 'fn_w'].map(body)).toEqual(['RETURN x + 1', 'SELECT 1', 'BEGIN\n  SELECT 2;\nEND', 'RETURN 1', "RETURN 'a;'"]);
+  });
+
+  it("끝의 ';' 를 뗀 루틴은 print·parse 왕복 경고가 없고 같은 모델이다", () => {
+    const r = ok('DELIMITER //\nCREATE FUNCTION fn_t(x INT) RETURNS INT DETERMINISTIC RETURN x + 1; //\nCREATE PROCEDURE sp_u()\nBEGIN\n  SELECT 2;\nEND; //\nDELIMITER ;');
+    const again = parseSqlDump(printSqlDump(r.model));
+    expect(again.warnings).toEqual([]);
+    expect(canonicalJson(again.model.routines)).toBe(canonicalJson(r.model.routines));
+  });
+
+  it("끝에 주석이 따르는 ';' 와 본문 끝의 줄 주석 속 ';' 는 건드리지 않는다", () => {
+    const r = ok('DELIMITER //\nCREATE FUNCTION fn_c() RETURNS INT DETERMINISTIC RETURN 1 -- end;\n//\nCREATE FUNCTION fn_d() RETURNS INT DETERMINISTIC RETURN 2; /* x */ //\nDELIMITER ;');
+    expect(r.model.routines.find((x) => x.name === 'fn_c')!.body).toBe('RETURN 1 -- end;');
+    expect(r.model.routines.find((x) => x.name === 'fn_d')!.body).toBe('RETURN 2; /* x */');
+  });
+
   it('IF NOT EXISTS 인데 없으면 만든다 (DEFINER 와 함께 써도 된다)', () => {
     const r = ok('CREATE DEFINER=`root`@`localhost` FUNCTION IF NOT EXISTS fn_new(a INT) RETURNS INT DETERMINISTIC RETURN a;\nCREATE PROCEDURE IF NOT EXISTS mark_paid() SELECT 1;');
     expect(r.model.routines.map((x) => x.name)).toEqual(['tax', 'mark_paid', 'fn_new']);
@@ -94,6 +124,9 @@ describe('CREATE FUNCTION·PROCEDURE', () => {
   it('RETURNS 의 CHARSET 은 스키마 기본 문자셋을 따르고, 직접 쓴 CHARSET·COLLATE 는 다시 뽑아 올리라고 안내한다', () => {
     const latin1 = applyScript(SHOP, "CREATE FUNCTION f_l() RETURNS VARCHAR(5) DETERMINISTIC RETURN 'a';", { schemaName: 'shop', defaults: { charset: 'latin1' } });
     expect(latin1.ok && latin1.model.routines.find((x) => x.name === 'f_l')!.returns).toBe('varchar(5) CHARSET latin1');
+    // 스키마 기본 콜레이션이 문자셋의 기본이 아니면 COLLATE 도 붙는다 (MySQL 8.0.46·8.4.11 실측)
+    const unicode = applyScript(SHOP, "CREATE FUNCTION f_u() RETURNS VARCHAR(5) DETERMINISTIC RETURN 'a';", { schemaName: 'shop', defaults: { charset: 'utf8mb4', collation: 'utf8mb4_unicode_ci' } });
+    expect(unicode.ok && unicode.model.routines.find((x) => x.name === 'f_u')!.returns).toBe('varchar(5) CHARSET utf8mb4 COLLATE utf8mb4_unicode_ci');
     const r = apply("CREATE FUNCTION f_c() RETURNS VARCHAR(5) CHARSET latin1 DETERMINISTIC RETURN 'a';");
     expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringMatching(/CHARSET·COLLATE/) } });
     expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);

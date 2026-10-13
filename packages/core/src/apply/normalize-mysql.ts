@@ -5,6 +5,7 @@ import { quoteString, tokenize, type Token } from '../lexer';
 import type { Column, TableOption } from '../model';
 import { normalizeType } from '../normalize';
 import { splitList } from './lists';
+import { TEMPORAL_TYPES, temporalDefault, type TemporalType } from './temporal-default';
 import { fail, RE_EXPORT, type ColumnSpec, type DefaultSpec, type NowSpec } from './types';
 
 export const INT_TYPES: ReadonlySet<string> = new Set(['tinyint', 'smallint', 'mediumint', 'int', 'bigint']);
@@ -191,6 +192,7 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   if (spec.kind === 'now') return nowText(col.type, spec, `컬럼 \`${col.name}\` 의 기본값`);
   if (base === 'bit') return spec.kind === 'bit' ? spec.value : /^\d+$/.test(spec.value) ? `b'${BigInt(spec.value).toString(2)}'` : bad(spec.value);
   if (spec.kind === 'bit') return bad(spec.value);
+  if (TEMPORAL_TYPES.has(base)) return temporalText(spec, col, base as TemporalType, bad);
   if (NUMERIC.has(base) || base === 'year') return quoteString(numericDefault(spec.value, col.type, bad));
   if (base === 'enum') {
     const wanted = trimTrailingSpaces(spec.value).toLowerCase();
@@ -198,6 +200,16 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   }
   if (base === 'set') return quoteString(setDefault(spec.value, col.type, bad));
   return quoteString(spec.value);
+}
+
+// 날짜·시간 컬럼의 문자열 기본값: MySQL 이 다시 쓰는 꼴로 맞춘다 (temporal-default.ts). 숫자 리터럴(20200101)과 표준이 아닌 꼴은 1차에서 받지 않는다
+const TEMPORAL_SHAPE: Readonly<Record<TemporalType, string>> = { date: 'YYYY-MM-DD', datetime: 'YYYY-MM-DD HH:MM:SS', timestamp: 'YYYY-MM-DD HH:MM:SS', time: 'HH:MM:SS' };
+
+function temporalText(spec: DefaultSpec, col: Pick<Column, 'name' | 'type'>, type: TemporalType, bad: (why: string) => never): string {
+  const result = spec.kind === 'string' ? temporalDefault(type, fspOf(col.type), spec.value) : undefined;
+  if (result && 'value' in result) return quoteString(result.value);
+  if (result && 'invalid' in result) return bad(result.invalid);
+  return fail(`컬럼 \`${col.name}\` 의 ${type.toUpperCase()} 기본값은 '${TEMPORAL_SHAPE[type]}' 꼴의 문자열로만 쓸 수 있습니다 (MySQL 이 값을 다시 써서 저장합니다) — ${RE_EXPORT}`);
 }
 
 // 숫자 모양 (부호, 정수부[.소수부] 또는 .소수부, 지수). 정수부와 소수부를 '.' 이 갈라 놓아 숫자가 아닌 긴 문자열에서도 선형이다 —
@@ -245,9 +257,14 @@ export function finalizeColumn(spec: ColumnSpec, table: TableCharset): Column {
   return col;
 }
 
-// 함수 RETURNS 타입: 타입 규칙으로 맞추고 문자열 타입이면 MySQL 처럼 ' CHARSET <스키마 기본 문자셋>' 을 붙인다
-export function routineReturns(raw: string, charset: string): string {
+// 함수 RETURNS 타입: 타입 규칙으로 맞추고 문자열 타입이면 MySQL 처럼 ' CHARSET <스키마 기본 문자셋>' 을 붙인다. 스키마 기본 콜레이션이 그 문자셋의 기본(primary)이 아니면
+// ' COLLATE <콜레이션>' 도 붙는다 (8.0.46·8.4.11 실측: utf8mb4_0900_ai_ci·latin1_swedish_ci·utf8mb3_general_ci 는 안 찍고 utf8mb4_unicode_ci·latin1_bin 은 찍는다).
+// collation 을 안 주면 문자셋의 기본 콜레이션이다
+export function routineReturns(raw: string, charset: string, collation?: string): string {
   if (/\b(CHARSET|CHARACTER\s+SET|COLLATE)\b/i.test(raw)) fail(`RETURNS 안의 CHARSET·COLLATE 는 1차 지원 범위가 아닙니다: ${raw} — ${RE_EXPORT}`);
   const type = normalizeUserType(raw);
-  return CHARSET_TYPES.has(baseType(type)) ? `${type} CHARSET ${canonicalCharset(charset)}` : type;
+  if (!CHARSET_TYPES.has(baseType(type))) return type;
+  const cs = canonicalCharset(charset);
+  const coll = collation === undefined ? primaryCollation(cs) : canonicalCollation(collation);
+  return `${type} CHARSET ${cs}${coll === primaryCollation(cs) ? '' : ` COLLATE ${coll}`}`;
 }

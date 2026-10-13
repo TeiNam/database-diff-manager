@@ -1,6 +1,7 @@
 // CREATE·DROP FUNCTION·PROCEDURE, DROP VIEW. 루틴 본문은 쓴 그대로 저장한다 (MySQL SHOW CREATE 도 그렇다)
 import { ParseError, type Cursor } from '../cursor';
 import { routineNameKey } from '../diff';
+import { tokenize } from '../lexer';
 import type { Routine, RoutineCharacteristics, RoutineKind } from '../model';
 import { parseRoutine } from '../parse-routine';
 import { isDefaultCharacteristic } from '../routine-defaults';
@@ -19,13 +20,22 @@ export const isCreateRoutine = (ddl: string): boolean => CREATE_ROUTINE_RE.test(
 // 루틴은 만들 때의 세션 SQL_MODE 를 기억한다. 이름은 대소문자를 구분하지 않는다
 export function createRoutine(st: State, ddl: string, noBackslashEscapes: boolean): void {
   const ifNotExists = IF_NOT_EXISTS_RE.test(ddl);
-  const r = readRoutine(ifNotExists ? ddl.replace(IF_NOT_EXISTS_RE, '$1') : ddl, noBackslashEscapes);
+  const r = readRoutine(withoutTerminator(ifNotExists ? ddl.replace(IF_NOT_EXISTS_RE, '$1') : ddl, noBackslashEscapes), noBackslashEscapes);
   if (st.model.routines.some((x) => x.kind === r.kind && routineNameKey(x.name) === routineNameKey(r.name))) {
     if (ifNotExists) return;
     fail(`${label(r.kind)} \`${r.name}\` 이 이미 있습니다 (MySQL 1304)`);
   }
-  const returns = r.returns === undefined ? {} : { returns: routineReturns(r.returns, st.defaults.charset) };
+  const returns = r.returns === undefined ? {} : { returns: routineReturns(r.returns, st.defaults.charset, st.defaults.collation) };
   st.model.routines = [...st.model.routines, { ...r, ...returns, sqlMode: st.sqlMode }];
+}
+
+// 문장 끝의 ';' 는 본문이 아니다: DELIMITER 를 바꾼 스크립트의 'RETURN x + 1; //' 에서 MySQL 은 본문을 'RETURN x + 1' 로 저장한다 (8.0.46·8.4.11 실측; 공백이 끼어도, ';' 가 여럿이어도 같다).
+// 본문 안의 ';' 는 마지막 토큰이 아니고, 뒤에 주석이 따르는 ';' 는 MySQL 도 본문에 남긴다. 둘 다 건드리지 않는다
+function withoutTerminator(ddl: string, noBackslashEscapes: boolean): string {
+  const toks = tokenize(ddl, { noBackslashEscapes });
+  let cut = ddl.length;
+  for (let i = toks.length - 1; i >= 0 && toks[i].t === 'op' && toks[i].v === ';' && /^\s*$/.test(ddl.slice(toks[i].e, cut)); i--) cut = toks[i].s;
+  return cut === ddl.length ? ddl : ddl.slice(0, cut).trimEnd();
 }
 
 function readRoutine(ddl: string, noBackslashEscapes: boolean): Routine {

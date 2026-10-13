@@ -236,6 +236,25 @@ describe('문자셋 (SHOW CREATE 표기)', () => {
     expect(routineReturns('VARCHAR(20)', 'utf8mb4')).toBe('varchar(20) CHARSET utf8mb4');
     expect(() => routineReturns('VARCHAR(20) CHARSET latin1', 'utf8mb4')).toThrow(ApplyFailure);
   });
+
+  // MySQL 8.0.46·8.4.11 실측 (스키마 기본 문자셋·콜레이션별 SHOW CREATE FUNCTION): 스키마 기본 콜레이션이 문자셋의 기본(primary) 콜레이션이 아니면 COLLATE 도 찍힌다.
+  // 테이블 옵션과 달리 utf8mb4_0900_ai_ci 는 찍지 않는다 (VARCHAR·TEXT·ENUM·CHAR 모두 같다)
+  it.each([
+    ['utf8mb4', 'utf8mb4_0900_ai_ci', 'CHARSET utf8mb4'],
+    ['utf8mb4', 'utf8mb4_unicode_ci', 'CHARSET utf8mb4 COLLATE utf8mb4_unicode_ci'],
+    ['utf8mb4', 'utf8mb4_general_ci', 'CHARSET utf8mb4 COLLATE utf8mb4_general_ci'],
+    ['utf8mb4', 'utf8mb4_bin', 'CHARSET utf8mb4 COLLATE utf8mb4_bin'],
+    ['utf8mb3', 'utf8mb3_general_ci', 'CHARSET utf8mb3'],
+    ['utf8mb3', 'utf8mb3_unicode_ci', 'CHARSET utf8mb3 COLLATE utf8mb3_unicode_ci'],
+    ['latin1', 'latin1_swedish_ci', 'CHARSET latin1'],
+    ['latin1', 'latin1_bin', 'CHARSET latin1 COLLATE latin1_bin'],
+    ['ascii', 'ascii_general_ci', 'CHARSET ascii'],
+  ])('routineReturns: 스키마 기본 %s / %s → %s', (charset, collation, suffix) => {
+    for (const [type, normalized] of [['VARCHAR(5)', 'varchar(5)'], ['TEXT', 'text'], ["ENUM('a','b')", "enum('a','b')"], ['CHAR(2)', 'char(2)']]) {
+      expect(routineReturns(type, charset, collation)).toBe(`${normalized} ${suffix}`);
+    }
+    expect(routineReturns('INT', charset, collation)).toBe('int'); // 문자열이 아니면 붙이지 않는다
+  });
 });
 
 describe('finalizeColumn', () => {
