@@ -8,7 +8,7 @@ import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
-import { assertAutoKeysKnown, assertTargetsKept, classifyFkIndexes, isFlagged, planAutoKeys, renameProvenance, shrunkIndexes, syncProvenance, withoutNames, type AutoKeyPlan } from './auto-index';
+import { assertTargetsKept, classifyFkIndexes, isFlagged, planAutoKeys, renameProvenance, shrunkIndexes, syncProvenance, withoutNames, type AutoKeyPlan } from './auto-index';
 import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, dropSoleColumnChecks, enforcePrimaryKeyNotNull, exprUses, isExplicitNull, isSoleColumnCheck, partitionColumns, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
 import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
@@ -237,11 +237,10 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   assertKeyCount(t.indexes.filter((i) => !isFlagged(flagged, i.name)).length + items.filter((i) => i.kind === 'index').length); // 버려지지 않는 키만 세어도 64개를 넘으면 1069
   const plan = planAutoKeys(t, items, flagged, shrunkIndexes(before, t, renames)); // 이 문장의 키(더한 키·DROP COLUMN 으로 줄어든 키)가 FK 자동 인덱스를 대신하는가
   t = addConstraints(st, before, t, items, plan); // 6) 키 추가와 FK 자동 인덱스
-  assertTargetsKept(plan, t, pick('indexVisibility').map((v) => v.name)); // 버려진 자동 인덱스에 ALTER INDEX 를 썼으면 1176
+  assertTargetsKept(t, pick('indexVisibility').map((v) => v.name)); // 버려진 자동 인덱스에 ALTER INDEX 를 썼으면 1176
   t = enforcePrimaryKeyNotNull(t, explicitNullColumns(clauses)); // 7) PRIMARY KEY 컬럼 NOT NULL·검사·키 순서 8) 테이블 옵션
   checkNowNotNull(before, t, renamed);
   checkTable(st, t, renamed);
-  assertAutoKeysKnown(plan);
   t = { ...t, indexes: sortIndexes(t) };
   syncIndexOrigins(st, before.name, t);
   syncProvenance(st, before.name, t, flagged);

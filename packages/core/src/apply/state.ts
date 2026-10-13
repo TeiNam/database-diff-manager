@@ -9,9 +9,9 @@ import { fail, RE_EXPORT, type ApplyDefaults } from './types';
 // 실행 환경(Node 17+·브라우저)은 전역으로 제공하므로 선언만 둔다 (모듈 안 선언이라 실행 코드는 생기지 않는다)
 declare function structuredClone<T>(value: T): T;
 
-// 이 실행(applyScript)이 아는 인덱스 출처. auto: FK 가 자동으로 만든 인덱스 (FK 를 지워도 MySQL 의 자동 표시는 남는다), user: 직접 더한 인덱스·RENAME INDEX 한 인덱스,
-// ambiguous: 자동인지 직접 만든 것인지 덤프만으로 알 수 없는 채로 남은 인덱스. 기준 덤프에서 온 인덱스는 출처를 모른다 (표에 없다 — 덤프의 이름으로 짐작한다)
-export type IndexProvenance = 'auto' | 'user' | 'ambiguous';
+// 이 실행(applyScript)이 아는 인덱스 출처. auto: FK 가 자동으로 만든 인덱스 (FK 를 지워도 MySQL 의 자동 표시는 남는다), user: 직접 더한 인덱스·RENAME INDEX 한 인덱스.
+// 기준 덤프에서 온 인덱스는 출처를 모른다 (표에 없다 — 덤프의 이름으로 짐작한다, auto-index.ts)
+export type IndexProvenance = 'auto' | 'user';
 
 // 지금 이름 → 기준 버전 이름 (스크립트에서 새로 만든 것은 undefined). 끝에서 rename 매핑을 만든다
 export interface Origins {

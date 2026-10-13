@@ -638,7 +638,7 @@ describe('addKeys — 인덱스 출처 기록', () => {
   it('새 FK 가 대신한 옛 자동 인덱스는 표에서 이름이 바뀐다 (옛 이름은 plan 이 버리고 새 이름이 auto)', () => {
     const st = fresh();
     const c = table(st, 'child');
-    const plan = planAutoKeys(c, [fk(true, ['pid'], 'parent', ['id'], 'again')], { generated: new Set(['pid']), ambiguous: new Set() });
+    const plan = planAutoKeys(c, [fk(true, ['pid'], 'parent', ['id'], 'again')], { generated: new Set(['pid']) });
     addKeys(st, c, [fk(true, ['pid'], 'parent', ['id'], 'again')], ['child_ibfk_1'], plan);
     expect(provenance(st, 'child')).toEqual([['again', 'auto']]);
   });

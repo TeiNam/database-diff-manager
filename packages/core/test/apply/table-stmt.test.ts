@@ -336,14 +336,21 @@ describe('인덱스 출처(provenance) 계약', () => {
     return r.model.tables.find((t) => t.name === table)!.indexes.map((i) => i.name);
   };
 
-  it('이미 있는 테이블의 CREATE TABLE IF NOT EXISTS 는 출처를 적지 않는다: 알 수 없는 인덱스는 이어서 알 수 없다', () => {
-    // orders.member_id 는 덤프만으로 FK 의 자동 인덱스인지 알 수 없다 (FK 이름 orders_ibfk_1 + 첫 컬럼 이름 인덱스). 이 인덱스를 버리게 되는 문장은 거부된다
-    const alter = 'ALTER TABLE orders DROP FOREIGN KEY orders_ibfk_1, ADD INDEX k (member_id, id);';
-    const control = reasonOf(alter, PROV);
-    expect(control).toContain('member_id');
-    expect(endsWithReExport(control)).toBe(true);
-    // 아무것도 안 하는 문장이 member_id 를 "직접 만든 인덱스"로 적어 두면 위 문장이 받아들여진다
-    expect(reasonOf(`CREATE TABLE IF NOT EXISTS orders (id INT, member_id INT UNSIGNED, KEY member_id (member_id));\n${alter}`, PROV)).toBe(control);
+  it('이미 있는 테이블의 CREATE TABLE IF NOT EXISTS 는 출처를 적지 않는다: 덤프로 가린 자동 인덱스는 이어서 자동이다', () => {
+    // fk_o 는 FK 이름과 같아 덤프로 가리면 FK 의 자동 인덱스다. 같은 컬럼으로 시작하는 새 키가 버린다
+    const base = parseSqlDump(tdExport([
+      'CREATE TABLE `member` (\n  `id` int unsigned NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+      'CREATE TABLE `orders` (\n  `id` int NOT NULL,\n  `member_id` int unsigned NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `fk_o` (`member_id`),\n  CONSTRAINT `fk_o` FOREIGN KEY (`member_id`) REFERENCES `member` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    ].join('\n\n'))).model;
+    const names = (script: string) => {
+      const r = applyScript(base, script, { schemaName: 'shop' });
+      if (!r.ok) throw new Error(r.error.reason);
+      return r.model.tables.find((t) => t.name === 'orders')!.indexes.map((i) => i.name);
+    };
+    const alter = 'ALTER TABLE orders DROP FOREIGN KEY fk_o, ADD INDEX k (member_id, id);';
+    expect(names(alter)).toEqual(['PRIMARY', 'k']);
+    // 아무것도 안 하는 문장이 fk_o 를 "직접 만든 인덱스"로 적어 두면 위 문장이 fk_o 를 남긴다
+    expect(names(`CREATE TABLE IF NOT EXISTS orders (id INT, member_id INT UNSIGNED, KEY fk_o (member_id));\n${alter}`)).toEqual(['PRIMARY', 'k']);
   });
 
   it('DROP TABLE 뒤 같은 이름을 다시 만들면 새 테이블의 출처가 따른다 (옛 출처가 아니다)', () => {

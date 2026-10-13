@@ -2,7 +2,7 @@
 import type { ForeignKey, Index, IndexPart, Table } from '../model';
 import { assertKeyCount } from './limits';
 import { sameName, type IndexProvenance, type State } from './state';
-import { fail, RE_EXPORT, type ConstraintItem } from './types';
+import { fail, type ConstraintItem } from './types';
 
 // ── 규칙 (MySQL 8.0.46·8.4.11 실측, sql_table.cc mysql_prepare_create_table·foreign_key_prefix) ──
 // MySQL 은 FK 마다 "자동 키" 후보를 하나 만들고, 같은 컬럼으로 시작하는 다른 키가 있으면 자동 키를 버린다. 키 목록은 [문장 뒤에 남은 기존 키] + [문장에서 더한 키·
@@ -13,18 +13,18 @@ import { fail, RE_EXPORT, type ConstraintItem } from './types';
 //
 // ── 출처 ──
 // 모델에는 표시가 없다. 이 실행 안에서 아는 출처는 st.origins.provenance 에 적는다 (auto: ensureFkIndexes 가 만든 것, user: 직접 더한 것·RENAME INDEX 한 것).
-// 기준 덤프에서 온 인덱스는 출처를 모르므로 덤프의 이름으로 짐작한다 (classifyFkIndexes). 한계: 기준 덤프나 앞선 업로드에서 FK 가 이미 지워져 남은 자동 인덱스(FK 가 없다),
-// FK 이름과 같은 이름으로 직접 만든 인덱스(KEY f + CONSTRAINT f), FOREIGN KEY 뒤에 이름을 쓴 자동 인덱스(FOREIGN KEY ix_g (…))는 덤프로 알아볼 수 없다.
+// 기준 덤프에서 온 인덱스는 출처를 모르므로 덤프의 이름으로 짐작한다 (classifyFkIndexes): FK 이름과 같은 이름이면 자동, 나머지는 직접 만든 것이다.
+// 한계: 이름 없는 FK(<테이블>_ibfk_N)가 첫 컬럼 이름으로 자동으로 만든 인덱스(KEY x0)도 직접 만든 것으로 본다 (사용자 결정 — FK 컬럼으로 시작하는 복합 인덱스 추가·FK 이름 정리 같은
+// 흔한 마이그레이션을 막지 않으려고). 실제로 자동 인덱스였다면 MySQL 은 그 인덱스를 지우거나 바꾸는데 모델은 남긴다. 기준 덤프나 앞선 업로드(파생 버전)에서 FK 가 이미 지워져 남은
+// 자동 인덱스, FOREIGN KEY 뒤에 이름을 쓴 자동 인덱스(FOREIGN KEY ix_g (…))도 같다. FK 이름과 같은 이름으로 직접 만든 인덱스(KEY f + CONSTRAINT f)는 반대로 자동으로 본다.
 // CREATE TABLE(Task 6)은 addKeys 로 키를 만들면 출처가 저절로 적힌다. 다른 길로 만들면 markProvenance(st, 테이블, 이름들, 'user' | 'auto') 를 불러야 한다
 
-// 자동 인덱스 이름 (소문자). generated: 자동으로 만든 것으로 본다 (아는 auto, 또는 덤프에서 이름이 FK 이름과 같다). ambiguous: 자동인지 직접 만든 것인지 알 수 없다.
-// 둘은 겹치지 않는다
+// 자동 인덱스 이름 (소문자). generated: 자동으로 만든 것으로 본다 (아는 auto, 또는 덤프에서 이름이 FK 이름과 같다)
 export interface FkAutoIndexes {
   readonly generated: ReadonlySet<string>;
-  readonly ambiguous: ReadonlySet<string>;
 }
 
-const NO_AUTO_INDEXES: FkAutoIndexes = { generated: new Set(), ambiguous: new Set() };
+const NO_AUTO_INDEXES: FkAutoIndexes = { generated: new Set() };
 
 const samePart = (p: IndexPart, q: IndexPart): boolean =>
   p.column !== undefined && q.column !== undefined && sameName(p.column, q.column) && p.length === q.length && p.desc === q.desc;
@@ -36,19 +36,9 @@ const startsWithParts = (long: readonly IndexPart[], short: readonly IndexPart[]
 const isPlainKeyOn = (i: Index, columns: readonly string[]): boolean =>
   i.kind === 'INDEX' && i.parts.length === columns.length && i.parts.every((p, k) => p.column !== undefined && sameName(p.column, columns[k]) && p.length === undefined && !p.desc);
 
-// 자동 FK 이름: '<테이블>_ibfk_<N>'
-const isAutoFkName = (table: string, name: string): boolean => name.startsWith(`${table}_ibfk_`) && /^\d+$/.test(name.slice(table.length + '_ibfk_'.length));
-
-// 덤프에서 이름으로 짐작한다: 인덱스 이름이 FK 이름과 같으면 자동, FK 이름이 자동 꼴일 때 첫 컬럼 이름(충돌하면 <컬럼>_2 …)이면 알 수 없음.
-// CONSTRAINT 이름이 있으면 자동 인덱스는 늘 그 이름이므로 (FOREIGN KEY 뒤 인덱스 이름보다 먼저 — 8.0.46·8.4.11 실측) 자동 꼴이 아닌 FK 의 첫 컬럼 이름 인덱스는 직접 만든 것이다
-function guessProvenance(table: string, fk: ForeignKey, indexName: string): IndexProvenance | undefined {
-  const name = indexName.toLowerCase();
-  if (name === fk.name.toLowerCase()) return 'auto';
-  if (!isAutoFkName(table, fk.name)) return undefined;
-  const first = fk.columns[0].toLowerCase();
-  const isColumnName = name === first || (name.startsWith(`${first}_`) && /^\d+$/.test(name.slice(first.length + 1)));
-  return isColumnName ? 'ambiguous' : undefined;
-}
+// 덤프에서 이름으로 짐작한다: 인덱스 이름이 FK 이름과 같으면 자동이다 (CONSTRAINT 이름이 있으면 자동 인덱스는 늘 그 이름 — 8.0.46·8.4.11 실측).
+// 그 밖은 직접 만든 것으로 본다. 이름 없는 FK(<테이블>_ibfk_N)의 첫 컬럼 이름(<컬럼>_N) 인덱스는 자동일 수도 있지만 직접 만든 것으로 본다 (머리 주석의 한계)
+const isAutoByName = (fk: ForeignKey, indexName: string): boolean => sameName(indexName, fk.name);
 
 // FK 의 자동 인덱스일 수 있는 인덱스: FK 컬럼 그대로인 일반 KEY 가 하나뿐이고 그 앞쪽을 가진 다른 인덱스가 없을 때만이다 (있으면 자동 키는 버려졌을 것이므로 직접 만든 것이다).
 // 테이블마다 한 번 만들어 FK 마다 쓴다: 일반 KEY 를 첫 컬럼(소문자)으로 묶어 두고 판정은 인덱스마다 한 번만 하므로, FK 가 많아도 FK 수 + 키 수 × 키 수다
@@ -69,25 +59,16 @@ function candidateIndexes(t: Table): (fk: ForeignKey) => Index | undefined {
   };
 }
 
-// 이 테이블에서 자동(generated)이거나 자동인지 알 수 없는(ambiguous) 인덱스. 이 실행이 아는 출처(known)가 먼저고 — FK 가 없는 남은 인덱스도 포함 —
+// 이 테이블에서 자동(generated)으로 보는 인덱스. 이 실행이 아는 출처(known)가 먼저고 — FK 가 없는 남은 인덱스도 포함 —
 // 출처를 모르는 인덱스만 FK 이름으로 덤프에서 짐작한다
 export function classifyFkIndexes(t: Table, known: ReadonlyMap<string, IndexProvenance> = new Map()): FkAutoIndexes {
-  const generated = new Set<string>();
-  const ambiguous = new Set<string>();
-  for (const i of t.indexes) {
-    const provenance = known.get(i.name.toLowerCase());
-    if (provenance === 'auto') generated.add(i.name.toLowerCase());
-    else if (provenance === 'ambiguous') ambiguous.add(i.name.toLowerCase());
-  }
+  const generated = new Set(t.indexes.filter((i) => known.get(i.name.toLowerCase()) === 'auto').map((i) => i.name.toLowerCase()));
   const candidateIndex = candidateIndexes(t);
   for (const fk of t.foreignKeys) {
     const index = candidateIndex(fk);
-    if (!index || known.has(index.name.toLowerCase())) continue;
-    const guess = guessProvenance(t.name, fk, index.name);
-    if (guess === 'auto') generated.add(index.name.toLowerCase());
-    else if (guess === 'ambiguous') ambiguous.add(index.name.toLowerCase());
+    if (index && !known.has(index.name.toLowerCase()) && isAutoByName(fk, index.name)) generated.add(index.name.toLowerCase());
   }
-  return { generated, ambiguous: new Set([...ambiguous].filter((n) => !generated.has(n))) };
+  return { generated };
 }
 
 interface KeyCandidate {
@@ -150,20 +131,17 @@ export function shrunkIndexes(before: Table, t: Table, renames: readonly { old: 
 // 자동 분류에서 이름을 뺀다. RENAME INDEX 가 건드린 옛 이름·새 이름이다: 이름을 바꾸면 자동 표시가 지워지고 (8.0.46·8.4.11 실측), 다른 인덱스가 그 이름을 이어받을 수도 있다
 export function withoutNames(flagged: FkAutoIndexes, names: Iterable<string>): FkAutoIndexes {
   const drop = new Set([...names].map((n) => n.toLowerCase()));
-  const keep = (set: ReadonlySet<string>) => new Set([...set].filter((n) => !drop.has(n)));
-  return { generated: keep(flagged.generated), ambiguous: keep(flagged.ambiguous) };
+  return { generated: new Set([...flagged.generated].filter((n) => !drop.has(n))) };
 }
 
-// 이 문장이 더하는 키가 자동 키를 버리는 계획. kept: 버려지지 않은 기존 인덱스, skipped: 자동 키가 버려져 만들지 않는 FK,
-// uncertain: 자동인지 알 수 없는데(ambiguous) 버려지는 기존 인덱스 이름 — 자동이면 MySQL 이 지우고 직접 만든 것이면 남긴다 (assertAutoKeysKnown)
+// 이 문장이 더하는 키가 자동 키를 버리는 계획. kept: 버려지지 않은 기존 인덱스, skipped: 자동 키가 버려져 만들지 않는 FK
 export interface AutoKeyPlan {
   readonly kept: readonly Index[];
   readonly skipped: ReadonlySet<ConstraintItem>;
-  readonly uncertain: readonly string[];
 }
 
-// 자동(generated)이거나 자동인지 알 수 없는(ambiguous) 인덱스 이름인가 — 새 키가 버릴 수 있는 기존 인덱스다 (직접 만든 인덱스는 버려지지 않는다)
-export const isFlagged = (auto: FkAutoIndexes, name: string): boolean => auto.generated.has(name.toLowerCase()) || auto.ambiguous.has(name.toLowerCase());
+// 자동(generated)으로 보는 인덱스 이름인가 — 새 키가 버릴 수 있는 기존 인덱스다 (직접 만든 인덱스는 버려지지 않는다)
+export const isFlagged = (auto: FkAutoIndexes, name: string): boolean => auto.generated.has(name.toLowerCase());
 
 export function planAutoKeys(t: Table, items: readonly ConstraintItem[], auto: FkAutoIndexes = NO_AUTO_INDEXES, shrunk: ReadonlySet<string> = new Set()): AutoKeyPlan {
   const isAuto = (i: Index) => isFlagged(auto, i.name);
@@ -176,22 +154,13 @@ export function planAutoKeys(t: Table, items: readonly ConstraintItem[], auto: F
   return {
     kept: existing.filter((e) => !dropped.has(e.key)).map((e) => e.index),
     skipped: new Set(added.filter((a) => dropped.has(a.key)).map((a) => a.item)),
-    uncertain: existing.filter((e) => dropped.has(e.key) && auto.ambiguous.has(e.index.name.toLowerCase())).map((e) => e.index.name),
   };
 }
 
-// 자동인지 알 수 없는 인덱스가 버려지는 문장은 결과를 정할 수 없어 거부한다. 문장이 어느 쪽으로 읽어도 MySQL 오류인 경우를 가리지 않도록 다른 검사를 다 마친 뒤에 부른다
-export function assertAutoKeysKnown(plan: Pick<AutoKeyPlan, 'uncertain'>): void {
-  if (!plan.uncertain.length) return;
-  fail(`인덱스 ${plan.uncertain.map((n) => `\`${n}\``).join(', ')} 이 FK 때문에 MySQL 이 자동으로 만든 것인지 덤프만으로는 알 수 없습니다 — 자동으로 만든 것이면 이 문장이 더하는 키가 대신해 `
-    + `MySQL 이 지우고 직접 만든 것이면 남기므로 결과를 정할 수 없습니다 — ${RE_EXPORT}`);
-}
-
 // ALTER INDEX … VISIBLE|INVISIBLE 의 대상이 같은 문장이 버린 자동 인덱스면 1176: 자동 키가 먼저 버려져 대상이 없다 (8.0.46·8.4.11 실측 — 절 순서, 버리는 키의 종류(인덱스·UNIQUE·새 FK),
-// FK 만 지운 뒤 남은 자동 인덱스도 같다. 같은 이름의 새 인덱스가 대신하면 받고, 인덱스 이름 충돌(1061)·없는 컬럼(1072) 같은 오류가 먼저다). t: 키를 더한 뒤의 테이블.
-// 자동인지 알 수 없는(ambiguous) 인덱스는 assertAutoKeysKnown 이 거부하므로 여기서는 보지 않는다
-export function assertTargetsKept(plan: Pick<AutoKeyPlan, 'uncertain'>, t: Table, names: readonly string[]): void {
-  const lost = names.find((n) => !t.indexes.some((i) => sameName(i.name, n)) && !plan.uncertain.some((u) => sameName(u, n)));
+// FK 만 지운 뒤 남은 자동 인덱스도 같다. 같은 이름의 새 인덱스가 대신하면 받고, 인덱스 이름 충돌(1061)·없는 컬럼(1072) 같은 오류가 먼저다). t: 키를 더한 뒤의 테이블
+export function assertTargetsKept(t: Table, names: readonly string[]): void {
+  const lost = names.find((n) => !t.indexes.some((i) => sameName(i.name, n)));
   if (lost !== undefined) fail(`인덱스 \`${lost}\` 이 없습니다 — 같은 문장이 더하는 키가 FK 의 자동 인덱스 \`${lost}\` 를 먼저 버립니다 (MySQL 1176)`);
 }
 
@@ -214,13 +183,13 @@ export function renameProvenance(st: State, table: string, from: string, to: str
 }
 
 // 문장이 끝난 테이블(t)의 출처 표를 다시 만든다: 남은 인덱스만 두고, 이 문장이 정한 값(addKeys·renameProvenance)이 먼저며, 없으면 문장 시작에 가린 분류(flagged)를 굳힌다 —
-// FK 만 지운 문장이면 그 FK 의 자동 인덱스는 이제 FK 로 가릴 수 없으니 여기서 auto·ambiguous 로 기억해 둔다. 그래도 모르는 채 FK 를 받치는 인덱스는 user 로 적는다:
+// FK 만 지운 문장이면 그 FK 의 자동 인덱스는 이제 FK 로 가릴 수 없으니 여기서 auto 로 기억해 둔다. 그래도 모르는 채 FK 를 받치는 인덱스는 user 로 적는다:
 // 이 문장이 FK 를 더하려는데 이미 있던 인덱스가 받쳐 자동 키를 만들지 않았다면 그 인덱스를 FK 가 만든 것으로 오해하지 않게 한다 (FK 이름이 자동 꼴이어도)
 export function syncProvenance(st: State, table: string, t: Table, flagged: FkAutoIndexes): void {
   const current = tableProvenance(st, table);
   const known = new Map(t.indexes.flatMap((i): [string, IndexProvenance][] => {
     const key = i.name.toLowerCase();
-    const provenance = current.get(key) ?? (flagged.generated.has(key) ? 'auto' : flagged.ambiguous.has(key) ? 'ambiguous' : undefined);
+    const provenance = current.get(key) ?? (flagged.generated.has(key) ? 'auto' : undefined);
     return provenance === undefined ? [] : [[key, provenance]];
   }));
   const candidateIndex = candidateIndexes(t);

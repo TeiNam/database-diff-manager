@@ -8,11 +8,11 @@
 // - 자동 키 표시는 FK 를 지워도 남고(앞 문장에서 FK 만 지운 뒤 같은 컬럼에 새 인덱스·FK 가 오면 남은 자동 인덱스를 대신한다), 컬럼·테이블 이름 변경·보이기 바꾸기·FORCE 에도 남는다.
 //   RENAME INDEX 만 표시를 지운다 (원래 이름으로 되돌려도 그대로 직접 만든 인덱스다)
 // - 자동 키는 FK 를 더한 절의 자리에 만들어진다 (뒤에 오는 일반 인덱스보다 앞). 새 FK 가 같은 컬럼의 자동 키를 대신하면 키 목록 끝으로 옮겨진다
-// 덤프(SHOW CREATE)로는 자동 키인지 알 수 없어 이름으로 가린다: FK 이름과 같으면 자동, FK 첫 컬럼 이름(또는 <컬럼>_N)이면 — FK 이름이 <테이블>_ibfk_N 꼴일 때만 — 알 수 없음(문장 결과가 달라지면 거부),
-// 그 밖은 직접 만든 것. 이 실행(applyScript) 안에서 만든 인덱스는 출처(auto·user)를 기억해 이름보다 먼저 쓴다
+// 덤프(SHOW CREATE)로는 자동 키인지 알 수 없어 이름으로 가린다: FK 이름과 같으면 자동, 그 밖은 직접 만든 것이다. 이름 없는 FK(<테이블>_ibfk_N)의 첫 컬럼 이름(<컬럼>_N) 인덱스도
+// 직접 만든 것으로 본다 (사용자 결정 — 흔한 마이그레이션을 막지 않는다. 실제로 자동이었다면 MySQL 과 다를 수 있는 한계). 이 실행(applyScript) 안에서 만든 인덱스는 출처(auto·user)를
+// 기억해 이름보다 먼저 쓴다
 import { describe, expect, it } from 'vitest';
 import { applyScript } from '../../src/apply';
-import { RE_EXPORT } from '../../src/apply/types';
 import type { SchemaModel, Table } from '../../src/model';
 import { parseSqlDump } from '../../src/parse-dump';
 import { tdExport } from '../helpers';
@@ -277,15 +277,13 @@ describe('ALTER TABLE — FK 자동 인덱스: 스크립트 안에서 출처를 
   });
 });
 
-describe('ALTER TABLE — DROP COLUMN 이 줄인 키가 자동인지 알 수 없는 인덱스를 버릴 때', () => {
-  // shrinku: KEY k (x1, x0) + FK t_ibfk_1 의 이름이 첫 컬럼인 인덱스 x0 — x1 을 지우면 k 가 (x0) 가 되어, x0 이 자동이면 MySQL 이 버리고 직접 만든 것이면 남긴다
+describe('ALTER TABLE — DROP COLUMN 이 줄인 키와 FK 첫 컬럼 이름 인덱스', () => {
+  // shrinku: KEY k (x1, x0) + FK t_ibfk_1 의 이름이 첫 컬럼인 인덱스 x0 — x1 을 지우면 k 가 (x0) 가 된다. x0 은 직접 만든 것으로 보아 남긴다
   it.each([
-    'ALTER TABLE t DROP COLUMN x1;',
-    'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t DROP COLUMN x1;', // FK 를 지운 뒤에도 알 수 없다는 사실이 이어진다
-  ])('거부: %j', (script) => {
-    const r = run('shrinku', script);
-    expect(r).toMatchObject({ ok: false, error: { reason: expect.stringContaining('`x0`') } });
-    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT)).toBe(true);
+    ['ALTER TABLE t DROP COLUMN x1;', 'PRIMARY(id) k(x0) x0(x0) kz(x2) | t_ibfk_1'],
+    ['ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t DROP COLUMN x1;', 'PRIMARY(id) k(x0) x0(x0) kz(x2) | '],
+  ])('받는다: %j', (script, expected) => {
+    expect(shown(tableT(ok('shrinku', script)))).toBe(expected);
   });
 });
 
@@ -307,71 +305,50 @@ describe('ALTER TABLE — ALTER INDEX 와 같은 문장이 버리는 FK 자동 �
   });
 });
 
-// 이름이 첫 컬럼(KEY x0 (x0))이면 FK 가 자동으로 만든 것인지 직접 만든 것인지 덤프만으로 알 수 없다. 자동이면 MySQL 이 지우거나 바꾸고 직접 만든 것이면 그대로 둔다 (실측).
-// 두 읽기의 결과가 다른 문장은 거부하고 (인덱스 이름을 알리고 RE_EXPORT 로 끝난다), 같은 문장은 받는다
-describe('ALTER TABLE — FK 자동 인덱스: 자동인지 알 수 없을 때', () => {
-  const REJECTED = [
-    'ALTER TABLE t ADD INDEX ix (x0, x1);',
-    'ALTER TABLE t ADD UNIQUE (x0);',
-    'CREATE INDEX ix ON t (x0, x1);',
-    'ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (x0, id);',
-    'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1, ADD CONSTRAINT g FOREIGN KEY (x0) REFERENCES par (id);',
-    'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1, ADD INDEX z (x0);',
-    'ALTER TABLE t ADD CONSTRAINT h FOREIGN KEY (x0) REFERENCES par (id);', // 같은 컬럼의 두 번째 FK: 자동 키라면 새 키가 대신한다
-    'ALTER TABLE t ADD CONSTRAINT h FOREIGN KEY (x0, x1) REFERENCES par2 (a, b);', // 자동 키라면 더 긴 새 자동 키가 대신한다
-    'ALTER TABLE t ALTER INDEX x0 INVISIBLE, ADD INDEX ix (x0);', // 자동이면 MySQL 은 1176, 직접 만든 것이면 받는다 — 1176 이 아니라 재추출 안내
-  ];
-  it.each(REJECTED)('거부: %s', (script) => {
-    const r = run('unnamed', script);
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.error.reason).toContain('`x0`');
-    expect(r.error.reason).toContain('자동으로 만든 것인지');
-    expect(r.error.reason.endsWith(RE_EXPORT)).toBe(true);
-  });
-
-  it.each([
-    ['ALTER TABLE t ADD INDEX ix (x0, x1), ADD INDEX ix (x2);', '1061'], // 어느 쪽으로 읽어도 MySQL 오류인 문장은 그 오류가 먼저다
-    ['ALTER TABLE t ADD INDEX ix (x0, x1), DROP INDEX nope;', '1091'],
-  ])('거부 대신 MySQL 오류: %s', (script, errno) => {
-    expect(run('unnamed', script)).toMatchObject({ ok: false, error: { reason: expect.stringContaining(`(MySQL ${errno})`) } });
-  });
-
-  const SAME_EITHER_WAY: [script: string, expected: string][] = [
-    ['ALTER TABLE t ADD INDEX ix (x1, x0);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x1,x0) | t_ibfk_1'], // 앞쪽이 아니다
-    ['ALTER TABLE t ADD INDEX ix (x0 DESC);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0-desc) | t_ibfk_1'], // 방향이 다르다
-    ['ALTER TABLE t ADD INDEX ix (x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x1) | t_ibfk_1'],
-    ['ALTER TABLE t ENGINE=InnoDB;', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) | t_ibfk_1'],
+// 이름이 첫 컬럼(KEY x0 (x0))이고 FK 이름이 <테이블>_ibfk_N 꼴이면 FK 가 자동으로 만든 것인지 직접 만든 것인지 덤프만으로 알 수 없다. 직접 만든 것으로 보고 남긴다 (사용자 결정).
+// 덤프를 MySQL 에 다시 만든 DB(test:mysql 의 기준)에서는 그 인덱스가 직접 만든 것이라 MySQL 도 남긴다 — 시나리오 fk-first-column-index
+describe('ALTER TABLE — FK 첫 컬럼 이름 인덱스는 직접 만든 것으로 본다', () => {
+  const ACCEPTED: [script: string, expected: string][] = [
+    ['ALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | t_ibfk_1'],
+    ['ALTER TABLE t ADD UNIQUE (x0);', 'PRIMARY(id) U:x0_2(x0) ka(x1) x0(x0) kz(x2) | t_ibfk_1'],
+    ['CREATE INDEX ix ON t (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | t_ibfk_1'],
+    ['ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (x0, id);', 'PRIMARY(x0,id) ka(x1) x0(x0) kz(x2) | t_ibfk_1'],
+    ['ALTER TABLE t DROP FOREIGN KEY t_ibfk_1, ADD CONSTRAINT g FOREIGN KEY (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) | g'], // FK 이름 정리: x0 이 새 FK 를 받친다
+    ['ALTER TABLE t DROP FOREIGN KEY t_ibfk_1, ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) z(x0) | '],
+    ['ALTER TABLE t ADD CONSTRAINT h FOREIGN KEY (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) | h,t_ibfk_1'], // 같은 컬럼의 두 번째 FK 도 x0 이 받친다
+    ['ALTER TABLE t ADD CONSTRAINT h FOREIGN KEY (x0, x1) REFERENCES par2 (a, b);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) h(x0,x1) | h,t_ibfk_1'],
+    ['ALTER TABLE t ALTER INDEX x0 INVISIBLE, ADD INDEX ix (x0);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0) | t_ibfk_1'],
+    // 문장을 넘어도 같다: FK 를 지운 뒤에도, 테이블 이름을 바꾼 뒤에도
+    ['ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | '],
+    ['ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) | t_ibfk_1'], // FK 이름 정리를 두 문장으로
+    ['ALTER TABLE t DROP FOREIGN KEY t_ibfk_1, RENAME TO t2;\nALTER TABLE t2 ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | '],
+    ['ALTER TABLE t RENAME TO t2;\nALTER TABLE t2 ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | t2_ibfk_1'],
+    // 원래 두 읽기가 같던 문장
+    ['ALTER TABLE t ADD INDEX ix (x1, x0);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x1,x0) | t_ibfk_1'],
+    ['ALTER TABLE t ADD INDEX ix (x0 DESC);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0-desc) | t_ibfk_1'],
     ['ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) | '], // FK 만 지우면 인덱스는 남는다
-    ['ALTER TABLE t DROP FOREIGN KEY t_ibfk_1, ADD CONSTRAINT g FOREIGN KEY (x1) REFERENCES par (id);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) | g'], // ka 가 새 FK 를 받친다
     ['ALTER TABLE t DROP FOREIGN KEY t_ibfk_1, DROP INDEX x0;', 'PRIMARY(id) ka(x1) kz(x2) | '], // 인덱스도 함께 지운다
     ['ALTER TABLE t ADD FOREIGN KEY (x2) REFERENCES par (id);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) | t_ibfk_1,t_ibfk_2'], // kz 가 받친다
   ];
-  it.each(SAME_EITHER_WAY)('받는다: %s', (script, expected) => {
+  it.each(ACCEPTED)('받는다: %j', (script, expected) => {
     expect(shown(tableT(ok('unnamed', script)))).toBe(expected);
   });
 
-  // 알 수 없다는 사실도 문장을 넘어 이어진다: FK 를 지운 뒤에도, 테이블 이름을 바꾼 뒤에도 (MySQL 은 자동 표시가 남아 있으면 지우고 없으면 남긴다)
   it.each([
-    'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD INDEX ix (x0, x1);',
-    'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);', // 자동이면 새 자동 키가 끝으로 옮겨 가고 직접 만든 것이면 그 자리에 남는다
-    'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1, RENAME TO t2;\nALTER TABLE t2 ADD INDEX ix (x0, x1);',
-    'ALTER TABLE t RENAME TO t2;\nALTER TABLE t2 ADD INDEX ix (x0, x1);',
-  ])('뒤 문장이 거부한다: %j', (script) => {
-    const r = run('unnamed', script);
-    expect(r).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining('`x0`') } });
-    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT)).toBe(true);
-  });
-
-  it('FK 를 지운 뒤에도 받침을 가리지 않는 문장은 받는다 — 인덱스가 그대로 남는다', () => {
-    const script = 'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD INDEX ix (x1, x0);';
-    expect(shown(tableT(ok('unnamed', script)))).toBe('PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x1,x0) | ');
+    ['ALTER TABLE t ADD INDEX ix (x0, x1), ADD INDEX ix (x2);', '1061'],
+    ['ALTER TABLE t ADD INDEX ix (x0, x1), DROP INDEX nope;', '1091'],
+  ])('MySQL 오류는 그대로: %s', (script, errno) => {
+    expect(run('unnamed', script)).toMatchObject({ ok: false, error: { reason: expect.stringContaining(`(MySQL ${errno})`) } });
   });
 });
 
 // 알려진 한계: 덤프(SHOW CREATE)에는 자동 표시가 없다. 이 실행 안에서 만든 인덱스는 위 표처럼 따라가지만, 기준 덤프나 앞선 업로드에서 온 인덱스는 이름으로만 가린다.
 // 아래는 MySQL 과 다른 결과를 일부러 못 박는다
 describe('ALTER TABLE — FK 자동 인덱스: 알려진 한계', () => {
+  it('이름 없는 FK 의 첫 컬럼 이름 인덱스(x0)는 FK 가 자동으로 만든 것이어도 직접 만든 것으로 보아 남긴다 — 이 기준을 뽑은 라이브 DB(자동 인덱스)는 ADD INDEX 때 지운다', () => {
+    expect(shown(tableT(ok('unnamed', 'ALTER TABLE t ADD INDEX ix (x0, x1);')))).toBe('PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | t_ibfk_1'); // MySQL(라이브): ka kz ix
+  });
+
   it('FOREIGN KEY 뒤에 쓴 인덱스 이름(ix_g)은 덤프에서 직접 만든 인덱스로 본다 — MySQL 은 자동 키라 ADD INDEX 때 지운다', () => {
     expect(shown(tableT(ok('ixname', 'ALTER TABLE t ADD INDEX ix (x0, x1);')))).toBe('PRIMARY(id) ka(x1) ix_g(x0) kz(x2) ix(x0,x1) | t_ibfk_1'); // MySQL: ka kz ix
   });
