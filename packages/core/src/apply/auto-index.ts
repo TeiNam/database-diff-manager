@@ -78,7 +78,7 @@ export function classifyFkIndexes(t: Table, known: ReadonlyMap<string, IndexProv
 interface KeyCandidate {
   parts: readonly IndexPart[];
   auto: boolean; // 자동 키
-  isNew: boolean; // 이 문장에서 더한 키 (기존 키끼리는 서로 버리지 않는다)
+  isNew: boolean; // 이 문장이 더했거나 DROP COLUMN 으로 파트를 줄인 키 (문장이 건드리지 않은 기존 키끼리는 서로 버리지 않는다)
 }
 
 // 뒤 키(later)와 앞 키(earlier) 중 버려지는 쪽: 자동 키가 아닌 상대가 앞쪽을 같게 가지면 자동 키, 둘 다 자동이면 짧은 쪽(같으면 앞선 쪽)
@@ -103,6 +103,24 @@ function discardedKeys(list: readonly KeyCandidate[]): Set<KeyCandidate> {
   return out;
 }
 
+// DROP COLUMN 이 파트를 지운 기존 인덱스(소문자 이름): before 의 같은 인덱스(이름을 바꿨으면 옛 이름)보다 파트가 줄었다. 줄어든 키는 앞쪽이 자동 키와 같아질 수 있다
+// (MySQL 8.0.46·8.4.11 실측: KEY k (x1, x0) 에서 x1 을 지우면 k (x0) 가 자동 f (x0) 를 버린다). 컬럼 이름 변경·인덱스 이름 변경만으로는 줄어든 것이 아니다
+export function shrunkIndexes(before: Table, t: Table, renames: readonly { old: string; to: string }[] = []): ReadonlySet<string> {
+  const wasNamed = (name: string) => renames.find((r) => sameName(r.to, name))?.old ?? name;
+  const shrunk = t.indexes.filter((i) => {
+    const was = before.indexes.find((b) => sameName(b.name, wasNamed(i.name)));
+    return was !== undefined && i.parts.length < was.parts.length;
+  });
+  return new Set(shrunk.map((i) => i.name.toLowerCase()));
+}
+
+// 자동 분류에서 이름을 뺀다. RENAME INDEX 가 건드린 옛 이름·새 이름이다: 이름을 바꾸면 자동 표시가 지워지고 (8.0.46·8.4.11 실측), 다른 인덱스가 그 이름을 이어받을 수도 있다
+export function withoutNames(flagged: FkAutoIndexes, names: Iterable<string>): FkAutoIndexes {
+  const drop = new Set([...names].map((n) => n.toLowerCase()));
+  const keep = (set: ReadonlySet<string>) => new Set([...set].filter((n) => !drop.has(n)));
+  return { generated: keep(flagged.generated), ambiguous: keep(flagged.ambiguous) };
+}
+
 // 이 문장이 더하는 키가 자동 키를 버리는 계획. kept: 버려지지 않은 기존 인덱스, skipped: 자동 키가 버려져 만들지 않는 FK,
 // uncertain: 자동인지 알 수 없는데(ambiguous) 버려지는 기존 인덱스 이름 — 자동이면 MySQL 이 지우고 직접 만든 것이면 남긴다 (assertAutoKeysKnown)
 export interface AutoKeyPlan {
@@ -111,9 +129,9 @@ export interface AutoKeyPlan {
   readonly uncertain: readonly string[];
 }
 
-export function planAutoKeys(t: Table, items: readonly ConstraintItem[], auto: FkAutoIndexes = NO_AUTO_INDEXES): AutoKeyPlan {
+export function planAutoKeys(t: Table, items: readonly ConstraintItem[], auto: FkAutoIndexes = NO_AUTO_INDEXES, shrunk: ReadonlySet<string> = new Set()): AutoKeyPlan {
   const isAuto = (i: Index) => auto.generated.has(i.name.toLowerCase()) || auto.ambiguous.has(i.name.toLowerCase());
-  const existing = t.indexes.map((index) => ({ index, key: { parts: index.parts, auto: isAuto(index), isNew: false } }));
+  const existing = t.indexes.map((index) => ({ index, key: { parts: index.parts, auto: isAuto(index), isNew: shrunk.has(index.name.toLowerCase()) } }));
   const added = items.map((item) => ({
     item,
     key: item.kind === 'index' ? { parts: item.index.parts, auto: false, isNew: true } : { parts: item.fk.columns.map((column) => ({ column, desc: false })), auto: true, isNew: true },

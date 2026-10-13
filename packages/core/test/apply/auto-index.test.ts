@@ -1,6 +1,6 @@
 // FK 가 자동으로 만든 인덱스 — 덤프에서 이름으로 가리기, 이 실행(applyScript)이 아는 출처, 새 키가 자동 키를 버리는 계획 (MySQL 8.0.46·8.4.11 실측)
 import { describe, expect, it } from 'vitest';
-import { assertAutoKeysKnown, assertTargetsKept, classifyFkIndexes, markProvenance, planAutoKeys, renameProvenance, syncProvenance } from '../../src/apply/auto-index';
+import { assertAutoKeysKnown, assertTargetsKept, classifyFkIndexes, markProvenance, planAutoKeys, renameProvenance, shrunkIndexes, syncProvenance, withoutNames } from '../../src/apply/auto-index';
 import { initialState, type IndexProvenance, type State } from '../../src/apply/state';
 import { DEFAULT_SQL_MODE, MYSQL_DEFAULTS, type FkItem, type IndexItem } from '../../src/apply/types';
 import type { Column, ForeignKey, Index, IndexKind, Table } from '../../src/model';
@@ -147,6 +147,58 @@ describe('planAutoKeys / assertAutoKeysKnown', () => {
     expect(() => assertTargetsKept(certain, after([...certain.kept, plain('pid', 'x0', 'x1')]), ['pid'])).not.toThrow(); // 같은 이름의 새 인덱스가 대신했다
     expect(() => assertTargetsKept(planAutoKeys(child, covering, auto([], ['pid'])), kept, ['pid'])).not.toThrow(); // assertAutoKeysKnown 이 거부한다
     expect(() => assertTargetsKept(planAutoKeys(child, [idx('ix', 'INDEX', ['x1'])], auto(['pid'])), child, ['pid'])).not.toThrow(); // 덮지 못하면 남는다
+  });
+});
+
+// DROP COLUMN 이 파트를 지운 기존 키는 앞쪽이 자동 키와 같아질 수 있어 다른 기존 키와도 견준다 (MySQL 8.0.46·8.4.11 실측: k (x1, x0) 에서 x1 을 지우면 자동 f (x0) 가 버려진다).
+// 문장이 건드리지 않은 기존 키끼리는 서로 버리지 않는다 (잘못 가린 인덱스가 엉뚱한 문장에서 사라지지 않게)
+describe('planAutoKeys·shrunkIndexes — 줄어든 기존 키', () => {
+  const auto = (generated: string[], ambiguous: string[] = []) => ({ generated: new Set(generated), ambiguous: new Set(ambiguous) });
+  const names = (indexes: readonly Index[]) => indexes.map((i) => i.name);
+  const shrunk = (...n: string[]) => new Set(n);
+
+  it('줄어든 직접 만든 키가 자동 인덱스의 앞쪽을 가지면 자동 인덱스가 버려진다, 줄어들지 않았으면 서로 버리지 않는다', () => {
+    const t = tableOf([plain('k', 'x0'), plain('f', 'x0')], []);
+    expect(names(planAutoKeys(t, [], auto(['f']), shrunk('k')).kept)).toEqual(['k']);
+    expect(names(planAutoKeys(t, [], auto(['f'])).kept)).toEqual(['k', 'f']);
+    expect(names(planAutoKeys(tableOf([plain('f', 'x0'), plain('k', 'x0', 'x1')], []), [], auto(['f'])).kept)).toEqual(['f', 'k']);
+  });
+
+  it('줄어든 키가 자동 인덱스보다 짧거나 앞쪽이 다르면 버리지 않고, 직접 만든 키끼리는 줄어도 버리지 않는다', () => {
+    expect(names(planAutoKeys(tableOf([plain('k', 'x0'), plain('f', 'x0', 'x2')], []), [], auto(['f']), shrunk('k')).kept)).toEqual(['k', 'f']);
+    expect(names(planAutoKeys(tableOf([plain('k', 'x1'), plain('f', 'x0')], []), [], auto(['f']), shrunk('k')).kept)).toEqual(['k', 'f']);
+    expect(names(planAutoKeys(tableOf([plain('k', 'x0'), plain('k0', 'x0')], []), [], auto([]), shrunk('k')).kept)).toEqual(['k', 'k0']);
+  });
+
+  it('자동인지 알 수 없는 인덱스가 버려지면 uncertain 이다', () => {
+    const plan = planAutoKeys(tableOf([plain('k', 'x0'), plain('x0', 'x0')], []), [], auto([], ['x0']), shrunk('k'));
+    expect(plan.uncertain).toEqual(['x0']);
+    expect(names(plan.kept)).toEqual(['k']);
+  });
+
+  it('줄어든 자동 인덱스도 견준다: 직접 만든 키가 앞쪽을 가지면 버려지고, 다른 자동 인덱스와는 앞선 쪽이 버려진다', () => {
+    expect(names(planAutoKeys(tableOf([plain('k0', 'x0'), plain('f', 'x0')], []), [], auto(['f']), shrunk('f')).kept)).toEqual(['k0']);
+    const twins = tableOf([plain('f2', 'x0'), plain('f1', 'x0')], []);
+    expect(names(planAutoKeys(twins, [], auto(['f1', 'f2']), shrunk('f1')).kept)).toEqual(['f1']);
+    expect(names(planAutoKeys(tableOf([plain('f1', 'x0'), plain('f2', 'x0')], []), [], auto(['f1', 'f2']), shrunk('f2')).kept)).toEqual(['f2']);
+  });
+
+  it('shrunkIndexes: before 보다 파트가 줄어든 인덱스 이름(소문자)만 돌려준다 — 컬럼 이름 변경·이름 변경만으로는 줄어든 것이 아니다', () => {
+    const before = tableOf([plain('k', 'x1', 'x0'), plain('f', 'x0'), plain('kz', 'x2')], []);
+    expect([...shrunkIndexes(before, tableOf([plain('K', 'x0'), plain('f', 'x0')], []))]).toEqual(['k']);
+    expect([...shrunkIndexes(before, tableOf([plain('kk', 'x0'), plain('f', 'x0')], []), [{ old: 'k', to: 'kk' }])]).toEqual(['kk']); // 이름을 바꿨으면 옛 이름으로 before 를 찾는다
+    expect([...shrunkIndexes(before, tableOf([plain('k', 'y1', 'x0'), plain('f', 'x0'), plain('kz', 'x2')], []))]).toEqual([]); // 컬럼 이름만 바뀜
+    expect([...shrunkIndexes(before, before)]).toEqual([]);
+  });
+});
+
+// RENAME INDEX 가 건드린 이름은 자동 분류에서 뺀다: 이름을 바꾸면 자동 표시가 지워지고 (8.0.46·8.4.11 실측), 다른 인덱스가 그 이름을 이어받을 수 있다
+describe('withoutNames', () => {
+  it('두 집합에서 이름을 (대소문자 무시) 빼고 입력은 바꾸지 않는다', () => {
+    const flagged = { generated: new Set(['f', 'g']), ambiguous: new Set(['x0', 'y']) };
+    const next = withoutNames(flagged, ['F', 'x0', 'none']);
+    expect([[...next.generated], [...next.ambiguous]]).toEqual([['g'], ['y']]);
+    expect([[...flagged.generated], [...flagged.ambiguous]]).toEqual([['f', 'g'], ['x0', 'y']]);
   });
 });
 

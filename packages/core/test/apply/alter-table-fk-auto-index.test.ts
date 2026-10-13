@@ -35,6 +35,16 @@ const BASES: Record<string, string> = {
   composite: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `f` (`x0`,`x1`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `f` FOREIGN KEY (`x0`, `x1`) REFERENCES `par2` (`a`, `b`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
   plain: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `kz` (`x2`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
   colkey: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `x0` (`x0`),\n  KEY `kz` (`x2`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // colkey: FK 없이 직접 만든 KEY x0 (x0) — 이름이 첫 컬럼이다
+  shrink: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `k` (`x1`,`x0`),\n  KEY `f` (`x0`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `f` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // shrink: KEY k (x1, x0) + 자동 f (x0) — x1 을 지우면 k 가 (x0) 가 된다
+  shrinku: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `k` (`x1`,`x0`),\n  KEY `x0` (`x0`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `t_ibfk_1` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // shrinku: 같은 모양인데 FK 가 이름 없음 (자동 인덱스 x0, FK t_ibfk_1)
+  shrinkuser: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `k` (`x1`,`x0`),\n  KEY `k0` (`x0`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `f` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // shrinkuser: k (x1, x0) + 직접 만든 k0 (x0) + FK f
+  shrink3: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `k` (`x1`,`x2`,`x0`),\n  KEY `f` (`x0`),\n  CONSTRAINT `f` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // shrink3: KEY k (x1, x2, x0) + 자동 f (x0)
+  shrinkuq: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `u` (`x1`,`x0`),\n  KEY `f` (`x0`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `f` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // shrinkuq: UNIQUE KEY u (x1, x0) + 자동 f (x0)
+  shrinkcomp: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `k` (`x2`,`x0`,`x1`),\n  KEY `f` (`x0`,`x1`),\n  CONSTRAINT `f` FOREIGN KEY (`x0`, `x1`) REFERENCES `par2` (`a`, `b`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // shrinkcomp: KEY k (x2, x0, x1) + FK f (x0, x1) 의 자동 f (x0, x1)
+  shrinklong: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `k` (`x1`,`x0`),\n  KEY `f` (`x0`,`x2`),\n  CONSTRAINT `f` FOREIGN KEY (`x0`, `x2`) REFERENCES `par2` (`a`, `b`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // shrinklong: KEY k (x1, x0) + FK f (x0, x2) 의 자동 f (x0, x2)
+  twoauto: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `f1` (`x1`,`x0`),\n  KEY `f2` (`x0`),\n  CONSTRAINT `f1` FOREIGN KEY (`x1`, `x0`) REFERENCES `par2` (`a`, `b`),\n  CONSTRAINT `f2` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // twoauto: 자동 f1 (x1, x0) 다음 자동 f2 (x0)
+  twoauto2: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `f2` (`x0`),\n  KEY `f1` (`x1`,`x0`),\n  CONSTRAINT `f1` FOREIGN KEY (`x1`, `x0`) REFERENCES `par2` (`a`, `b`),\n  CONSTRAINT `f2` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // twoauto2: 자동 f2 (x0) 다음 자동 f1 (x1, x0)
+  autoshrink: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `k0` (`x0`),\n  KEY `f` (`x1`,`x0`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `f` FOREIGN KEY (`x1`, `x0`) REFERENCES `par2` (`a`, `b`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // autoshrink: 직접 만든 k0 (x0) + FK f (x1, x0) 의 자동 f (x1, x0)
   two: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `f` (`x0`),\n  KEY `g` (`x2`),\n  CONSTRAINT `f` FOREIGN KEY (`x0`) REFERENCES `par` (`id`),\n  CONSTRAINT `g` FOREIGN KEY (`x2`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // two: FK f (x0)·g (x2) 둘의 자동 인덱스
   fkcol: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `x0` (`x0`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `fk_a` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // fkcol: 직접 만든 KEY x0 (x0) + CONSTRAINT fk_a (이름이 첫 컬럼이어도 FK 이름이 자동 꼴이 아니다)
   sym: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `fk_a` (`x0`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `fk_a` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // sym: CONSTRAINT fk_a FOREIGN KEY ix_n (x0) — 자동 인덱스 이름은 CONSTRAINT 이름 fk_a
@@ -235,11 +245,47 @@ const SCRIPT_CASES: [variant: string, script: string, expected: string][] = [
   ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE;\nALTER TABLE t ADD INDEX ix (x0);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0) | f'],
   ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE, ADD INDEX f (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) f(x0,x1) | f'], // 같은 이름의 새 f 가 자동 f 를 대신해 대상이 있다 (새 f 는 보이는 채로 남는다)
   ['unnamed', 'ALTER TABLE t ALTER INDEX x0 INVISIBLE, ADD INDEX ix (x1, x0);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x1,x0) | t_ibfk_1'],
+  // DROP COLUMN 이 기존 키의 앞쪽을 줄여 FK 자동 인덱스와 같아지면 자동 인덱스가 버려진다 (키 종류·컬럼 수와 상관없다; 직접 만든 인덱스끼리는 버리지 않는다)
+  ['shrink', 'ALTER TABLE t DROP COLUMN x1;', 'PRIMARY(id) k(x0) kz(x2) | f'],
+  ['shrink', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t DROP COLUMN x1;', 'PRIMARY(id) k(x0) kz(x2) | '],
+  ['shrink', 'ALTER TABLE t DROP FOREIGN KEY f, DROP COLUMN x1;', 'PRIMARY(id) k(x0) kz(x2) | '],
+  ['shrink', 'ALTER TABLE t DROP COLUMN x1, ADD INDEX z (x2);', 'PRIMARY(id) k(x0) kz(x2) z(x2) | f'],
+  ['shrink', 'ALTER TABLE t DROP COLUMN x2;', 'PRIMARY(id) k(x1,x0) f(x0) | f'],
+  ['shrinkuser', 'ALTER TABLE t DROP COLUMN x1;', 'PRIMARY(id) k(x0) k0(x0) kz(x2) | f'],
+  ['shrink3', 'ALTER TABLE t DROP COLUMN x1;', 'PRIMARY(id) k(x2,x0) f(x0) | f'],
+  ['shrink3', 'ALTER TABLE t DROP COLUMN x2;', 'PRIMARY(id) k(x1,x0) f(x0) | f'],
+  ['shrink3', 'ALTER TABLE t DROP COLUMN x1, DROP COLUMN x2;', 'PRIMARY(id) k(x0) | f'],
+  ['shrinkuq', 'ALTER TABLE t DROP COLUMN x1;', 'PRIMARY(id) U:u(x0) kz(x2) | f'],
+  ['shrinkcomp', 'ALTER TABLE t DROP COLUMN x2;', 'PRIMARY(id) k(x0,x1) | f'],
+  ['shrinklong', 'ALTER TABLE t DROP COLUMN x1;', 'PRIMARY(id) k(x0) f(x0,x2) | f'],
+  ['twoauto', 'ALTER TABLE t DROP FOREIGN KEY f1, DROP COLUMN x1;', 'PRIMARY(id) f2(x0) | f2'],
+  ['twoauto2', 'ALTER TABLE t DROP FOREIGN KEY f1, DROP COLUMN x1;', 'PRIMARY(id) f1(x0) | f2'],
+  ['twoauto', 'ALTER TABLE t DROP FOREIGN KEY f1;\nALTER TABLE t DROP COLUMN x1;', 'PRIMARY(id) f2(x0) | f2'],
+  ['autoshrink', 'ALTER TABLE t DROP FOREIGN KEY f, DROP COLUMN x1;', 'PRIMARY(id) k0(x0) kz(x2) | '],
+  ['shrinku', 'ALTER TABLE t DROP COLUMN x2;', 'PRIMARY(id) k(x1,x0) x0(x0) | t_ibfk_1'],
+  // RENAME INDEX 는 옛 이름·새 이름을 자동 분류에서 뺀다: 이름을 이어받은 인덱스를 자동 인덱스로 보지 않는다
+  ['named', 'ALTER TABLE t RENAME INDEX f TO g, RENAME INDEX ka TO f, ADD INDEX ix (x1, x2);', 'PRIMARY(id) f(x1) g(x0) kz(x2) ix(x1,x2) | f'],
+  ['named', 'ALTER TABLE t RENAME INDEX f TO g, RENAME INDEX ka TO f, ADD INDEX ix (x0, x1);', 'PRIMARY(id) f(x1) g(x0) kz(x2) ix(x0,x1) | f'],
+  ['named', 'ALTER TABLE t RENAME INDEX f TO F, ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) F(x0) kz(x2) ix(x0,x1) | f'],
+  ['named', 'ALTER TABLE t RENAME INDEX f TO F;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) F(x0) kz(x2) ix(x0,x1) | f'],
+  ['unnamed', 'ALTER TABLE t RENAME INDEX x0 TO y0, RENAME INDEX ka TO x0, ADD INDEX ix (x1, x2);', 'PRIMARY(id) x0(x1) y0(x0) kz(x2) ix(x1,x2) | t_ibfk_1'],
 ];
 
 describe('ALTER TABLE — FK 자동 인덱스: 스크립트 안에서 출처를 기억한다', () => {
   it.each(SCRIPT_CASES)('%s: %s', (variant, script, expected) => {
     expect(shown(tableT(ok(variant, script)))).toBe(expected);
+  });
+});
+
+describe('ALTER TABLE — DROP COLUMN 이 줄인 키가 자동인지 알 수 없는 인덱스를 버릴 때', () => {
+  // shrinku: KEY k (x1, x0) + FK t_ibfk_1 의 이름이 첫 컬럼인 인덱스 x0 — x1 을 지우면 k 가 (x0) 가 되어, x0 이 자동이면 MySQL 이 버리고 직접 만든 것이면 남긴다
+  it.each([
+    'ALTER TABLE t DROP COLUMN x1;',
+    'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t DROP COLUMN x1;', // FK 를 지운 뒤에도 알 수 없다는 사실이 이어진다
+  ])('거부: %j', (script) => {
+    const r = run('shrinku', script);
+    expect(r).toMatchObject({ ok: false, error: { reason: expect.stringContaining('`x0`') } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT)).toBe(true);
   });
 });
 
