@@ -3,6 +3,7 @@ import { ParseError, type Cursor } from '../cursor';
 import { routineNameKey } from '../diff';
 import type { Routine, RoutineCharacteristics, RoutineKind } from '../model';
 import { parseRoutine } from '../parse-routine';
+import { isDefaultCharacteristic } from '../routine-defaults';
 import { routineReturns } from './normalize-mysql';
 import { objectName, objectNameList, type State } from './state';
 import { fail, RE_EXPORT } from './types';
@@ -11,9 +12,6 @@ const CREATE_ROUTINE_RE = /^CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCED
 const IF_NOT_EXISTS_RE = /^(CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCEDURE)\s+)IF\s+NOT\s+EXISTS\s+/i;
 // 이름 앞에 스키마를 붙인 꼴 (`db`.name). parseRoutine 은 식별자 하나만 이름으로 읽는다 (IF NOT EXISTS 는 이미 뗀 문장을 본다)
 const QUALIFIED_NAME_RE = /^CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCEDURE)\s+(?:`(?:[^`]|``)*`|\w+)\s*\./i;
-// 기본값과 같은 특성 값. SHOW CREATE 는 이것들을 찍지 않는다 (print.ts 의 printRoutine·diff.ts 의 ROUTINE_DEFAULTS 와 같은 규칙).
-// 빈 COMMENT 도 COMMENT 가 없는 것과 같다
-const DEFAULT_CHARACTERISTICS: Readonly<Record<string, unknown>> = { deterministic: false, dataAccess: 'CONTAINS SQL', security: 'DEFINER', language: 'SQL', comment: '' };
 const label = (kind: RoutineKind) => (kind === 'function' ? 'FUNCTION' : 'PROCEDURE');
 
 export const isCreateRoutine = (ddl: string): boolean => CREATE_ROUTINE_RE.test(ddl);
@@ -45,7 +43,7 @@ function readRoutine(ddl: string, noBackslashEscapes: boolean): Routine {
 // 덤프에서 읽은 모델과 같은 모양으로 맞춘다: 직접 쓴 기본값 특성(LANGUAGE SQL·NOT DETERMINISTIC·CONTAINS SQL·SQL SECURITY DEFINER·빈 COMMENT)은 저장하지 않는다.
 // 남기면 diff 에 변경이 잘못 잡히고 print·parse 왕복이 달라진다. 기본값이 아닌 특성은 그대로 두고, 새 객체를 돌려준다
 function withoutDefaultCharacteristics(ch: RoutineCharacteristics): RoutineCharacteristics {
-  return Object.fromEntries(Object.entries(ch).filter(([name, value]) => value !== DEFAULT_CHARACTERISTICS[name]));
+  return Object.fromEntries(Object.entries(ch).filter(([name, value]) => !isDefaultCharacteristic(name, value)));
 }
 
 function parseOrFail(ddl: string, noBackslashEscapes: boolean): Routine {
