@@ -2742,7 +2742,7 @@ git commit -m "feat(core): ALTER 적용 — 결과 모델을 td-export 0.1.52 �
   - `packages/core/package.json`: `test:mysql` 스크립트에 `test/apply.int.test.ts` 를 더한다
 - Create: `packages/core/test/apply.int.test.ts`
 - Create: `packages/core/test/fixtures/alter-scenarios/_base.sql`
-- Create: 시나리오 폴더 23개 — `packages/core/test/fixtures/alter-scenarios/<이름>/script.sql`, 실패 시나리오에는 `expect-error.txt` 를 함께 둔다
+- Create: 시나리오 폴더 26개 — `packages/core/test/fixtures/alter-scenarios/<이름>/script.sql`, 실패 시나리오에는 `expect-error.txt` 를 함께 둔다
 - 실측과 다르면 Modify: `packages/core/src/apply/*.ts`
   - 고칠 때마다 `packages/core/test/apply/*.test.ts` 에 그 규칙의 단위 테스트를 더한다
 
@@ -2907,7 +2907,7 @@ suite.each(MYSQL_TARGETS)('$name ALTER 적용', ({ name: target, port }) => {
 "test:mysql": "docker compose -f docker-compose.test.yml up -d --wait && MYSQL_IT=1 vitest run test/mysql.int.test.ts test/apply.int.test.ts",
 ```
 
-- [ ] **Step 3: 공용 기준 덤프와 성공 시나리오 13개를 만든다**
+- [ ] **Step 3: 공용 기준 덤프와 성공 시나리오 14개를 만든다**
 
 `packages/core/test/fixtures/alter-scenarios/_base.sql`:
 
@@ -3095,6 +3095,15 @@ CREATE INDEX ix_q ON `__DB__`.`member` (q);
 RENAME TABLE __DB__.orders TO __DB__.orders2;
 ```
 
+`keys-measured/script.sql` (Task 4 에서 8.0 실측으로 정한 키 규칙을 8.0·8.4 에서 고정):
+
+```sql
+ALTER TABLE member ADD COLUMN code VARCHAR(10), ADD UNIQUE KEY uq_code (code(10)), ADD FULLTEXT KEY ft_name (name);
+CREATE TABLE flags (f TINYINT PRIMARY KEY);
+ALTER TABLE orders ADD COLUMN flag TINYINT(1), ADD INDEX ix_amount_desc (amount DESC), ADD CONSTRAINT fk_flag FOREIGN KEY (flag) REFERENCES flags (f);
+CREATE TABLE child_desc (id INT PRIMARY KEY, pid INT UNSIGNED, KEY ix_pid_desc (pid DESC), FOREIGN KEY (pid) REFERENCES member (id));
+```
+
 `charset-columns/script.sql`:
 
 ```sql
@@ -3108,7 +3117,7 @@ ALTER TABLE member
 ALTER TABLE member MODIFY name VARCHAR(50);
 ```
 
-- [ ] **Step 4: 실패 시나리오 10개를 만든다 (`script.sql` 과 `expect-error.txt`)**
+- [ ] **Step 4: 실패 시나리오 12개를 만든다 (`script.sql` 과 `expect-error.txt`)**
 
 | 폴더 | script.sql | expect-error.txt |
 |---|---|---|
@@ -3122,6 +3131,8 @@ ALTER TABLE member MODIFY name VARCHAR(50);
 | `error-drop-fk-index` | `ALTER TABLE orders DROP INDEX member_id;` | `1553` |
 | `error-duplicate-pk` | `ALTER TABLE member ADD PRIMARY KEY (email);` | `1068` |
 | `error-drop-last-column` | `CREATE TABLE one_col (x INT);` 다음 줄에 `ALTER TABLE one_col DROP COLUMN x;` | `1090` |
+| `error-key-duplicate-column` | `ALTER TABLE member ADD INDEX ix_dup (name, name);` | `1060` |
+| `error-set-null-not-null` | `ALTER TABLE orders ADD CONSTRAINT fk_m2 FOREIGN KEY (member_id) REFERENCES member (id) ON DELETE SET NULL;` | `1830` |
 
 `expect-error.txt` 에는 숫자 한 줄만 쓴다.
 
@@ -3164,7 +3175,7 @@ Run: `npm test -w @tdm/core && npm run typecheck -w @tdm/core` — Expected: PAS
 
 ```bash
 git add packages/core/test/mysql-dump.ts packages/core/test/mysql.int.test.ts packages/core/test/apply.int.test.ts packages/core/test/fixtures/alter-scenarios packages/core/package.json packages/core/src/apply packages/core/test/apply docs/superpowers/specs/2026-10-13-alter-apply-design.md
-git commit -m "test(core): ALTER 적용을 실제 MySQL 8.0/8.4 결과와 비교하는 시나리오 (성공 13·실패 10) — 실측에 맞춘 규칙 보정"
+git commit -m "test(core): ALTER 적용을 실제 MySQL 8.0/8.4 결과와 비교하는 시나리오 (성공 14·실패 12) — 실측에 맞춘 규칙 보정"
 ```
 
 ---
