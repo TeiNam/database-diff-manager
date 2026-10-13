@@ -1,13 +1,14 @@
 // ALTER 스크립트를 기준 버전 모델에 적용해 새 버전을 만든다: core applyScript → printSqlDump(원문) → ingest (같은 트랜잭션에서
 // 파생 정보·rename 매핑을 쓰고, 완전성 판정은 기준 버전에서 물려받는다)
-import { applyScript, ApplyFailure, diffSchemas, parseSqlDump, printSqlDump, type ApplyDefaults, type ParsedDump, type RenameMapping, type SchemaDiff, type SchemaEvidence, type SchemaModel } from '@tdm/core';
+import { applyScript, ApplyFailure, diffSchemas, parseSqlDump, printSqlDump, type ApplyDefaults, type RenameMapping, type SchemaDiff, type SchemaEvidence, type SchemaModel } from '@tdm/core';
 import type { Db } from '../db/connection';
 import { AppError } from '../errors';
 import { saveDerivation } from '../repos/derivations';
 import { loadEvidence } from '../repos/evidence';
 import { writeRenames } from '../repos/renames';
 import { loadVersion } from '../repos/versions';
-import { ingest, modelHash } from './ingest';
+import { roundTripMismatches, type RoundTripInput } from './alter-round-trip';
+import { ingest } from './ingest';
 
 export interface AlterInput {
   baseId: number;
@@ -17,6 +18,8 @@ export interface AlterInput {
   defaults?: Partial<ApplyDefaults>;
   dryRun?: boolean;
   userId: number;
+  requestId?: string; // 안전망이 막을 때 메시지와 서버 로그에 남긴다
+  log?: { warn(details: object, message: string): void };
 }
 
 export interface AlterChange {
@@ -30,7 +33,7 @@ export type AlterResult =
   | { status: 'ok' | 'duplicate'; versionId: number; versionNo: number; applied: number; changes: AlterChange[] };
 
 const NO_EVIDENCE: SchemaEvidence = { level: 'unknown', reason: '기준 버전의 완전성 판정이 없습니다', objects: [] };
-const ROUND_TRIP_MESSAGE = 'ALTER 결과를 덤프로 출력해 다시 읽으면 적용 결과와 같지 않아(객체가 빠지거나 정의가 달라지거나 읽지 못하는 정의가 있음) 저장할 수 없습니다 — 기준 버전과 스크립트를 확인하고, 필요하면 td-export 로 다시 뽑아 올려 주세요';
+const MAX_LISTED_OBJECTS = 5;
 
 export function applyAlter(db: Db, input: AlterInput): AlterResult {
   const base = loadVersion(db, input.baseId);
@@ -47,7 +50,7 @@ export function applyAlter(db: Db, input: AlterInput): AlterResult {
   }
   const text = printDump(result.model, base.version.schemaName);
   const reparsed = parseSqlDump(text);
-  assertRoundTrip(result.model, reparsed);
+  assertRoundTrip(input, { base: base.model, baseAgain: () => parseSqlDump(printDump(base.model, base.version.schemaName)), applied: result.model, reparsed });
   const changes = changesOf(diffSchemas(base.model, reparsed.model, result.renames));
   if (!changes.length) throw new AppError(400, '변경 없음 — 스크립트를 적용해도 기준 버전과 같습니다');
   if (input.dryRun) return { status: 'preview', applied: result.applied, changes, renames: result.renames };
@@ -73,11 +76,15 @@ function printDump(model: SchemaModel, schemaName: string): string {
   }
 }
 
-// 출력한 덤프를 다시 읽은 모델이 적용 결과와 같아야 한다. 어긋나면(객체가 빠지거나 정의가 달라지거나 읽다가 경고가 남) 그대로 저장할 때
-// 기준 버전의 판정을 물려받은 채 객체가 조용히 사라진 버전이 생기므로, 미리보기와 저장 모두 거부한다
-function assertRoundTrip(applied: SchemaModel, reparsed: ParsedDump): void {
-  if (reparsed.warnings.length === 0 && modelHash(reparsed.model) === modelHash(applied)) return;
-  throw new AppError(400, ROUND_TRIP_MESSAGE);
+// 출력한 덤프를 다시 읽은 모델이 적용 결과와 같아야 한다 (alter-round-trip.ts). 어긋나면 그대로 저장할 때 기준 버전의 판정을 물려받은 채 객체가 조용히
+// 사라지거나 바뀐 버전이 생기므로 미리보기와 저장 모두 거부한다. 이 도구의 출력·읽기가 어긋난 것이라 스크립트를 고치거나 다시 뽑아 올려도 풀리지 않으므로,
+// 진단할 수 있게 어긋난 객체 이름과 요청 ID 를 서버 로그에 남긴다 (스크립트는 남기지 않는다)
+function assertRoundTrip(input: AlterInput, check: RoundTripInput): void {
+  const objects = roundTripMismatches(check);
+  if (!objects.length) return;
+  input.log?.warn({ requestId: input.requestId, baseVersionId: input.baseId, objects }, 'ALTER 안전망: 출력한 덤프를 다시 읽은 결과가 적용 결과와 다릅니다');
+  const listed = objects.slice(0, MAX_LISTED_OBJECTS).join(', ') + (objects.length > MAX_LISTED_OBJECTS ? ` 외 ${objects.length - MAX_LISTED_OBJECTS}개` : '');
+  throw new AppError(400, `ALTER 결과를 덤프로 출력해 다시 읽으면 적용 결과와 달라 저장할 수 없습니다: ${listed} — 스크립트나 기준 버전의 문제가 아니라 이 도구의 출력·읽기가 어긋난 것이므로 관리자에게 알려 주세요${input.requestId ? ` (요청 ID ${input.requestId})` : ''}`);
 }
 
 function changesOf(diff: SchemaDiff): AlterChange[] {

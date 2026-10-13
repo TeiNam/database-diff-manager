@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { one, run, type Db } from '../src/db/connection';
 import { loadEvidence, loadStaleReason } from '../src/repos/evidence';
 import { listRenames } from '../src/repos/renames';
+import { applyAlter } from '../src/services/alter';
 import { backfillEvidence } from '../src/services/evidence-backfill';
 import { ingest } from '../src/services/ingest';
 import { CSRF, loggedInApp, SAMPLE_MD, sampleText } from './helpers';
@@ -218,6 +219,59 @@ describe('POST /versions/:id/alter — 출력→재파싱 안전망', () => {
       expect(res.json().error).toContain('다시 읽으면');
     }
     expect(versionCount(ctx.db)).toBe(1);
+  });
+
+  // 기준에 이미 있는 이상한 객체: 파싱하지 못한 테이블(parse-error), 다시 찍으면 원문과 다른 테이블·루틴(round-trip, 모델에 rawDdl 이 남는다).
+  // 스크립트가 건드리지 않았으면 기준을 그대로 출력·다시 읽은 결과와 같아야 하고, 건드린 객체는 적용 결과와 같아야 한다 (rawDdl 은 출력한 덤프가 원문이라 보지 않는다)
+  const BAD = 'CREATE TABLE `bad` (\n  `x` int NOT NULL FOO\n) ENGINE=InnoDB;';
+  const ODD = 'CREATE TABLE `odd` (\n  `a` int    NOT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;';
+  const ODD_ROUTINE = 'DELIMITER ;;\nCREATE FUNCTION `f`() RETURNS int   DETERMINISTIC RETURN 1;;\nDELIMITER ;';
+  async function oddSetup() {
+    const ctx = await setup();
+    const odd = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'odd', filename: 'odd.sql', text: dump('odd', [TABLE, BAD, ODD, ODD_ROUTINE].join('\n')), userId: 1 });
+    expect(odd.warnings.map((w) => [w.code, w.object])).toEqual([['parse-error', 'bad'], ['round-trip', 'odd'], ['round-trip', 'f']]);
+    return { ...ctx, oddId: odd.versionId };
+  }
+
+  it('기준에 파싱 실패·왕복 불일치 객체가 있어도 그 객체를 건드리지 않는 ALTER 는 받고, 그 객체는 그대로 남는다', async () => {
+    const ctx = await oddSetup();
+    const preview = await ctx.alter(ctx.oddId, { script: 'ALTER TABLE member ADD age INT;', dryRun: true });
+    expect(preview.statusCode, preview.body).toBe(200);
+    expect(preview.json().changes).toEqual([{ kind: 'table', name: 'member', op: 'modify' }]);
+    const saved = (await ctx.alter(ctx.oddId, { script: 'ALTER TABLE member ADD age INT;' })).json();
+    expect(saved).toMatchObject({ status: 'ok', applied: 1 });
+    const detail = (await ctx.app.inject({ method: 'GET', url: `/api/versions/${saved.versionId}`, headers: ctx.viewer })).json();
+    const bad = detail.model.tables.find((t: { name: string }) => t.name === 'bad');
+    expect(bad).toMatchObject({ parseError: expect.stringContaining('FOO'), rawDdl: expect.stringContaining('FOO') });
+    expect(detail.model.tables.find((t: { name: string }) => t.name === 'odd').columns).toMatchObject([{ name: 'a', type: 'int', nullable: false }]);
+  });
+
+  it('왕복 불일치 객체를 건드리는 ALTER 도 받는다 (적용 결과를 다시 찍은 덤프가 새 원문이다)', async () => {
+    const ctx = await oddSetup();
+    const res = await ctx.alter(ctx.oddId, { script: 'ALTER TABLE odd ADD b INT;', dryRun: true });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().changes).toEqual([{ kind: 'table', name: 'odd', op: 'modify' }]);
+  });
+
+  it('그래도 객체가 빠지거나 바뀌면 막고, 객체 이름과 요청 ID 를 서버 로그에 남긴다 (스크립트는 남기지 않는다)', async () => {
+    const ctx = await oddSetup();
+    const withoutOdd = (model: Parameters<typeof realPrint>[0]) => realPrint({ ...model, tables: model.tables.filter((t) => t.name !== 'odd') });
+    vi.mocked(printSqlDump).mockImplementation(withoutOdd);
+    const lost = await ctx.alter(ctx.oddId, { script: 'ALTER TABLE member ADD age INT;', dryRun: true });
+    expect(lost.statusCode).toBe(400);
+    expect(lost.json().error).toContain('`odd`');
+    expect(lost.json().error).not.toContain('td-export'); // 다시 뽑아 올려도 풀리지 않는다
+    // 건드리지 않은 정상 테이블이 다시 읽으며 바뀌어도 막는다 — 기준을 그대로 다시 읽어도 똑같이 바뀌는 출력 버그도 놓치지 않는다
+    vi.mocked(printSqlDump).mockImplementation((model) => realPrint({ ...model, tables: model.tables.map((t) => (t.name === 'member' ? { ...t, options: [] } : t)) }));
+    const changed = await ctx.alter(ctx.oddId, { script: 'ALTER TABLE odd ADD b INT;', dryRun: true });
+    expect(changed.statusCode).toBe(400);
+    expect(changed.json().error).toContain('`member`');
+    const warn = vi.fn();
+    vi.mocked(printSqlDump).mockImplementation(withoutOdd);
+    expect(() => applyAlter(ctx.db, { baseId: ctx.oddId, script: 'ALTER TABLE member ADD age INT; -- 비밀', dryRun: true, userId: 1, requestId: 'req-7', log: { warn } })).toThrow(/req-7/);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toEqual({ requestId: 'req-7', baseVersionId: ctx.oddId, objects: ['table `odd`'] });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('비밀');
   });
 
   it('서버 오류(ApplyFailure 가 아닌 예외)는 400 으로 바뀌지 않는다', async () => {

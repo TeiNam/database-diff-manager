@@ -35,7 +35,7 @@ export function versionRoutes(app: FastifyInstance, ctx: AppContext): void {
   // 권한은 본문을 읽기 전(onRequest)에 확인한다. 익명 요청이 큰 본문을 보내 파싱까지 가지 않도록
   app.post('/versions/:id/alter', { onRequest: requireEditor, bodyLimit: ALTER_BODY_LIMIT }, async (req) => {
     const { id } = IdParams.parse(req.params);
-    return applyAlter(ctx.db, { baseId: id, ...AlterBody.parse(req.body), userId: req.user!.id });
+    return applyAlter(ctx.db, { baseId: id, ...AlterBody.parse(req.body), userId: req.user!.id, requestId: req.id, log: req.log });
   });
 
   app.get('/versions/:id/derivation', { onRequest: requireLogin }, async (req) => {
