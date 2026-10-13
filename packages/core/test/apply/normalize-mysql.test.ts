@@ -310,6 +310,18 @@ describe('finalizeColumn', () => {
     expect(finalizeColumn(spec({ ...plain, nullable: true, default: { kind: 'null' } }), T)).toMatchObject({ nullable: false });
   });
 
+  // MySQL 실측: FLOAT·DOUBLE AUTO_INCREMENT 는 8.0.46 이 받고 8.4.11 은 1063 이다 (DECIMAL·문자열은 둘 다 1063). 스펙은 8.4 를 따르므로 둘 다 거부한다
+  it.each(['float', 'double', 'float(7,4)', 'double unsigned'])('%s AUTO_INCREMENT 는 8.4 규칙대로 거부 (MySQL 8.4 1063)', (type) => {
+    expect(() => finalizeColumn(spec({ type, autoIncrement: true }), T)).toThrow(/\(MySQL 8\.4 1063 — 8\.0 은 받지만 1차에서는 8\.4 규칙을 따릅니다\)/);
+    expect(() => finalizeColumn(spec({ type, autoIncrement: true, nullable: false }), T)).toThrow(/8\.4 1063/);
+    expect(finalizeColumn(spec({ type }), T).type).toBe(type); // AUTO_INCREMENT 가 아니면 상관없다
+  });
+
+  it.each(['tinyint', 'smallint', 'mediumint', 'int', 'bigint unsigned'])('%s AUTO_INCREMENT 는 받고, DECIMAL·문자열은 1063', (type) => {
+    expect(finalizeColumn(spec({ type, autoIncrement: true }), T)).toMatchObject({ autoIncrement: true, nullable: false });
+    expect(() => finalizeColumn(spec({ type: 'decimal(10,0)', autoIncrement: true }), T)).toThrow(/\(MySQL 1063\)/);
+  });
+
   it('PRIMARY KEY NULL·문자열 AUTO_INCREMENT·AUTO_INCREMENT 기본값은 거부', () => {
     expect(() => finalizeColumn(spec({ primaryKey: true, nullable: true }), T)).toThrow(/1171/);
     expect(() => finalizeColumn(spec({ type: 'varchar(1)', autoIncrement: true }), T)).toThrow(/1063/);

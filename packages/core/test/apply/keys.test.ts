@@ -483,3 +483,43 @@ describe('assertReaddedKeysFit — 지우고 같은 이름으로 다시 더한 �
     expect(() => assertReaddedKeysFit(t, retypeTo(t, 'pid', 'varchar(5)'), new Set())).not.toThrow(); // 다시 더하지 않은 컬럼은 보지 않는다
   });
 });
+
+describe('ensureFkIndexes·addKeys — FK 자동 인덱스 이름 충돌과 지운 FK 이름 (MySQL 8.0.46·8.4.11 실측)', () => {
+  const unnamedFk = (column: string) => fk(false, [column], 'parent', ['id']);
+  const FKS = [{ name: 'fk_x', columns: ['pid'], refTable: 'parent', refColumns: ['id'] }];
+  // pid 를 받치는 인덱스가 없는 child: KEY pid (name) 만 있다 (이름만 pid)
+  const unsupported = (): Table => {
+    const c = table(fresh(), 'child');
+    return { ...c, foreignKeys: FKS, indexes: [c.indexes[0], { name: 'pid', kind: 'INDEX', parts: [{ column: 'name', desc: false }], invisible: false }, { name: 'fk_x', kind: 'INDEX', parts: [{ column: 'name', desc: false }], invisible: false }] };
+  };
+
+  it('CONSTRAINT 이름·FOREIGN KEY 뒤 인덱스 이름이 겹치면 1061, 안 정했으면 _2 를 붙인다', () => {
+    expect(() => ensureFkIndexes(unsupported(), [{ name: 'fk_x', named: true }])).toThrow(/\(MySQL 1061\)/);
+    expect(() => ensureFkIndexes(unsupported(), [{ name: 'fk_x', named: false, indexName: 'FK_X' }])).toThrow(/\(MySQL 1061\)/); // 대소문자 무시
+    expect(ensureFkIndexes(unsupported(), [{ name: 'fk_x', named: false }]).indexes.at(-1)).toEqual({ name: 'pid_2', kind: 'INDEX', parts: [{ column: 'pid', desc: false }], invisible: false });
+    expect(() => ensureFkIndexes(unsupported(), [{ name: 'fk_x', named: false, indexName: 'PRIMARY' }])).toThrow(/\(MySQL 1280\)/);
+  });
+
+  it('받치는 인덱스가 있으면 새 인덱스를 만들지 않으므로 이름이 겹쳐도 된다', () => {
+    const t = unsupported();
+    const supported: Table = { ...t, indexes: [...t.indexes, { name: 'fk_x_ok', kind: 'INDEX', parts: [{ column: 'pid', desc: false }], invisible: false }] };
+    expect(ensureFkIndexes(supported, [{ name: 'fk_x', named: true }]).indexes).toHaveLength(supported.indexes.length);
+  });
+
+  it('addKeys: 문장 앞에 있던(지우는) FK 와 같은 이름(대소문자 무시)으로 직접 이름을 붙이면 1826 — 이름 없는 FK 는 상관없다', () => {
+    const st = fresh();
+    const c = withColumns(table(st, 'child'), col('extra', 'int unsigned'));
+    const gone: Table = { ...c, foreignKeys: [], indexes: c.indexes.filter((i) => i.name !== 'pid') }; // child_ibfk_1 을 지운 뒤의 테이블
+    expect(() => addKeys(st, gone, [fk(true, ['pid'], 'parent', ['id'], 'child_ibfk_1')], ['child_ibfk_1'])).toThrow(/\(MySQL 1826\)/);
+    expect(() => addKeys(st, gone, [fk(true, ['pid'], 'parent', ['id'], 'CHILD_IBFK_1')], ['child_ibfk_1'])).toThrow(/\(MySQL 1826\)/);
+    expect(addKeys(st, gone, [fk(true, ['pid'], 'parent', ['id'], 'child_ibfk_9')], ['child_ibfk_1']).foreignKeys.map((f) => f.name)).toEqual(['child_ibfk_9']);
+    expect(addKeys(st, gone, [unnamedFk('extra')], ['child_ibfk_1']).foreignKeys.map((f) => f.name)).toEqual(['child_ibfk_2']);
+  });
+
+  it('addKeys: 인덱스 이름 충돌(1061)이 FK 이름 중복(1826)보다 먼저 걸린다', () => {
+    const st = fresh();
+    const c = withColumns(table(st, 'child'), col('extra', 'int unsigned'));
+    const gone: Table = { ...c, foreignKeys: [], indexes: [...c.indexes.filter((i) => i.name !== 'pid'), { name: 'child_ibfk_1', kind: 'INDEX', parts: [{ column: 'pid', desc: false }], invisible: false }] };
+    expect(() => addKeys(st, gone, [fk(true, ['extra'], 'parent', ['id'], 'child_ibfk_1')], ['child_ibfk_1'])).toThrow(/\(MySQL 1061\)/);
+  });
+});

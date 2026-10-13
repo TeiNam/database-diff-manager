@@ -87,6 +87,13 @@ export function columnKeyItems(spec: ColumnSpec): IndexItem[] {
   return [...(spec.primaryKey ? [item('PRIMARY')] : []), ...(spec.unique ? [item('UNIQUE')] : [])];
 }
 
+// 이름을 직접 정한 인덱스(CONSTRAINT 이름·FOREIGN KEY 뒤 인덱스 이름으로 FK 가 만드는 인덱스 포함)의 이름 검사: PRIMARY 는 1280, 이미 있으면 1061 (대소문자 무시).
+// 이름을 안 정했을 때처럼 `_2` 를 붙여 피하지 않는다 (MySQL 8.0.46·8.4.11 실측)
+function assertIndexNameFree(t: Pick<Table, 'indexes'>, name: string): void {
+  if (sameName(name, 'PRIMARY')) fail('인덱스 이름으로 PRIMARY 는 쓸 수 없습니다 (MySQL 1280)');
+  if (t.indexes.some((i) => sameName(i.name, name))) fail(`인덱스 이름 \`${name}\` 이 이미 있습니다 (MySQL 1061)`);
+}
+
 export function addIndex(t: Table, item: IndexItem): Table {
   const parts = item.index.parts.map((p) => ({ ...p, column: (findColumn(t, p.column!) ?? fail(`키 컬럼 \`${p.column}\` 이 없습니다 (MySQL 1072)`)).name }));
   assertDistinct(parts.map((p) => p.column));
@@ -100,8 +107,7 @@ export function addIndex(t: Table, item: IndexItem): Table {
     return { ...t, columns: t.columns.map((c) => (pk.has(c.name.toLowerCase()) ? notNull(c) : c)), indexes: [...t.indexes, { ...index, name: 'PRIMARY' }] };
   }
   const name = item.named ? index.name : uniqueIndexName(t, parts[0].column);
-  if (sameName(name, 'PRIMARY')) fail('인덱스 이름으로 PRIMARY 는 쓸 수 없습니다 (MySQL 1280)');
-  if (t.indexes.some((i) => sameName(i.name, name))) fail(`인덱스 이름 \`${name}\` 이 이미 있습니다 (MySQL 1061)`);
+  assertIndexNameFree(t, name);
   return { ...t, indexes: [...t.indexes, { ...index, name }] };
 }
 
@@ -273,13 +279,16 @@ function fkKind(c: Column): string {
   return INT_TYPES.has(base) ? c.type.replace(/^\w+\(\d+\)/, base) : c.type;
 }
 
-// 이 문장에서 붙인 FK 에 받치는 인덱스가 없으면 만든다. 이름: CONSTRAINT 이름 → FOREIGN KEY 뒤에 쓴 인덱스 이름 → 첫 컬럼 (겹치면 _2 …, MySQL 8.0 실측)
+// 이 문장에서 붙인 FK 에 받치는 인덱스가 없으면 만든다. 이름: CONSTRAINT 이름 → FOREIGN KEY 뒤에 쓴 인덱스 이름 (둘 다 직접 정한 이름이라 겹치면 1061) → 첫 컬럼 (겹치면 _2 …).
+// 받치는 인덱스가 이미 있으면 새 인덱스가 필요 없으므로 이름이 같아도 된다 (MySQL 8.0.46·8.4.11 실측)
 export function ensureFkIndexes(t: Table, added: readonly { name: string; indexName?: string; named: boolean }[]): Table {
   let next = t;
   for (const a of added) {
     const fk = next.foreignKeys.find((f) => f.name === a.name)!;
     if (next.indexes.some((i) => leadsWith(i, fk.columns))) continue;
-    const name = uniqueIndexName(next, a.named ? fk.name : (a.indexName ?? fk.columns[0]));
+    const given = a.named ? fk.name : a.indexName;
+    if (given !== undefined) assertIndexNameFree(next, given);
+    const name = given ?? uniqueIndexName(next, fk.columns[0]);
     next = { ...next, indexes: [...next.indexes, { name, kind: 'INDEX', parts: fk.columns.map((column) => ({ column, desc: false })), invisible: false }] };
   }
   return next;
@@ -287,7 +296,8 @@ export function ensureFkIndexes(t: Table, added: readonly { name: string; indexN
 
 // 인덱스·FK 정의를 차례로 붙이고, 붙인 FK 에 받치는 인덱스가 없으면 만든다 (ALTER TABLE ADD·CREATE TABLE 공용).
 // fkNamesBefore: 이 문장이 시작할 때 있던 FK 이름 (지우는 FK 포함) — 이름 없는 FK 는 이 중 가장 큰 번호 + 1 부터 하나씩 번호를 받는다 (MySQL 8.0.46·8.4.11 실측: 같은 문장에서
-// 직접 쓴 이름은 번호에 영향을 주지 않고, 겹치면 1826). 안 주면 t 에 있는 FK 이름 (CREATE TABLE 은 빈 테이블로 부른다). FK 를 붙인 뒤 sortForeignKeys 를 부르는 것은 부른 쪽의 몫이다
+// 직접 쓴 이름은 번호에 영향을 주지 않고, 겹치면 1826). 같은 문장에서 지운 FK 와 같은 이름을 다시 쓰는 것도 1826. 안 주면 t 에 있는 FK 이름 (CREATE TABLE 은 빈 테이블로 부른다).
+// FK 를 붙인 뒤 sortForeignKeys 를 부르는 것은 부른 쪽의 몫이다
 export function addKeys(st: State, t: Table, items: readonly ConstraintItem[], fkNamesBefore: readonly string[] = t.foreignKeys.map((f) => f.name)): Table {
   let next = t;
   let generated = highestFkNumber(t.name, fkNamesBefore);
@@ -299,7 +309,11 @@ export function addKeys(st: State, t: Table, items: readonly ConstraintItem[], f
       added.push({ name: next.foreignKeys.at(-1)!.name, ...(item.indexName !== undefined ? { indexName: item.indexName } : {}), named: item.named });
     }
   }
-  return ensureFkIndexes(next, added);
+  const done = ensureFkIndexes(next, added);
+  // 같은 문장에서 지운 FK 와 같은 이름(대소문자 무시)으로 다시 더할 수 없다 — 받치는 인덱스가 있어도 1826 (인덱스 이름 충돌 1061 이 먼저 걸린다)
+  const reused = items.find((i): i is FkItem => i.kind === 'fk' && i.named && fkNamesBefore.some((n) => sameName(n, i.fk.name)));
+  if (reused) fail(`FK 이름 \`${reused.fk.name}\` 이 이미 있습니다 — 같은 문장에서 지운 FK 와 같은 이름으로 다시 더할 수 없습니다 (MySQL 1826)`);
+  return done;
 }
 
 export function dropKeys(t: Table, drops: readonly KeyDrop[]): Table {

@@ -10,11 +10,11 @@ import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
 import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, enforcePrimaryKeyNotNull, exprUses, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
 import { splitList } from './lists';
-import { effectiveCollation, finalizeColumn, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
+import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { engineName, optionValue, parseCommonOption, setOption } from './options';
 import { findColumn, needTable, objectName, replaceTable, sameName, type State } from './state';
 import { renameTable } from './table-stmt';
-import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type Position } from './types';
+import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type DefaultSpec, type Position } from './types';
 
 const PARTITION = `파티션 절은 1차 지원 범위가 아닙니다 (MySQL 이 행을 옮깁니다) — ${RE_EXPORT}`;
 const CHARSET = `테이블 문자셋 변경(CONVERT TO·CHARACTER SET=·COLLATE=)은 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`;
@@ -161,7 +161,7 @@ function parseAlter(c: Cursor): Clause {
   if (c.acceptWord('SET', 'DEFAULT')) {
     if (c.isOp('(')) return fail(`식 기본값 SET DEFAULT (…) 은 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
     const value = parseDefault(c);
-    return { k: 'alterColumn', old, set: (col) => withDefault(col, normalizeDefault(value, col)) };
+    return { k: 'alterColumn', old, set: (col) => setDefault(col, value) };
   }
   if (c.acceptWord('DROP', 'DEFAULT')) return { k: 'alterColumn', old, set: dropDefault };
   if (c.acceptWord('SET', 'VISIBLE')) return { k: 'alterColumn', old, set: (col) => ({ ...col, invisible: false }) };
@@ -174,6 +174,16 @@ function withDefault(col: Column, value: string | undefined): Column {
   const next: Column = { ...col };
   delete next.default;
   return value === undefined ? next : { ...next, default: value };
+}
+
+// ALTER COLUMN … SET DEFAULT 값 (MySQL 8.0.46·8.4.11 실측). TEXT·BLOB·JSON·GEOMETRY 는 NULL 이든 리터럴이든 1101 이다 (NOT NULL 이어도, 생성 컬럼이어도 다른 오류보다 먼저 — 컬럼 정의의
+// `DEFAULT NULL` 은 받지만 SET DEFAULT 는 아니다). 생성 컬럼(VIRTUAL·STORED)은 1221. AUTO_INCREMENT 컬럼은 값을 검증한 뒤 받지만 SHOW CREATE 에 기본값이 찍히지 않아 저장하지 않는다
+function setDefault(col: Column, value: DefaultSpec): Column {
+  const base = baseType(col.type);
+  if (NO_LITERAL_DEFAULT.has(base)) fail(`${base.toUpperCase()} 컬럼 \`${col.name}\` 에는 기본값을 쓸 수 없습니다 (MySQL 1101)`);
+  if (col.generated) fail(`생성 컬럼 \`${col.name}\` 에는 DEFAULT 를 쓸 수 없습니다 (MySQL 1221)`);
+  const normalized = normalizeDefault(value, col);
+  return withDefault(col, col.autoIncrement ? undefined : normalized);
 }
 
 // DROP DEFAULT: DEFAULT 절이 없어진다. NULL 허용 컬럼도 `DEFAULT NULL` 이 사라진다 (MySQL 8.0.46·8.4.11 실측: `n1 varchar(10)` 으로 찍힌다).
@@ -297,6 +307,8 @@ function changeColumns(st: State, before: Table, entries: Entry[], clauses: read
     if (ch.k === 'renameColumn') e.col = { ...e.col, name: ch.to };
     else if (ch.k === 'alterColumn') e.col = ch.set(e.col);
     else {
+      // MODIFY·CHANGE 정의에는 AS 를 쓸 수 없으므로(파서가 거부한다) 생성 컬럼이면 일반 컬럼으로 바꾸는 절이다. STORED 는 바뀌지만 VIRTUAL 은 MySQL 이 거부한다 (실측 3106)
+      if (e.col.generated && !e.col.generated.stored) fail(`VIRTUAL 생성 컬럼 \`${e.col.name}\` 은 일반 컬럼으로 바꿀 수 없습니다 — 생성 컬럼의 STORED 여부는 바꿀 수 없습니다 (MySQL 3106)`);
       if (!ch.rename && ch.spec.name !== e.col.name) fail(`MODIFY 에 쓴 이름 \`${ch.spec.name}\` 이 컬럼 \`${e.col.name}\` 과 대소문자가 다릅니다 — 이름을 바꾸려면 CHANGE 를 쓰세요`);
       const next = finalizeColumn(ch.spec, charset);
       assertRetypeAllowed(st, before, e.col, next, charset);

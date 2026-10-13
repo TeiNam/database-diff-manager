@@ -17,7 +17,8 @@ export const NO_LITERAL_DEFAULT: ReadonlySet<string> = new Set([...BLOB_TYPES, '
   'geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection', 'geomcollection']);
 const KNOWN: ReadonlySet<string> = new Set([...NUMERIC, ...CHARSET_TYPES, ...NO_LITERAL_DEFAULT, 'bit', 'date', 'datetime', 'timestamp', 'time', 'year', 'binary', 'varbinary']);
 const TWO_ARGS: ReadonlySet<string> = new Set(['decimal', 'float', 'double']);
-const AUTO_INCREMENT_TYPES: ReadonlySet<string> = new Set([...INT_TYPES, 'float', 'double']);
+// AUTO_INCREMENT 를 쓸 수 있는 타입은 정수뿐이다. FLOAT·DOUBLE 은 8.0.46 이 받고 8.4.11 은 1063 이라 8.4 규칙을 따른다 (스펙 4장)
+const FLOAT_TYPES: ReadonlySet<string> = new Set(['float', 'double']);
 // 사전은 Map: 객체 조회는 'constructor'·'__proto__' 같은 Object.prototype 이름을 '있는 키'로 읽는다
 const ALIASES: ReadonlyMap<string, string> = new Map(Object.entries({
   integer: 'int', int1: 'tinyint', int2: 'smallint', int3: 'mediumint', int4: 'int', int8: 'bigint', middleint: 'mediumint',
@@ -225,7 +226,8 @@ function setDefault(text: string, type: string, bad: (why: string) => never): st
 export function finalizeColumn(spec: ColumnSpec, table: TableCharset): Column {
   const base = baseType(spec.type);
   if (spec.primaryKey && spec.nullable === true) fail(`PRIMARY KEY 컬럼 \`${spec.name}\` 은 NULL 일 수 없습니다 (MySQL 1171)`);
-  if (spec.autoIncrement && !AUTO_INCREMENT_TYPES.has(base)) fail(`AUTO_INCREMENT 는 정수·실수 컬럼에만 쓸 수 있습니다: \`${spec.name}\` (MySQL 1063)`);
+  if (spec.autoIncrement && FLOAT_TYPES.has(base)) fail(`AUTO_INCREMENT 는 FLOAT·DOUBLE 컬럼에 쓸 수 없습니다: \`${spec.name}\` (MySQL 8.4 1063 — 8.0 은 받지만 1차에서는 8.4 규칙을 따릅니다)`);
+  if (spec.autoIncrement && !INT_TYPES.has(base)) fail(`AUTO_INCREMENT 는 정수 컬럼에만 쓸 수 있습니다: \`${spec.name}\` (MySQL 1063)`);
   // AUTO_INCREMENT 컬럼은 NULL 을 써도 NOT NULL 이 되고, DEFAULT NULL 은 조용히 없어진다 (MySQL 8.0.46·8.4.11 실측). 다른 기본값은 1067.
   // PRIMARY KEY 에 든 컬럼의 NULL·DEFAULT NULL(1171)은 키가 다 정해진 문장 끝에서 enforcePrimaryKeyNotNull 이 본다
   if (spec.autoIncrement && spec.default && spec.default.kind !== 'null') fail(`AUTO_INCREMENT 컬럼 \`${spec.name}\` 에는 기본값을 쓸 수 없습니다 (MySQL 1067)`);
