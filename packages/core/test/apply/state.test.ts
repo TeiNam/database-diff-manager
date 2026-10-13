@@ -76,6 +76,34 @@ describe('이름 찾기', () => {
   });
 });
 
+// 인덱스 출처(provenance): 이 실행이 아는 인덱스 출처 (auto·user·ambiguous). 기준 버전에는 없고, 테이블을 따라 옮겨지며 지우면 사라진다
+describe('인덱스 출처 추적', () => {
+  it('기준 버전은 아는 출처가 없고, 테이블 이름을 바꾸면 따라가며(맞바꿔도), 지우면 사라진다 — trackNew 는 건드리지 않는다', () => {
+    const st = fresh();
+    expect(st.origins.provenance.size).toBe(0);
+    st.origins.provenance.set('a', new Map([['idx_name', 'auto']]));
+    st.origins.provenance.set('b', new Map([['k', 'user']]));
+    moveOrigins(st.origins, 'a', 'a2');
+    expect(entries(st.origins.provenance.get('a2'))).toEqual([['idx_name', 'auto']]);
+    expect(st.origins.provenance.has('a')).toBe(false);
+    moveOrigins(st.origins, 'b', 'a');
+    moveOrigins(st.origins, 'a2', 'b');
+    expect(entries(st.origins.provenance.get('a'))).toEqual([['k', 'user']]);
+    expect(entries(st.origins.provenance.get('b'))).toEqual([['idx_name', 'auto']]);
+    trackNew(st.origins, st.model.tables[0], false); // CREATE TABLE 은 addKeys 가 적어 둔 출처를 지우지 않는다
+    expect(entries(st.origins.provenance.get('a'))).toEqual([['k', 'user']]);
+    forgetOrigins(st.origins, 'a');
+    expect(st.origins.provenance.has('a')).toBe(false);
+  });
+
+  it('moveOrigins: 같은 이름으로 옮기면 출처도 그대로다', () => {
+    const st = fresh();
+    st.origins.provenance.set('a', new Map([['idx_name', 'user']]));
+    moveOrigins(st.origins, 'a', 'a');
+    expect(entries(st.origins.provenance.get('a'))).toEqual([['idx_name', 'user']]);
+  });
+});
+
 describe('보완', () => {
   it('moveOrigins: 같은 이름으로 옮기면 아무것도 바뀌지 않는다', () => {
     const st = fresh();

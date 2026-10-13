@@ -8,7 +8,8 @@ import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
-import { addKeys, assertAutoKeysKnown, assertReaddedKeysFit, checkNowNotNull, checkTable, classifyFkIndexes, columnKeyItems, dropKeys, enforcePrimaryKeyNotNull, exprUses, planAutoKeys, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type AutoKeyPlan, type KeyDrop } from './keys';
+import { assertAutoKeysKnown, classifyFkIndexes, planAutoKeys, renameProvenance, syncProvenance, type AutoKeyPlan } from './auto-index';
+import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, enforcePrimaryKeyNotNull, exprUses, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
 import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { engineName, optionValue, parseCommonOption, setOption } from './options';
@@ -219,14 +220,16 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   const renamed = new Map(entries.filter((e) => e.from !== undefined && e.from !== e.col.name).map((e) => [e.from!.toLowerCase(), e.col.name]));
   assertNoDependents(st, before, dropped, renamed, pick('dropKey'));
   updateColumnOrigins(st, before.name, entries);
+  const flagged = classifyFkIndexes(before, st.origins.provenance.get(before.name)); // 문장 시작에 아는 출처·덤프 이름으로 가린 FK 자동 인덱스
   let t = keepKeys(before, entries, clauses, dropped, renamed); // 5) 키 삭제 → 컬럼 변화 반영 → 인덱스 이름 변경·가시성
   for (const r of pick('renameIndex')) {
     t = renameIndex(t, r.old, r.to);
     moveIndexOrigin(st, before.name, r.old, r.to);
+    renameProvenance(st, before.name, r.old, r.to);
   }
   for (const v of pick('indexVisibility')) t = setIndexVisibility(t, v.name, v.invisible);
   const items = pick('key').map((x) => x.item);
-  const plan = planAutoKeys(t, items, classifyFkIndexes(before)); // 이 문장의 키가 FK 자동 인덱스를 대신하는가
+  const plan = planAutoKeys(t, items, flagged); // 이 문장의 키가 FK 자동 인덱스를 대신하는가
   t = addConstraints(st, before, t, items, plan); // 6) 키 추가와 FK 자동 인덱스
   t = enforcePrimaryKeyNotNull(t, explicitNullColumns(clauses)); // 7) PRIMARY KEY 컬럼 NOT NULL·검사·키 순서 8) 테이블 옵션
   checkNowNotNull(before, t, renamed);
@@ -234,6 +237,7 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   assertAutoKeysKnown(plan);
   t = { ...t, indexes: sortIndexes(t) };
   syncIndexOrigins(st, before.name, t);
+  syncProvenance(st, before.name, t, flagged);
   for (const o of pick('option')) t = { ...t, options: setOption(t.options, o.key, o.value) };
   return { table: t, renamed };
 }

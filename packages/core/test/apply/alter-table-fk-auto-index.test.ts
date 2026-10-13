@@ -5,9 +5,11 @@
 // - 자동 키 g 는 다른 키 n 이 앞쪽 파트(컬럼 이름·prefix 길이·정렬 방향)를 g 와 똑같이 가지면 버려진다. n 의 종류(UNIQUE·PRIMARY·FULLTEXT)·가시성은 상관없다.
 //   둘 다 자동 키면 짧은 쪽이, 길이가 같으면 앞선 쪽이 버려진다. 직접 만든 인덱스는 버려지지 않는다
 // - 버려질 키는 이름을 차지하지 않는다 (같은 이름의 인덱스를 더해도 1061 이 아니다). 살아남은 키는 키 목록 순서대로 이름을 받는다
-// - FK 를 지워도 자동 인덱스는 남고 자동 키 표시도 남는다 (앞 문장에서 FK 만 지운 뒤의 동작은 이 모델이 따라가지 못한다 — 아래 '한계'). RENAME INDEX 는 표시를 지운다
+// - 자동 키 표시는 FK 를 지워도 남고(앞 문장에서 FK 만 지운 뒤 같은 컬럼에 새 인덱스·FK 가 오면 남은 자동 인덱스를 대신한다), 컬럼·테이블 이름 변경·보이기 바꾸기·FORCE 에도 남는다.
+//   RENAME INDEX 만 표시를 지운다 (원래 이름으로 되돌려도 그대로 직접 만든 인덱스다)
 // - 자동 키는 FK 를 더한 절의 자리에 만들어진다 (뒤에 오는 일반 인덱스보다 앞). 새 FK 가 같은 컬럼의 자동 키를 대신하면 키 목록 끝으로 옮겨진다
-// 덤프(SHOW CREATE)로는 자동 키인지 알 수 없어 이름으로 가린다: FK 이름과 같으면 자동, FK 첫 컬럼 이름(또는 <컬럼>_N)이면 알 수 없음(문장 결과가 달라지면 거부), 그 밖은 직접 만든 것
+// 덤프(SHOW CREATE)로는 자동 키인지 알 수 없어 이름으로 가린다: FK 이름과 같으면 자동, FK 첫 컬럼 이름(또는 <컬럼>_N)이면 — FK 이름이 <테이블>_ibfk_N 꼴일 때만 — 알 수 없음(문장 결과가 달라지면 거부),
+// 그 밖은 직접 만든 것. 이 실행(applyScript) 안에서 만든 인덱스는 출처(auto·user)를 기억해 이름보다 먼저 쓴다
 import { describe, expect, it } from 'vitest';
 import { applyScript } from '../../src/apply';
 import { RE_EXPORT } from '../../src/apply/types';
@@ -32,10 +34,15 @@ const BASES: Record<string, string> = {
   user: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `k0` (`x0`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `f` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
   composite: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `f` (`x0`,`x1`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `f` FOREIGN KEY (`x0`, `x1`) REFERENCES `par2` (`a`, `b`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
   plain: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `kz` (`x2`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+  colkey: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `x0` (`x0`),\n  KEY `kz` (`x2`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // colkey: FK 없이 직접 만든 KEY x0 (x0) — 이름이 첫 컬럼이다
+  two: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `f` (`x0`),\n  KEY `g` (`x2`),\n  CONSTRAINT `f` FOREIGN KEY (`x0`) REFERENCES `par` (`id`),\n  CONSTRAINT `g` FOREIGN KEY (`x2`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // two: FK f (x0)·g (x2) 둘의 자동 인덱스
+  fkcol: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `x0` (`x0`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `fk_a` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // fkcol: 직접 만든 KEY x0 (x0) + CONSTRAINT fk_a (이름이 첫 컬럼이어도 FK 이름이 자동 꼴이 아니다)
+  sym: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `fk_a` (`x0`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `fk_a` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // sym: CONSTRAINT fk_a FOREIGN KEY ix_n (x0) — 자동 인덱스 이름은 CONSTRAINT 이름 fk_a
+  symcol: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x0` int DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  `x2` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `fk_a` (`x0`),\n  KEY `kz` (`x2`),\n  CONSTRAINT `fk_a` FOREIGN KEY (`x0`) REFERENCES `par` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;', // symcol: CONSTRAINT fk_a FOREIGN KEY x0 (x0) — 역시 fk_a
   text: 'CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `v` varchar(20) DEFAULT NULL,\n  `x1` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ka` (`x1`),\n  KEY `f` (`v`),\n  CONSTRAINT `f` FOREIGN KEY (`v`) REFERENCES `parv` (`v`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
 };
 const baseOf = (variant: string): SchemaModel => parseSqlDump(tdExport([...PARENTS, BASES[variant]].join('\n\n'))).model;
-const tableT = (model: SchemaModel): Table => model.tables.find((t) => t.name === 't')!;
+const tableT = (model: SchemaModel): Table => model.tables.find((t) => t.name === 't' || t.name === 't2')!; // t2: 같은 시나리오에서 이름을 바꾼 테이블
 const run = (variant: string, script: string) => applyScript(baseOf(variant), script, { schemaName: 'shop' });
 const ok = (variant: string, script: string): SchemaModel => {
   const r = run(variant, script);
@@ -143,6 +150,77 @@ describe('ALTER TABLE — FK 자동 인덱스: MySQL 이 낸 결과와 같다', 
   });
 });
 
+// 문장이 여럿인 스크립트: 앞 문장이 남긴 출처(FK 가 만든 자동 인덱스·직접 더한 인덱스·RENAME INDEX)를 기억해 MySQL 이 낸 결과와 같다
+const SCRIPT_CASES: [variant: string, script: string, expected: string][] = [
+  // 고아 자동 인덱스: 앞 문장에서 FK 만 지우고, 뒤 문장이 같은 컬럼을 건드린다
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) kz(x2) z(x0) | '],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD INDEX z (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) z(x0,x1) | '],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD CONSTRAINT g FOREIGN KEY (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) kz(x2) g(x0) | g'],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) kz(x2) x0(x0) | t_ibfk_1'],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD FOREIGN KEY ix_n (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) kz(x2) ix_n(x0) | t_ibfk_1'],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD CONSTRAINT f FOREIGN KEY (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) kz(x2) f(x0) | f'],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD CONSTRAINT g FOREIGN KEY (x1) REFERENCES par (id);\nALTER TABLE t ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) kz(x2) z(x0) | g'],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD INDEX (x0);', 'PRIMARY(id) ka(x1) kz(x2) x0(x0) | '],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t CHANGE x0 y0 int;\nALTER TABLE t ADD INDEX z (y0);', 'PRIMARY(id) ka(x1) kz(x2) z(y0) | '],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t RENAME TO t2;\nALTER TABLE t2 ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) kz(x2) z(x0) | '],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f, RENAME TO t2;\nALTER TABLE t2 ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) kz(x2) z(x0) | '],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD INDEX f2 (x1, x0);\nALTER TABLE t ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) kz(x2) f2(x1,x0) z(x0) | '],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t DROP INDEX f;\nALTER TABLE t ADD INDEX f (x0);\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) f(x0) ix(x0,x1) | '],
+  ['named', 'ALTER TABLE t ADD CONSTRAINT h FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t DROP FOREIGN KEY h;\nALTER TABLE t ADD INDEX z (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) z(x0,x1) | f'],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ADD INDEX z (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) z(x0,x1) | t_ibfk_1'],
+  ['added', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) kz(x2) z(x0) | '],
+  ['two', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) g(x2) z(x0) | g'],
+  ['two', 'ALTER TABLE t DROP FOREIGN KEY g;\nALTER TABLE t ADD INDEX z (x2, x0);', 'PRIMARY(id) ka(x1) f(x0) z(x2,x0) | f'],
+  ['user', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) k0(x0) kz(x2) z(x0) | '],
+  ['sym', 'ALTER TABLE t DROP FOREIGN KEY fk_a;\nALTER TABLE t ADD INDEX z (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) z(x0,x1) | '],
+  ['fkcol', 'ALTER TABLE t DROP FOREIGN KEY fk_a;\nALTER TABLE t ADD INDEX z (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) z(x0,x1) | '],
+  // RENAME INDEX 는 자동 표시를 지운다 (다시 원래 이름으로 바꿔도 그대로다)
+  ['named', 'ALTER TABLE t RENAME INDEX f TO g;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) g(x0) kz(x2) ix(x0,x1) | f'],
+  ['named', 'ALTER TABLE t RENAME INDEX f TO g;\nALTER TABLE t RENAME INDEX g TO f;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) f(x0) kz(x2) ix(x0,x1) | f'],
+  ['named', 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t RENAME INDEX f TO g;\nALTER TABLE t ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) g(x0) kz(x2) z(x0) | '],
+  ['named', 'ALTER TABLE t RENAME INDEX f TO f2;\nALTER TABLE t ADD CONSTRAINT h FOREIGN KEY (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) f2(x0) kz(x2) | f,h'],
+  ['named', 'ALTER TABLE t RENAME INDEX f TO g, ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) g(x0) kz(x2) ix(x0,x1) | f'],
+  ['unnamed', 'ALTER TABLE t RENAME INDEX x0 TO y0;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) y0(x0) kz(x2) ix(x0,x1) | t_ibfk_1'],
+  ['unnamed', 'ALTER TABLE t RENAME INDEX x0 TO y0;\nALTER TABLE t RENAME INDEX y0 TO x0;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | t_ibfk_1'],
+  ['plain', 'ALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t RENAME INDEX x0 TO y0;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) y0(x0) ix(x0,x1) | t_ibfk_1'],
+  ['plain', 'ALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t RENAME INDEX x0 TO y0;\nALTER TABLE t ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) kz(x2) y0(x0) z(x0) | '],
+  // 보이기 바꾸기·테이블 이름 바꾸기·FORCE 는 자동 표시를 지우지 않는다
+  ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | f'],
+  ['named', 'ALTER TABLE t ALTER INDEX f INVISIBLE;\nALTER TABLE t ALTER INDEX f VISIBLE;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | f'],
+  ['named', 'ALTER TABLE t RENAME TO t2;\nALTER TABLE t2 ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | f'],
+  ['named', 'ALTER TABLE t FORCE;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | f'],
+  ['plain', 'ALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ALTER INDEX x0 INVISIBLE;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | t_ibfk_1'],
+  ['plain', 'ALTER TABLE t ADD CONSTRAINT f FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t RENAME TO t2;\nALTER TABLE t2 ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | f'],
+  // 이 스크립트가 만든 인덱스: FK 가 만든 것은 자동, ADD INDEX 로 더한 것은 직접 만든 것 (이름이 첫 컬럼이어도)
+  ['plain', 'ALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | t_ibfk_1'],
+  ['plain', 'ALTER TABLE t ADD CONSTRAINT f FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | f'],
+  ['plain', 'ALTER TABLE t ADD FOREIGN KEY ixn (x0) REFERENCES par (id);\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | t_ibfk_1'],
+  ['plain', 'ALTER TABLE t ADD INDEX x0 (x0);\nALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) x0(x0) ix(x0,x1) | t_ibfk_1'],
+  ['plain', 'ALTER TABLE t ADD INDEX (x0);\nALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) x0(x0) ix(x0,x1) | t_ibfk_1'],
+  ['plain', 'ALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD INDEX z (x0);', 'PRIMARY(id) ka(x1) kz(x2) z(x0) | '],
+  ['plain', 'ALTER TABLE t ADD FOREIGN KEY ixn (x0) REFERENCES par (id);\nALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD CONSTRAINT g FOREIGN KEY (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) kz(x2) g(x0) | g'],
+  ['named', 'ALTER TABLE t ADD INDEX (x0);\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) x0(x0) ix(x0,x1) | f'],
+  // FK 이름이 <테이블>_ibfk_N 꼴이 아니면 첫 컬럼 이름 인덱스는 직접 만든 것이다 (CONSTRAINT 이름이 있으면 자동 인덱스는 늘 그 이름)
+  ['fkcol', 'ALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | fk_a'],
+  ['sym', 'ALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | fk_a'],
+  ['symcol', 'ALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | fk_a'],
+  ['plain', 'ALTER TABLE t ADD CONSTRAINT fk_a FOREIGN KEY ixn (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) kz(x2) fk_a(x0) | fk_a'],
+  ['plain', 'ALTER TABLE t ADD CONSTRAINT fk_a FOREIGN KEY x0 (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) kz(x2) fk_a(x0) | fk_a'],
+  ['plain', 'ALTER TABLE t ADD CONSTRAINT t_ibfk_7 FOREIGN KEY (x0) REFERENCES par (id);', 'PRIMARY(id) ka(x1) kz(x2) t_ibfk_7(x0) | t_ibfk_7'],
+  // 이미 있던 인덱스가 새 FK 를 받치면 그 인덱스는 FK 가 만든 것이 아니다 (FK 이름이 <테이블>_ibfk_N 꼴이어도 첫 컬럼 이름 인덱스를 알 수 없음으로 보지 않는다)
+  ['fkcol', 'ALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | fk_a,t_ibfk_1'],
+  ['colkey', 'ALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | t_ibfk_1'],
+  ['colkey', 'ALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | '],
+  ['colkey', 'ALTER TABLE t ADD CONSTRAINT f FOREIGN KEY (x0) REFERENCES par (id);\nALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | f'],
+  ['colkey', 'ALTER TABLE t ADD INDEX ix (x0, x1);', 'PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x0,x1) | '],
+];
+
+describe('ALTER TABLE — FK 자동 인덱스: 스크립트 안에서 출처를 기억한다', () => {
+  it.each(SCRIPT_CASES)('%s: %s', (variant, script, expected) => {
+    expect(shown(tableT(ok(variant, script)))).toBe(expected);
+  });
+});
+
 // 이름이 첫 컬럼(KEY x0 (x0))이면 FK 가 자동으로 만든 것인지 직접 만든 것인지 덤프만으로 알 수 없다. 자동이면 MySQL 이 지우거나 바꾸고 직접 만든 것이면 그대로 둔다 (실측).
 // 두 읽기의 결과가 다른 문장은 거부하고 (인덱스 이름을 알리고 RE_EXPORT 로 끝난다), 같은 문장은 받는다
 describe('ALTER TABLE — FK 자동 인덱스: 자동인지 알 수 없을 때', () => {
@@ -185,22 +263,40 @@ describe('ALTER TABLE — FK 자동 인덱스: 자동인지 알 수 없을 때',
   it.each(SAME_EITHER_WAY)('받는다: %s', (script, expected) => {
     expect(shown(tableT(ok('unnamed', script)))).toBe(expected);
   });
+
+  // 알 수 없다는 사실도 문장을 넘어 이어진다: FK 를 지운 뒤에도, 테이블 이름을 바꾼 뒤에도 (MySQL 은 자동 표시가 남아 있으면 지우고 없으면 남긴다)
+  it.each([
+    'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD INDEX ix (x0, x1);',
+    'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD FOREIGN KEY (x0) REFERENCES par (id);', // 자동이면 새 자동 키가 끝으로 옮겨 가고 직접 만든 것이면 그 자리에 남는다
+    'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1, RENAME TO t2;\nALTER TABLE t2 ADD INDEX ix (x0, x1);',
+    'ALTER TABLE t RENAME TO t2;\nALTER TABLE t2 ADD INDEX ix (x0, x1);',
+  ])('뒤 문장이 거부한다: %j', (script) => {
+    const r = run('unnamed', script);
+    expect(r).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining('`x0`') } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT)).toBe(true);
+  });
+
+  it('FK 를 지운 뒤에도 받침을 가리지 않는 문장은 받는다 — 인덱스가 그대로 남는다', () => {
+    const script = 'ALTER TABLE t DROP FOREIGN KEY t_ibfk_1;\nALTER TABLE t ADD INDEX ix (x1, x0);';
+    expect(shown(tableT(ok('unnamed', script)))).toBe('PRIMARY(id) ka(x1) x0(x0) kz(x2) ix(x1,x0) | ');
+  });
 });
 
-// 한계: 덤프만으로 알 수 없는 것. 아래는 MySQL 과 다른 결과를 일부러 못 박는다 (고치려면 인덱스마다 '자동' 표시를 모델에 둬야 한다)
+// 알려진 한계: 덤프(SHOW CREATE)에는 자동 표시가 없다. 이 실행 안에서 만든 인덱스는 위 표처럼 따라가지만, 기준 덤프나 앞선 업로드에서 온 인덱스는 이름으로만 가린다.
+// 아래는 MySQL 과 다른 결과를 일부러 못 박는다
 describe('ALTER TABLE — FK 자동 인덱스: 알려진 한계', () => {
-  it('FOREIGN KEY 뒤에 쓴 인덱스 이름(ix_g)은 직접 만든 인덱스로 본다 — MySQL 은 자동 키라 ADD INDEX 때 지운다', () => {
+  it('FOREIGN KEY 뒤에 쓴 인덱스 이름(ix_g)은 덤프에서 직접 만든 인덱스로 본다 — MySQL 은 자동 키라 ADD INDEX 때 지운다', () => {
     expect(shown(tableT(ok('ixname', 'ALTER TABLE t ADD INDEX ix (x0, x1);')))).toBe('PRIMARY(id) ka(x1) ix_g(x0) kz(x2) ix(x0,x1) | t_ibfk_1'); // MySQL: ka kz ix
   });
 
-  it('앞 문장에서 이 스크립트가 직접 더한 인덱스도 이름이 첫 컬럼이면 알 수 없는 인덱스로 본다 — MySQL 은 직접 만든 것이라 남긴다', () => {
-    const script = 'ALTER TABLE t ADD INDEX (x0);\nALTER TABLE t ADD INDEX ix (x0, x1);';
-    const r = run('named', script); // MySQL: PRIMARY(id) ka(x1) kz(x2) x0(x0) ix(x0,x1) | f
-    expect(r).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining('`x0`') } });
+  it('기준 덤프에 FK 없이 남은 인덱스(앞선 업로드에서 FK 만 지운 자동 인덱스)는 직접 만든 것으로 본다 — 라이브 DB 는 표시가 남아 새 인덱스가 대신한다', () => {
+    const leftover = parseSqlDump(tdExport([...PARENTS, BASES.named.replace(/,\n  CONSTRAINT `f` FOREIGN KEY \(`x0`\) REFERENCES `par` \(`id`\)/, '')].join('\n\n'))).model;
+    const r = applyScript(leftover, 'ALTER TABLE t ADD INDEX z (x0);', { schemaName: 'shop' });
+    expect(r.ok && shown(tableT(r.model))).toBe('PRIMARY(id) ka(x1) f(x0) kz(x2) z(x0) | '); // MySQL(라이브): ka kz z
   });
 
-  it('앞 문장에서 FK 만 지우면 남은 자동 인덱스를 더는 알아보지 못한다 — MySQL 은 뒤 문장의 새 인덱스·FK 가 대신한다', () => {
-    const script = 'ALTER TABLE t DROP FOREIGN KEY f;\nALTER TABLE t ADD INDEX z (x0);';
-    expect(shown(tableT(ok('named', script)))).toBe('PRIMARY(id) ka(x1) f(x0) kz(x2) z(x0) | '); // MySQL: ka kz z
+  it('FK 이름과 같은 이름으로 직접 만든 인덱스(KEY f + CONSTRAINT f)는 덤프가 자동 인덱스와 글자까지 같아 자동으로 본다', () => {
+    // 'named' 기준 표가 둘 다를 나타낸다: 직접 만든 KEY f 였다면 MySQL 은 ADD INDEX ix (x0, x1) 때 f 를 남긴다
+    expect(shown(tableT(ok('named', 'ALTER TABLE t ADD INDEX ix (x0, x1);')))).toBe('PRIMARY(id) ka(x1) kz(x2) ix(x0,x1) | f');
   });
 });

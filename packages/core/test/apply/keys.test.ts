@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { addForeignKey, addIndex, addKeys, assertAutoKeysKnown, assertReaddedKeysFit, checkNowNotNull, checkTable, classifyFkIndexes, columnKeyItems, dropKeys, ensureFkIndexes, enforcePrimaryKeyNotNull, exprUses, leadsWith, nextFkName, planAutoKeys, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
+import { addForeignKey, addIndex, addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, ensureFkIndexes, enforcePrimaryKeyNotNull, exprUses, leadsWith, nextFkName, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
+import { planAutoKeys } from '../../src/apply/auto-index';
 import { initialState, replaceTable, type State } from '../../src/apply/state';
 import { DEFAULT_SQL_MODE, MYSQL_DEFAULTS, RE_EXPORT, type ColumnSpec, type FkItem, type IndexItem } from '../../src/apply/types';
 import type { Column, ForeignKey, Index, IndexKind, Table } from '../../src/model';
@@ -585,82 +586,28 @@ describe('sortIndexes — VIRTUAL 생성 컬럼·함수 인덱스', () => {
   });
 });
 
-// FK 가 자동으로 만든 인덱스를 덤프에서 이름으로 가린다 (MySQL 8.0.46·8.4.11 실측 — 자동 키 표시는 SHOW CREATE 에 안 나온다):
-// 이름이 FK 이름과 같으면 자동(generated), FK 첫 컬럼 이름이나 <컬럼>_N 이면 알 수 없음(ambiguous), 그 밖은 직접 만든 것. 받치는 인덱스는 FK 컬럼 그대로인 일반 KEY 하나뿐이어야 한다
-describe('classifyFkIndexes', () => {
-  const plain = (name: string, ...cols: string[]): Index => ({ name, kind: 'INDEX', parts: cols.map((column) => ({ column, desc: false })), invisible: false });
-  const tableOf = (indexes: Index[], fks: ForeignKey[] = [{ name: 'f', columns: ['x0'], refTable: 'par', refColumns: ['id'] }]): Table => ({
-    kind: 'table', name: 't', columns: [col('id', 'int'), col('x0', 'int'), col('x1', 'int')], indexes, foreignKeys: fks, checks: [], options: [], fidelity: 'full',
-  });
-  const classes = (t: Table) => { const c = classifyFkIndexes(t); return { generated: [...c.generated], ambiguous: [...c.ambiguous] }; };
-  const none = { generated: [], ambiguous: [] };
+// addKeys 가 이 실행이 아는 출처를 적는다: 직접 더한 인덱스는 user, FK 가 새로 만든 자동 인덱스는 auto (CREATE TABLE 도 addKeys 로 키를 만들면 따로 부를 것이 없다)
+describe('addKeys — 인덱스 출처 기록', () => {
+  const provenance = (st: State, name: string) => [...(st.origins.provenance.get(name) ?? [])];
 
-  it('이름이 FK 이름과 같으면 generated (대소문자 무시), 첫 컬럼 이름·<컬럼>_N 이면 ambiguous, 그 밖은 둘 다 아니다', () => {
-    expect(classes(tableOf([plain('f', 'x0')]))).toEqual({ generated: ['f'], ambiguous: [] });
-    expect(classes(tableOf([plain('F', 'x0')]))).toEqual({ generated: ['f'], ambiguous: [] });
-    expect(classes(tableOf([plain('x0', 'x0')]))).toEqual({ generated: [], ambiguous: ['x0'] });
-    expect(classes(tableOf([plain('X0_2', 'x0')]))).toEqual({ generated: [], ambiguous: ['x0_2'] });
-    for (const name of ['idx_user', 'x0_x', 'x0_', 'x00', 'k0']) expect(classes(tableOf([plain(name, 'x0')])), name).toEqual(none);
+  it('직접 더한 인덱스는 user, 자동 이름을 받은 것도 실제 이름으로 적는다', () => {
+    const st = fresh();
+    addKeys(st, table(st, 'child'), [idx('ix_name', 'INDEX', ['name']), idx('', 'UNIQUE', ['name'], false)]);
+    expect(provenance(st, 'child')).toEqual([['ix_name', 'user'], ['name', 'user']]);
   });
 
-  it('FK 이름이 첫 컬럼 이름과도 같으면 generated 가 먼저다', () => {
-    expect(classes(tableOf([plain('x0', 'x0')], [{ name: 'x0', columns: ['x0'], refTable: 'par', refColumns: ['id'] }]))).toEqual({ generated: ['x0'], ambiguous: [] });
+  it('FK 가 새로 만든 인덱스는 auto, 받치는 인덱스가 있어 만들지 않았으면 적지 않는다', () => {
+    const st = fresh();
+    const c = withColumns(table(st, 'child'), col('pid2', 'int unsigned'));
+    addKeys(st, c, [fk(true, ['pid2'], 'parent', ['id'], 'fk_p2'), fk(true, ['pid'], 'parent', ['id'], 'fk_again')]);
+    expect(provenance(st, 'child')).toEqual([['fk_p2', 'auto']]); // pid 는 KEY pid 가 받친다
   });
 
-  it('받치는 인덱스의 모양이 FK 컬럼 그대로인 일반 KEY 가 아니면 가리지 않는다 (UNIQUE·FULLTEXT·DESC·prefix 길이·컬럼이 더 많거나 적음)', () => {
-    const odd = (patch: Partial<Index>): Index => ({ ...plain('f', 'x0'), ...patch });
-    expect(classes(tableOf([odd({ kind: 'UNIQUE' })]))).toEqual(none);
-    expect(classes(tableOf([odd({ kind: 'FULLTEXT' })]))).toEqual(none);
-    expect(classes(tableOf([odd({ parts: [{ column: 'x0', desc: true }] })]))).toEqual(none);
-    expect(classes(tableOf([odd({ parts: [{ column: 'x0', length: 5, desc: false }] })]))).toEqual(none);
-    expect(classes(tableOf([plain('f', 'x0', 'x1')]))).toEqual(none); // FK (x0) 보다 길다
-    expect(classes(tableOf([plain('f', 'x0')], [{ name: 'f', columns: ['x0', 'x1'], refTable: 'par', refColumns: ['a', 'b'] }]))).toEqual(none); // FK (x0, x1) 보다 짧다
-  });
-
-  it('그 앞쪽을 가진 다른 인덱스가 있거나 같은 모양이 둘이면 자동 키일 수 없다 (직접 만든 것)', () => {
-    expect(classes(tableOf([plain('f', 'x0'), plain('ix', 'x0', 'x1')]))).toEqual(none);
-    expect(classes(tableOf([plain('f', 'x0'), plain('ix', 'x1', 'x0')]))).toEqual({ generated: ['f'], ambiguous: [] }); // 앞쪽이 아니다
-    expect(classes(tableOf([plain('f', 'x0'), { ...plain('uq', 'x0', 'x1'), kind: 'UNIQUE' }]))).toEqual(none);
-    expect(classes(tableOf([plain('f', 'x0'), plain('g', 'x0')]))).toEqual(none);
-  });
-
-  it('FK 가 둘이 같은 인덱스를 쓰면 이름이 맞는 FK 쪽으로 가린다', () => {
-    const fks: ForeignKey[] = [{ name: 'f1', columns: ['x0'], refTable: 'par', refColumns: ['id'] }, { name: 'f2', columns: ['x0'], refTable: 'par', refColumns: ['id'] }];
-    expect(classes(tableOf([plain('f2', 'x0')], fks))).toEqual({ generated: ['f2'], ambiguous: [] });
-  });
-});
-
-// 이 문장이 더하는 키가 자동 키를 버리는 계획: 버려지는 기존 인덱스 · 만들지 않는 FK 자동 키 · 자동인지 알 수 없는데 버려지는 인덱스
-describe('planAutoKeys / assertAutoKeysKnown', () => {
-  const st = fresh();
-  const child = table(st, 'child'); // KEY pid (pid) + child_ibfk_1 (pid)
-  const auto = (generated: string[], ambiguous: string[] = []) => ({ generated: new Set(generated), ambiguous: new Set(ambiguous) });
-
-  it('자동 인덱스는 같은 컬럼으로 시작하는 새 인덱스가 버린다 (종류·이름 상관없음), 새 키가 앞쪽을 갖지 못하면 남는다', () => {
-    const names = (items: IndexItem[]) => planAutoKeys(child, items, auto(['pid'])).kept.map((i) => i.name);
-    expect(names([idx('ix', 'INDEX', ['pid', 'name'])])).toEqual(['PRIMARY']);
-    expect(names([idx('uq', 'UNIQUE', ['pid'])])).toEqual(['PRIMARY']);
-    expect(names([idx('ft', 'FULLTEXT', ['pid'])])).toEqual(['PRIMARY']); // 종류는 보지 않는다 (MySQL 도 FULLTEXT 가 버린다)
-    expect(names([idx('ix', 'INDEX', ['name', 'pid'])])).toEqual(['PRIMARY', 'pid']);
-    expect(names([idx('ix', 'INDEX', ['pid'], true, 5)])).toEqual(['PRIMARY', 'pid']); // prefix 길이가 다르면 다른 키 파트다
-    expect(planAutoKeys(child, [idx('ix', 'INDEX', ['pid'])], auto([])).kept.map((i) => i.name)).toEqual(['PRIMARY', 'pid']); // 자동 키가 아니면 버리지 않는다
-  });
-
-  it('새 FK 의 자동 키는 직접 만든 인덱스가 받치면 만들지 않고, 자동 인덱스 뿐이면 만들며 옛 자동 인덱스를 버린다', () => {
-    const newFk = fk(true, ['pid'], 'parent', ['id'], 'again');
-    const user = planAutoKeys(child, [newFk], auto([]));
-    expect(user.skipped.has(newFk)).toBe(true);
-    expect(user.kept.map((i) => i.name)).toEqual(['PRIMARY', 'pid']);
-    const replaced = planAutoKeys(child, [newFk], auto(['pid']));
-    expect(replaced.skipped.has(newFk)).toBe(false);
-    expect(replaced.kept.map((i) => i.name)).toEqual(['PRIMARY']);
-  });
-
-  it('자동인지 알 수 없는 인덱스가 버려지면 uncertain 에 이름이 들고, assertAutoKeysKnown 은 RE_EXPORT 로 끝나는 메시지로 거부한다', () => {
-    const plan = planAutoKeys(child, [idx('ix', 'INDEX', ['pid', 'name'])], auto([], ['pid']));
-    expect(plan.uncertain).toEqual(['pid']);
-    expect(() => assertAutoKeysKnown(plan)).toThrow(/`pid`.*자동으로 만든 것인지.*td-export 로 다시 뽑아 올려 주세요$/);
-    expect(planAutoKeys(child, [idx('ix', 'INDEX', ['name'])], auto([], ['pid'])).uncertain).toEqual([]);
-    expect(() => assertAutoKeysKnown(planAutoKeys(child, []))).not.toThrow();
+  it('새 FK 가 대신한 옛 자동 인덱스는 표에서 이름이 바뀐다 (옛 이름은 plan 이 버리고 새 이름이 auto)', () => {
+    const st = fresh();
+    const c = table(st, 'child');
+    const plan = planAutoKeys(c, [fk(true, ['pid'], 'parent', ['id'], 'again')], { generated: new Set(['pid']), ambiguous: new Set() });
+    addKeys(st, c, [fk(true, ['pid'], 'parent', ['id'], 'again')], ['child_ibfk_1'], plan);
+    expect(provenance(st, 'child')).toEqual([['again', 'auto']]);
   });
 });
