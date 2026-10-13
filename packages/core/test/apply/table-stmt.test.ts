@@ -87,6 +87,51 @@ const reasonOf = (script: string, base: SchemaModel = BASE): string => {
 };
 const endsWithReExport = (reason: string): boolean => reason.endsWith(RE_EXPORT);
 
+// InnoDB 테이블만 지원한다 (사용자 결정): InnoDB 가 아닌 ENGINE 은 RE_EXPORT 로 거부하고, DROP·RENAME TABLE 은 어떤 엔진의 테이블이든 된다
+describe('CREATE TABLE — InnoDB 만 지원', () => {
+  it.each([
+    ['CREATE TABLE e1 (a INT) ENGINE=MyISAM;'],
+    ['CREATE TABLE e2 (a INT) ENGINE = memory;'],
+    ['CREATE TABLE e3 (a INT) COMMENT=\'x\', ENGINE=CSV;'],
+    ['CREATE TABLE e4 (a INT UNSIGNED, FOREIGN KEY (a) REFERENCES member (id)) ENGINE=MyISAM;'], // FK 가 있어도 같은 안내
+    ['CREATE TABLE e5 (a INT) ENGINE=NoSuchEngine;'], // 모르는 이름도 같은 안내
+    ['CREATE TABLE e6 (a INT) DEFAULT CHARSET=latin1 ENGINE=ARCHIVE;'],
+  ])('InnoDB 가 아닌 ENGINE 은 거부: %s', (script) => {
+    const reason = reasonOf(script);
+    expect(reason).toContain('InnoDB 테이블만 지원합니다');
+    expect(endsWithReExport(reason), reason).toBe(true);
+  });
+
+  it('ENGINE=InnoDB 는 대소문자와 상관없이 받고, 안 쓰면 InnoDB 다', () => {
+    expect(tbl(ok('CREATE TABLE e1 (a INT) ENGINE=innodb;'), 'e1').options[0]).toEqual({ key: 'ENGINE', value: 'InnoDB' });
+    expect(tbl(ok('CREATE TABLE e2 (a INT);'), 'e2').options[0]).toEqual({ key: 'ENGINE', value: 'InnoDB' });
+  });
+
+  it('이미 있는 테이블의 IF NOT EXISTS 는 엔진을 보기 전에 아무것도 하지 않는다 (만들지 않으므로 거부할 것이 없다)', () => {
+    expect(ok('CREATE TABLE IF NOT EXISTS member (a INT) ENGINE=MyISAM;').model.tables.map((t) => t.name)).toEqual(['member', 'orders']);
+  });
+});
+
+describe('DROP·RENAME TABLE — InnoDB 가 아닌 엔진의 테이블도 된다', () => {
+  const LEGACY = parseSqlDump(tdExport([
+    'CREATE TABLE `legacy` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    'CREATE TABLE `modern` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+  ].join('\n\n'))).model;
+  const run = (script: string) => applyScript(LEGACY, script, { schemaName: 'shop' });
+
+  it('DROP TABLE', () => {
+    const r = run('DROP TABLE legacy;');
+    expect(r).toMatchObject({ ok: true });
+    if (r.ok) expect(r.model.tables.map((t) => t.name)).toEqual(['modern']);
+  });
+
+  it('RENAME TABLE (엔진 옵션은 그대로)', () => {
+    const r = run('RENAME TABLE legacy TO legacy_old;');
+    expect(r).toMatchObject({ ok: true, renames: [{ kind: 'table', from: 'legacy', to: 'legacy_old' }] });
+    if (r.ok) expect(r.model.tables.find((t) => t.name === 'legacy_old')!.options[0]).toEqual({ key: 'ENGINE', value: 'MyISAM' });
+  });
+});
+
 // MySQL 8.0.46·8.4.11 실측: FK 이름은 스키마 안에서 유일하고 대소문자를 구분하지 않는다. 다른 테이블의 FK 와 겹치면 1826 —
 // CREATE TABLE (직접 쓴 이름·자동 이름 '<테이블>_ibfk_N')과 RENAME TABLE·ALTER TABLE … RENAME TO (바뀐 자동 이름) 모두
 describe('FK 이름은 스키마 안에서 유일하다 (1826)', () => {

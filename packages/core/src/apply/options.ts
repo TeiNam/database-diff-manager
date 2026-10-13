@@ -1,8 +1,8 @@
 // 테이블 옵션: 값 정규화와 SHOW CREATE 옵션 순서
 import type { Cursor } from '../cursor';
 import { quoteString } from '../lexer';
-import type { TableOption } from '../model';
-import { fail } from './types';
+import type { Table, TableOption } from '../model';
+import { fail, RE_EXPORT } from './types';
 
 // Map: 객체 조회는 'constructor'·'__proto__' 같은 Object.prototype 이름을 '있는 키'로 읽는다
 const ENGINES: ReadonlyMap<string, string> = new Map(Object.entries({
@@ -13,6 +13,18 @@ const ROW_FORMATS: ReadonlySet<string> = new Set(['DEFAULT', 'DYNAMIC', 'FIXED',
 const ORDER = ['ENGINE', 'DEFAULT CHARSET', 'COLLATE', 'ROW_FORMAT', 'KEY_BLOCK_SIZE', 'COMMENT'];
 
 export const engineName = (v: string): string => ENGINES.get(v.toLowerCase()) ?? fail(`지원하지 않는 엔진입니다: ${v}`);
+
+// InnoDB 테이블만 지원한다: 엔진마다 FK·인덱스 규칙이 달라 모델에서 MySQL 과 같게 재현할 수 없다 (예: MyISAM 은 FOREIGN KEY 를 조용히 버린다)
+const innodbOnly = (detail: string): never => fail(`InnoDB 테이블만 지원합니다 (${detail}) — ${RE_EXPORT}`);
+
+// CREATE·ALTER TABLE 의 ENGINE 값: InnoDB(대소문자 무시)만 받는다. 다른 값은 알려진 엔진이든 모르는 이름이든 1차 지원 범위 밖이다
+export const innodbEngineName = (v: string): string => (v.toLowerCase() === 'innodb' ? engineName(v) : innodbOnly(`ENGINE=${v}`));
+
+// InnoDB 가 아닌 엔진의 기존 테이블에는 ALTER TABLE·CREATE INDEX·DROP INDEX 를 할 수 없다 (DROP·RENAME TABLE 은 된다). ENGINE 옵션이 없는 테이블은 InnoDB(MySQL 8 기본)로 본다
+export function assertInnoDbTable(t: Pick<Table, 'name' | 'options'>): void {
+  const engine = t.options.find((o) => o.key === 'ENGINE')?.value;
+  if (engine !== undefined && engine !== 'InnoDB') innodbOnly(`테이블 \`${t.name}\` 의 엔진은 ${engine} 입니다`);
+}
 
 export function rowFormatName(v: string): string {
   const f = v.toUpperCase();

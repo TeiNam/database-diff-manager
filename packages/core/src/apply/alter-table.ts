@@ -12,7 +12,7 @@ import { assertAutoKeysKnown, assertTargetsKept, classifyFkIndexes, planAutoKeys
 import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, enforcePrimaryKeyNotNull, exprUses, isExplicitNull, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
 import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
-import { engineName, optionValue, parseCommonOption, setOption } from './options';
+import { assertInnoDbTable, innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
 import { findColumn, needTable, objectName, replaceTable, sameName, type State } from './state';
 import { renameTable } from './table-stmt';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type DefaultSpec, type Position } from './types';
@@ -72,6 +72,7 @@ export function dropIndexOn(st: State, c: Cursor): void {
 
 function alterWith(st: State, name: string, clauses: readonly Clause[]): void {
   const before = needTable(st, name);
+  assertInnoDbTable(before);
   const { table, renamed } = applyClauses(st, before, clauses);
   replaceTable(st, name, table);
   renameReferencedColumns(st, name, renamed);
@@ -198,7 +199,7 @@ function parseOptions(c: Cursor): Clause[] {
     const word = c.peek()!.v.toUpperCase();
     const common = parseCommonOption(c);
     if (common) out.push({ k: 'option', ...common });
-    else if (c.acceptWord('ENGINE')) out.push({ k: 'option', key: 'ENGINE', value: engineName(optionValue(c)) });
+    else if (c.acceptWord('ENGINE')) out.push({ k: 'option', key: 'ENGINE', value: innodbEngineName(optionValue(c)) });
     else if (c.acceptWord('AUTO_INCREMENT') || c.acceptWord('ALGORITHM') || c.acceptWord('LOCK')) {
       optionValue(c);
       out.push({ k: 'noop' });
@@ -213,7 +214,6 @@ function parseOptions(c: Cursor): Clause[] {
 function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { table: Table; renamed: Map<string, string> } {
   const charset = tableCharset(before.options, st.defaults);
   const pick = <K extends Clause['k']>(k: K) => clauses.filter((x): x is Extract<Clause, { k: K }> => x.k === k);
-  assertEngineChangeAllowed(st, before, pick('option'));
   const dropped = droppedColumns(before, pick('dropColumn')); // 1) 기존 컬럼 삭제
   const entries = arrangeColumns(st, before, clauses, charset, dropped); // 2) 기존 컬럼 변경 (이름은 문장 전 기준) 3) 컬럼 추가 4) 위치
   assertUniqueColumns(entries);
@@ -272,15 +272,6 @@ function keepKeys(before: Table, entries: readonly Entry[], clauses: readonly Cl
 function addConstraints(st: State, before: Table, t: Table, items: readonly ConstraintItem[], plan: AutoKeyPlan): Table {
   const next = addKeys(st, t, items, before.foreignKeys.map((f) => f.name), plan);
   return items.some((i) => i.kind === 'fk') ? { ...next, foreignKeys: sortForeignKeys(next.foreignKeys) } : next;
-}
-
-// ENGINE 를 InnoDB 가 아닌 것으로 바꾸려면 테이블이 FK 에 참여하지 않아야 한다 (MySQL 8.0.46·8.4.11 실측 3776): 자기 FK 가 있거나 다른 테이블 FK 가 참조하면 거부이고,
-// 같은 문장에서 FK 를 지워도·FOREIGN_KEY_CHECKS=0 이어도 같다. InnoDB 로의 변경은 FK 가 있어도 받는다
-function assertEngineChangeAllowed(st: State, before: Table, options: readonly Extract<Clause, { k: 'option' }>[]): void {
-  const engine = options.filter((o) => o.key === 'ENGINE').at(-1)?.value;
-  if (engine === undefined || engine === 'InnoDB') return;
-  const isReferenced = st.model.tables.some((x) => x.foreignKeys.some((f) => f.refTable === before.name && f.refSchema === undefined));
-  if (before.foreignKeys.length || isReferenced) fail(`테이블 \`${before.name}\` 은 FK 에 참여해서 스토리지 엔진을 InnoDB 에서 ${engine} 엔진으로 바꿀 수 없습니다 (MySQL 3776)`);
 }
 
 // 이 문장의 컬럼 정의가 NULL 이나 DEFAULT NULL 을 쓴 컬럼의 (최종) 이름, 소문자 — PRIMARY KEY 에 있으면 1171 (enforcePrimaryKeyNotNull)

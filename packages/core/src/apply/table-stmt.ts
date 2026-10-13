@@ -6,7 +6,7 @@ import { parseTableItem } from './def-parser';
 import { addKeys, checkSetNullFks, checkTable, columnKeyItems, enforcePrimaryKeyNotNull, isExplicitNull, sortForeignKeys, sortIndexes } from './keys';
 import { splitList } from './lists';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, finalizeColumn, primaryCollation, tableCharset } from './normalize-mysql';
-import { engineName, optionValue, parseCommonOption, setOption } from './options';
+import { innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
 import { findTable, forgetOrigins, moveOrigins, nameTaken, needTable, objectName, objectNameList, sameName, trackNew, type State } from './state';
 import { fail, RE_EXPORT, type ConstraintItem } from './types';
 
@@ -75,7 +75,6 @@ export function createTable(st: State, c: Cursor): void {
 
 // CREATE TABLE 의 테이블 옵션 → SHOW CREATE 모양 (ENGINE·DEFAULT CHARSET·COLLATE 는 늘 있다)
 function createOptions(c: Cursor, st: State): TableOption[] {
-  let engine = 'InnoDB';
   let charset: string | undefined;
   let collation: string | undefined;
   let rest: TableOption[] = [];
@@ -83,7 +82,7 @@ function createOptions(c: Cursor, st: State): TableOption[] {
     c.acceptWord('DEFAULT');
     const common = parseCommonOption(c);
     if (common) rest = setOption(rest, common.key, common.value);
-    else if (c.acceptWord('ENGINE')) engine = engineName(optionValue(c));
+    else if (c.acceptWord('ENGINE')) innodbEngineName(optionValue(c)); // InnoDB 만 받는다 (그 밖의 엔진은 RE_EXPORT 로 거부)
     else if (c.acceptWord('CHARACTER', 'SET') || c.acceptWord('CHARSET')) charset = canonicalCharset(optionValue(c));
     else if (c.acceptWord('COLLATE')) collation = canonicalCollation(optionValue(c));
     else if (c.acceptWord('AUTO_INCREMENT')) optionValue(c);
@@ -96,7 +95,7 @@ function createOptions(c: Cursor, st: State): TableOption[] {
   if (charset && charset !== cs) fail(`COLLATE ${coll} 은 문자셋 ${charset} 의 콜레이션이 아닙니다 (MySQL 1253)`);
   // 기본 문자셋이 binary 인 테이블은 MySQL 이 CHAR·VARCHAR·TEXT 컬럼을 BINARY·VARBINARY·BLOB 으로 바꾼다 (8.0.46·8.4.11 실측) — 컬럼 쪽 CHARACTER SET binary 와 같은 이유로 거부한다
   if (cs === 'binary') fail(`테이블 문자셋 binary 는 MySQL 이 문자열 컬럼을 BINARY·VARBINARY·BLOB 으로 바꿔 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
-  return [{ key: 'ENGINE', value: engine }, { key: 'DEFAULT CHARSET', value: cs }, { key: 'COLLATE', value: coll }, ...rest];
+  return [{ key: 'ENGINE', value: 'InnoDB' }, { key: 'DEFAULT CHARSET', value: cs }, { key: 'COLLATE', value: coll }, ...rest];
 }
 
 // DROP TABLE [IF EXISTS] a [, b …] [RESTRICT|CASCADE]. 하나라도 없으면(IF EXISTS 제외) 아무것도 지우지 않는다
