@@ -1,0 +1,91 @@
+import { useRef, useState } from 'react';
+import { useApplyAlter } from '../../api/hooks';
+import type { AlterChange, AlterRequest, AlterResponse, VersionSummary } from '../../api/types';
+import { Icon } from '../../components/Icon';
+import { trapTab, useDialogFocus } from '../../hooks/useDialog';
+import s from '../upload/UploadDialog.module.css';
+
+const MYSQL_DEFAULTS = { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' };
+const OP_TEXT: Record<AlterChange['op'], string> = { add: '추가', drop: '삭제', modify: '변경', rename: '이름 변경' };
+const KIND_TEXT: Record<AlterChange['kind'], string> = { table: '테이블', view: '뷰', function: '함수', procedure: '프로시저' };
+
+// 스키마의 SQL 버전에 ALTER 스크립트를 적용해 새 버전을 만든다 (미리보기 → 저장). versions: 최신 버전이 앞
+export function AlterDialog({ versions, onClose }: { versions: VersionSummary[]; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, onClose);
+  const candidates = versions.filter((v) => v.sourceFormat === 'sql');
+  const last = versions.find((v) => v.derivedFrom)?.derivedFrom?.defaults ?? MYSQL_DEFAULTS;
+  const [baseId, setBaseId] = useState(candidates[0]?.id);
+  const [script, setScript] = useState('');
+  const [filename, setFilename] = useState<string>();
+  const [note, setNote] = useState('');
+  const [charset, setCharset] = useState(last.charset);
+  const [collation, setCollation] = useState(last.collation);
+  const [result, setResult] = useState<AlterResponse>();
+  const alter = useApplyAlter();
+  // 입력이 바뀌면 이전 미리보기·오류는 더 이상 맞지 않는다
+  const edited = () => {
+    setResult(undefined);
+    alter.reset();
+  };
+  const submit = (dryRun: boolean) => {
+    if (baseId === undefined) return;
+    const body: AlterRequest = { script, dryRun, defaults: { charset: charset.trim(), collation: collation.trim() }, ...(filename ? { filename } : {}), ...(note.trim() ? { note: note.trim() } : {}) };
+    alter.mutate({ baseId, body }, { onSuccess: setResult });
+  };
+  const ready = baseId !== undefined && script.trim().length > 0 && !alter.isPending;
+  const saved = result && result.status !== 'preview' ? result : undefined;
+  return (
+    <div className={s.backdrop} role="presentation" onClick={onClose}>
+      <div ref={dialogRef} className={s.dialog} role="dialog" aria-modal="true" aria-labelledby="alter-title" onClick={(e) => e.stopPropagation()} onKeyDown={trapTab}>
+        <header className={s.head}>
+          <h2 id="alter-title">ALTER 적용</h2>
+          <button type="button" className={s.iconBtn} aria-label="닫기" onClick={onClose}><Icon name="x" /></button>
+        </header>
+        {candidates.length === 0 && <p className={s.warn}>SQL 덤프로 올린 버전이 없습니다 — MD 버전에는 ALTER 를 적용할 수 없습니다</p>}
+        <fieldset className={s.row} aria-label="기준 버전과 스키마 기본값">
+          <label>기준 버전
+            <select value={baseId} aria-label="기준 버전" onChange={(e) => { setBaseId(Number(e.target.value)); edited(); }}>
+              {candidates.map((v) => <option key={v.id} value={v.id}>v{v.versionNo} · {v.sourceFilename}</option>)}
+            </select>
+          </label>
+          <label>스키마 기본 문자셋<input value={charset} aria-label="스키마 기본 문자셋" onChange={(e) => { setCharset(e.target.value); edited(); }} /></label>
+          <label>스키마 기본 콜레이션<input value={collation} aria-label="스키마 기본 콜레이션" onChange={(e) => { setCollation(e.target.value); edited(); }} /></label>
+          <label>메모<input value={note} maxLength={500} aria-label="메모" onChange={(e) => setNote(e.target.value)} /></label>
+        </fieldset>
+        <label className={s.drop}>
+          <Icon name="upload" size={20} />
+          <span>.sql 파일을 고르거나 아래에 스크립트를 붙여 넣으세요</span>
+          <input type="file" accept=".sql" aria-label="스크립트 파일" className="visually-hidden"
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              e.target.value = '';
+              if (!file) return;
+              setScript(await file.text());
+              setFilename(file.name);
+              edited();
+            }} />
+        </label>
+        <textarea className="mono" rows={10} spellCheck={false} aria-label="ALTER 스크립트" value={script} placeholder="ALTER TABLE member ADD COLUMN nick VARCHAR(20);"
+          onChange={(e) => { setScript(e.target.value); setFilename(undefined); edited(); }} />
+        <p className={s.warnLine}>
+          받는 문장: ALTER·CREATE·DROP·RENAME TABLE, CREATE·DROP INDEX, CREATE·DROP FUNCTION·PROCEDURE, DROP VIEW. VIEW·CHECK·생성 컬럼·식 기본값·파티션·문자셋 변환은 td-export 로 다시 뽑아 올려 주세요.
+          이 도구는 MySQL 의 모든 검사를 재현하지 않아, 실제 DB 에서는 거부될 스크립트를 받을 수 있습니다.
+        </p>
+        {result?.status === 'preview' && (
+          <ul className={s.results} aria-label="미리보기 결과">
+            <li className={s.ok}><b>문장 {result.applied}개 적용</b> <span>변경 객체 {result.changes.length}개</span></li>
+            {result.changes.map((c) => <li key={`${c.kind}:${c.name}`}>{KIND_TEXT[c.kind]} <span className="mono">{c.name}</span> {OP_TEXT[c.op]}</li>)}
+          </ul>
+        )}
+        {saved && <p role="status" className={s.ok}>{saved.status === 'ok' ? `v${saved.versionNo} 생성` : `v${saved.versionNo}와 내용이 같습니다`}</p>}
+        {alter.error && <p role="alert" className={s.warn}>{alter.error.message}</p>}
+        <footer className={s.foot}>
+          <button type="button" className={s.btn} onClick={onClose}>닫기</button>
+          <button type="button" className={s.btn} disabled={!ready} onClick={() => submit(true)}>미리보기</button>
+          <button type="button" className={`${s.btn} ${s.primary}`} disabled={!ready || result?.status !== 'preview'} onClick={() => submit(false)}>저장</button>
+        </footer>
+      </div>
+    </div>
+  );
+}

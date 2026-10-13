@@ -1,5 +1,7 @@
+import { Fragment, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { useDeleteDatabase, useDeleteSchema, useDeleteVersion, useMe, useSchemaInfo, useVersions } from '../api/hooks';
+import { useDeleteDatabase, useDeleteSchema, useDeleteVersion, useDerivation, useMe, useSchemaInfo, useVersions } from '../api/hooks';
+import { AlterDialog } from '../features/alter/AlterDialog';
 import { positive } from '../hooks/useSchemaContext';
 import { confirmByName } from '../lib/confirm-name';
 import { formatDateTime } from '../lib/format';
@@ -16,6 +18,8 @@ export function HistoryPage() {
   const removeSchema = useDeleteSchema();
   const removeDatabase = useDeleteDatabase();
   const navigate = useNavigate();
+  const [alterOpen, setAlterOpen] = useState(false);
+  const [scriptOf, setScriptOf] = useState<number>();
   const isEditor = canEdit(me.data);
   const info = schema.data;
   const confirmDelete = (target: typeof removeSchema, id: number, label: string, name: string) => {
@@ -32,6 +36,7 @@ export function HistoryPage() {
       <h1 className={s.title}>버전 이력 · {info ? `${info.databaseName} › ${info.name}` : ''}</h1>
       {isEditor && info && (
         <div className={s.row}>
+          {list.some((v) => v.sourceFormat === 'sql') && <button type="button" className={s.btn} onClick={() => setAlterOpen(true)}>ALTER 적용</button>}
           <button type="button" className={`${s.btn} ${s.danger}`} disabled={removeSchema.isPending || removeDatabase.isPending}
             onClick={() => confirmDelete(removeSchema, info.id, 'Schema', info.name)}>Schema 삭제</button>
           <button type="button" className={`${s.btn} ${s.danger}`} disabled={removeSchema.isPending || removeDatabase.isPending}
@@ -48,33 +53,52 @@ export function HistoryPage() {
             {list.map((v, i) => {
               const previous = list[i + 1];
               return (
-                <tr key={v.id}>
-                  <td className="mono">v{v.versionNo}</td>
-                  <td>{formatDateTime(v.uploadedAt)}</td>
-                  <td>{v.uploadedBy}</td>
-                  <td>{v.sourceFormat.toUpperCase()}</td>
-                  <td className="mono">{v.sourceFilename}</td>
-                  <td>{v.changedObjects}</td>
-                  <td>{v.note ?? ''}</td>
-                  <td>
-                    <div className={s.row}>
-                      {previous && <Link className={s.btn} to={`/db/${params.dbId}/schema/${schemaId}?base=${previous.id}&target=${v.id}`}>v{previous.versionNo}과 비교</Link>}
-                      <a className={s.btn} href={`/api/versions/${v.id}/source`} download>원본</a>
-                      {isEditor && (
-                        <button type="button" className={`${s.btn} ${s.danger}`} aria-label={`v${v.versionNo} 삭제`} disabled={remove.isPending}
-                          onClick={() => window.confirm(`v${v.versionNo}을(를) 삭제할까요? 다른 버전에는 영향이 없습니다.`) && remove.mutate(v.id)}>
-                          삭제
+                <Fragment key={v.id}>
+                  <tr>
+                    <td className="mono">v{v.versionNo}</td>
+                    <td>{formatDateTime(v.uploadedAt)}</td>
+                    <td>{v.uploadedBy}</td>
+                    <td>
+                      {v.sourceFormat.toUpperCase()}
+                      {v.derivedFrom && (
+                        <button type="button" className={s.btn} aria-expanded={scriptOf === v.id} onClick={() => setScriptOf(scriptOf === v.id ? undefined : v.id)}>
+                          ALTER 적용 (기준 v{v.derivedFrom.baseVersionNo})
                         </button>
                       )}
-                    </div>
-                  </td>
-                </tr>
+                    </td>
+                    <td className="mono">{v.sourceFilename}</td>
+                    <td>{v.changedObjects}</td>
+                    <td>{v.note ?? ''}</td>
+                    <td>
+                      <div className={s.row}>
+                        {previous && <Link className={s.btn} to={`/db/${params.dbId}/schema/${schemaId}?base=${previous.id}&target=${v.id}`}>v{previous.versionNo}과 비교</Link>}
+                        <a className={s.btn} href={`/api/versions/${v.id}/source`} download>원본</a>
+                        {isEditor && (
+                          <button type="button" className={`${s.btn} ${s.danger}`} aria-label={`v${v.versionNo} 삭제`} disabled={remove.isPending}
+                            onClick={() => window.confirm(`v${v.versionNo}을(를) 삭제할까요? 다른 버전에는 영향이 없습니다.`) && remove.mutate(v.id)}>
+                            삭제
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                  {scriptOf === v.id && <tr><td colSpan={8}><DerivationScript id={v.id} /></td></tr>}
+                </Fragment>
               );
             })}
           </tbody>
         </table>
       )}
       {remove.error && <p role="alert" className={s.error}>{remove.error.message}</p>}
+      {alterOpen && <AlterDialog versions={list} onClose={() => setAlterOpen(false)} />}
     </section>
   );
+}
+
+// ALTER 적용으로 만든 버전의 스크립트 원문
+function DerivationScript({ id }: { id: number }) {
+  const derivation = useDerivation(id);
+  if (derivation.error) return <p role="alert" className={s.error}>{derivation.error.message}</p>;
+  if (!derivation.data) return <p className={s.empty}>불러오는 중…</p>;
+  return <pre className={s.script}>{derivation.data.script}</pre>;
 }
