@@ -86,6 +86,12 @@ describe('normalizeDefault', () => {
     [{ kind: 'string', value: 'B' }, "enum('a','b')", "'b'"],
     [{ kind: 'string', value: 'y,x' }, "set('x','y')", "'x,y'"],
     [{ kind: 'number', value: '1' }, 'bit(1)', "b'1'"],
+    // CHAR 기본값의 끝 공백(U+0020)은 MySQL 이 떼고 찍는다 — 앞 공백·탭·VARCHAR 는 그대로 (8.0.46·8.4.11 실측)
+    [{ kind: 'string', value: 'ab  ' }, 'char(5)', "'ab'"],
+    [{ kind: 'string', value: ' ' }, 'char(1)', "''"],
+    [{ kind: 'string', value: '  ab' }, 'char(5)', "'  ab'"],
+    [{ kind: 'string', value: 'a\tb\t ' }, 'char(5)', "'a\tb\t'"],
+    [{ kind: 'string', value: 'ab  ' }, 'varchar(5)', "'ab  '"],
     // BIT 값의 앞쪽 0 은 MySQL 이 떼고 찍는다 (8.0.46·8.4.11 실측: b'00000101' → b'101', b'00000000' → b'0')
     [{ kind: 'bit', value: "b'00000101'" }, 'bit(8)', "b'101'"],
     [{ kind: 'bit', value: "b'00000000'" }, 'bit(8)', "b'0'"],

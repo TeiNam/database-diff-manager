@@ -202,6 +202,7 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
     return quoteString(enumMembers(col.type).find((m) => m.toLowerCase() === wanted) ?? bad(`'${spec.value}' 은 ENUM 값이 아닙니다`));
   }
   if (base === 'set') return quoteString(setDefault(spec.value, col.type, bad));
+  if (base === 'char') return quoteString(trimTrailingSpaces(spec.value)); // CHAR 는 끝 공백을 떼고 찍는다 (8.0.46·8.4.11 실측: 'ab  ' → 'ab', ' ' → '')
   return quoteString(spec.value);
 }
 
