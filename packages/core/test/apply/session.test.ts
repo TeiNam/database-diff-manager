@@ -83,15 +83,18 @@ describe('SET FOREIGN_KEY_CHECKS 값', () => {
   });
 });
 
+// MySQL 8.0.46 실측: 모든 이름을 거꾸로 써서 SET 한 뒤 @@sql_mode 가 낸 순서 (SHOW CREATE 의 sql_mode 도 이 순서다)
 const SQL_MODE_NAMES = [
   'REAL_AS_FLOAT', 'PIPES_AS_CONCAT', 'ANSI_QUOTES', 'IGNORE_SPACE', 'NOT_USED', 'ONLY_FULL_GROUP_BY', 'NO_UNSIGNED_SUBTRACTION', 'NO_DIR_IN_CREATE', 'ANSI',
   'NO_AUTO_VALUE_ON_ZERO', 'NO_BACKSLASH_ESCAPES', 'STRICT_TRANS_TABLES', 'STRICT_ALL_TABLES', 'NO_ZERO_IN_DATE', 'NO_ZERO_DATE', 'ALLOW_INVALID_DATES',
   'ERROR_FOR_DIVISION_BY_ZERO', 'TRADITIONAL', 'HIGH_NOT_PRECEDENCE', 'NO_ENGINE_SUBSTITUTION', 'PAD_CHAR_TO_FULL_LENGTH', 'TIME_TRUNCATE_FRACTIONAL',
 ];
+// 다른 모드 여럿을 묶은 이름: MySQL 은 풀어 쓴 값을 내는데 그걸 재현하지 않고 거부한다
+const COMBINATION_MODES = ['ANSI', 'TRADITIONAL'];
+const SINGLE_MODES = SQL_MODE_NAMES.filter((name) => !COMBINATION_MODES.includes(name));
 
-// 순서 바로잡기·ANSI/TRADITIONAL 풀어쓰기는 하지 않는다 (MySQL 과 비교하는 Task 9 에서 정한다)
 describe('SET SQL_MODE 값', () => {
-  it.each(SQL_MODE_NAMES)('%s 는 소문자로 써도 받는다', (name) => {
+  it.each(SINGLE_MODES)('%s 는 소문자로 써도 받는다', (name) => {
     const st = freshState();
     setIn(st, `SET SQL_MODE = '${name.toLowerCase()}'`);
     expect(st.sqlMode).toBe(name);
@@ -122,6 +125,56 @@ describe('SET SQL_MODE 값', () => {
       expect(messageOf(() => setIn(st, `SET SQL_MODE = ${value}`))).toContain('(MySQL 1231)');
       expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
     });
+});
+
+// 루틴은 만들 때의 sql_mode 를 기억하고 SHOW CREATE 는 MySQL 순서로 한 번씩만 낸다 (8.0.46 실측: 'NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES,ONLY_FULL_GROUP_BY,
+// strict_trans_tables,NO_ZERO_DATE' → 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ENGINE_SUBSTITUTION'). 쓴 순서를 그대로 두면 같은 모드가 다른 값으로 보인다
+describe('SET SQL_MODE 순서', () => {
+  it('쓴 순서와 상관없이 MySQL 순서로 저장하고 같은 이름(대소문자 무시)은 한 번만 쓴다', () => {
+    const st = freshState();
+    setIn(st, "SET SQL_MODE = 'NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES,ONLY_FULL_GROUP_BY,strict_trans_tables,NO_ZERO_DATE'");
+    expect(st.sqlMode).toBe('ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ENGINE_SUBSTITUTION');
+  });
+
+  it('묶음이 아닌 모든 이름을 거꾸로 써도 MySQL 순서로 돌아온다', () => {
+    const st = freshState();
+    setIn(st, `SET SQL_MODE = '${[...SINGLE_MODES].reverse().join(',')}'`);
+    expect(st.sqlMode).toBe(SINGLE_MODES.join(','));
+  });
+
+  it('기본 모드를 거꾸로 써도 DEFAULT 와 같은 값이다', () => {
+    const st = freshState();
+    setIn(st, `SET SQL_MODE = '${DEFAULT_SQL_MODE.split(',').reverse().join(',')}'`);
+    expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
+  });
+
+  it('@@SQL_MODE 로 저장했다 되돌려도 같은 값이다', () => {
+    const st = freshState();
+    setIn(st, "SET @OLD_MODE = @@SQL_MODE, SQL_MODE = 'NO_BACKSLASH_ESCAPES,ANSI_QUOTES'");
+    expect(st.sqlMode).toBe('ANSI_QUOTES,NO_BACKSLASH_ESCAPES');
+    setIn(st, 'SET @CUR_MODE = @@SQL_MODE, SQL_MODE = @OLD_MODE');
+    expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
+    setIn(st, 'SET SQL_MODE = @CUR_MODE');
+    expect(st.sqlMode).toBe('ANSI_QUOTES,NO_BACKSLASH_ESCAPES');
+  });
+});
+
+// ANSI·TRADITIONAL 은 다른 모드 여럿을 묶은 이름이라 MySQL 이 풀어 쓴 값(자기 이름도 남긴다)을 낸다. 그 규칙은 재현하지 않고 다시 뽑아 올리라고 안내한다.
+// 8.0 에서 없어진 묶음(ORACLE·DB2·MAXDB 등)은 MySQL 도 1231 로 거부한다
+describe('SET SQL_MODE 묶음 모드', () => {
+  it.each(COMBINATION_MODES)('묶음 모드 %s: 소문자·다른 모드와 함께 써도 거부하고 값을 바꾸지 않는다', (name) => {
+    for (const value of [name, name.toLowerCase(), `STRICT_TRANS_TABLES,${name}`, `${name},NO_ENGINE_SUBSTITUTION`]) {
+      const st = freshState();
+      const message = messageOf(() => setIn(st, `SET SQL_MODE = '${value}'`));
+      expect(message, value).toContain(name);
+      expect(message.endsWith(RE_EXPORT), value).toBe(true);
+      expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
+    }
+  });
+
+  it.each([['ORACLE'], ['DB2'], ['MSSQL'], ['POSTGRESQL']])('%s 는 8.0 에 없는 이름이라 1231 이다', (name) => {
+    expect(messageOf(() => setIn(freshState(), `SET SQL_MODE = '${name}'`))).toContain('(MySQL 1231)');
+  });
 });
 
 // 이 변수를 바꾸면 이후 CREATE TABLE 의 결과나 허용 여부가 달라진다 — 무시하면 MySQL 과 다른 모델이 나온다

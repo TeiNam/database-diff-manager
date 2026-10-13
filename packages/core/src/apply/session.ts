@@ -12,12 +12,16 @@ const SCHEMA_VARIABLES: ReadonlySet<string> = new Set([
   'restrict_fk_on_non_standard_key', 'default_collation_for_utf8mb4', 'character_set_database', 'collation_database', 'innodb_strict_mode',
 ]);
 
-// MySQL 8.0/8.4 의 SQL_MODE 이름. 8.0 에서 없어진 NO_AUTO_CREATE_USER·MAXDB·ORACLE 같은 이름은 1231
-const SQL_MODES: ReadonlySet<string> = new Set([
+// MySQL 8.0/8.4 의 SQL_MODE 이름. SHOW CREATE·@@sql_mode 가 내는 순서(MySQL 내부 순서, 8.0.46 실측)대로 둔다 — sqlModeOf 가 이 순서로 줄 세운다.
+// 8.0 에서 없어진 NO_AUTO_CREATE_USER·MAXDB·ORACLE 같은 이름은 1231
+const SQL_MODES: readonly string[] = [
   'REAL_AS_FLOAT', 'PIPES_AS_CONCAT', 'ANSI_QUOTES', 'IGNORE_SPACE', 'NOT_USED', 'ONLY_FULL_GROUP_BY', 'NO_UNSIGNED_SUBTRACTION', 'NO_DIR_IN_CREATE', 'ANSI',
   'NO_AUTO_VALUE_ON_ZERO', 'NO_BACKSLASH_ESCAPES', 'STRICT_TRANS_TABLES', 'STRICT_ALL_TABLES', 'NO_ZERO_IN_DATE', 'NO_ZERO_DATE', 'ALLOW_INVALID_DATES',
   'ERROR_FOR_DIVISION_BY_ZERO', 'TRADITIONAL', 'HIGH_NOT_PRECEDENCE', 'NO_ENGINE_SUBSTITUTION', 'PAD_CHAR_TO_FULL_LENGTH', 'TIME_TRUNCATE_FRACTIONAL',
-]);
+];
+const KNOWN_SQL_MODES: ReadonlySet<string> = new Set(SQL_MODES);
+// 다른 모드 여럿을 묶은 이름. MySQL 은 풀어 쓴 모드에 자기 이름까지 남겨 내는데, 그 규칙은 재현하지 않고 거부한다
+const COMBINATION_SQL_MODES: ReadonlySet<string> = new Set(['ANSI', 'TRADITIONAL']);
 
 const FK_CHECKS_OFF: ReadonlySet<string> = new Set(['0', 'OFF', 'FALSE']);
 const FK_CHECKS_ON: ReadonlySet<string> = new Set(['1', 'ON', 'TRUE']);
@@ -81,12 +85,14 @@ function foreignKeyChecksOf(value: string): boolean {
   return fail(`FOREIGN_KEY_CHECKS 에 쓸 수 없는 값입니다: ${value} (MySQL 1231)`);
 }
 
-// 쓴 순서 그대로 대문자로 돌려준다. 빈 항목('A,' · ',A')은 MySQL 처럼 건너뛴다.
-// MySQL 은 자기 순서로 다시 정렬하고 ANSI·TRADITIONAL 을 풀어 쓰는데, 그건 MySQL 과 비교하는 시나리오에서 정한다
+// 쓴 모드를 MySQL 순서로 줄 세워 대문자로 돌려준다 (루틴이 기억하는 sql_mode 가 SHOW CREATE 와 같아야 한다). 같은 이름은 한 번만 쓰고,
+// 빈 항목('A,' · ',A')은 MySQL 처럼 건너뛴다. ANSI·TRADITIONAL 같은 묶음 이름은 받지 않는다
 function sqlModeOf(value: string): string {
   if (value === 'DEFAULT') return DEFAULT_SQL_MODE;
-  const modes = value.toUpperCase().split(',').filter((mode) => mode !== '');
-  const unknown = modes.find((mode) => !SQL_MODES.has(mode));
+  const written = new Set(value.toUpperCase().split(',').filter((mode) => mode !== ''));
+  const unknown = [...written].find((mode) => !KNOWN_SQL_MODES.has(mode));
   if (unknown !== undefined) fail(`SQL_MODE 에 쓸 수 없는 값입니다: ${unknown} (MySQL 1231)`);
-  return modes.join(',');
+  const combination = [...written].find((mode) => COMBINATION_SQL_MODES.has(mode));
+  if (combination !== undefined) fail(`SQL_MODE ${combination} 는 다른 모드 여럿을 묶은 이름이라 받을 수 없습니다 — ${RE_EXPORT}`);
+  return SQL_MODES.filter((mode) => written.has(mode)).join(',');
 }
