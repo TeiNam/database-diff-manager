@@ -15,8 +15,8 @@ describe('SET 문', () => {
     expect(st.fkChecks).toBe(false);
     set('SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS');
     expect(st.fkChecks).toBe(true);
-    set("SET SESSION sql_mode = 'ansi_quotes,strict_trans_tables'");
-    expect(st.sqlMode).toBe('ANSI_QUOTES,STRICT_TRANS_TABLES');
+    set("SET SESSION sql_mode = 'no_zero_date,strict_trans_tables'");
+    expect(st.sqlMode).toBe('STRICT_TRANS_TABLES,NO_ZERO_DATE');
     set('SET @@session.sql_mode = DEFAULT');
     expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
     set("SET NAMES utf8mb4, time_zone = '+00:00'");
@@ -91,9 +91,21 @@ const SQL_MODE_NAMES = [
 ];
 // 다른 모드 여럿을 묶은 이름: MySQL 은 풀어 쓴 값을 내는데 그걸 재현하지 않고 거부한다
 const COMBINATION_MODES = ['ANSI', 'TRADITIONAL'];
-const SINGLE_MODES = SQL_MODE_NAMES.filter((name) => !COMBINATION_MODES.includes(name));
+// 이후 테이블 정의를 다르게 읽게 하는 모드: REAL_AS_FLOAT 는 REAL 을 FLOAT 로, ANSI_QUOTES 는 "…" 를 식별자로 읽는다. 모델에 반영하지 않으므로 거부한다
+const DDL_MODES = ['REAL_AS_FLOAT', 'ANSI_QUOTES'];
+const SINGLE_MODES = SQL_MODE_NAMES.filter((name) => !COMBINATION_MODES.includes(name) && !DDL_MODES.includes(name));
 
 describe('SET SQL_MODE 값', () => {
+  it.each(DDL_MODES)('%s 는 이후 테이블 정의를 다르게 읽게 해 RE_EXPORT 로 거부한다 (다른 모드와 섞어 써도, 소문자여도)', (name) => {
+    for (const value of [name, `STRICT_TRANS_TABLES,${name.toLowerCase()}`]) {
+      const st = freshState();
+      const message = messageOf(() => setIn(st, `SET SQL_MODE = '${value}'`));
+      expect(message).toContain(name);
+      expect(message.endsWith(RE_EXPORT), message).toBe(true);
+      expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
+    }
+  });
+
   it.each(SINGLE_MODES)('%s 는 소문자로 써도 받는다', (name) => {
     const st = freshState();
     setIn(st, `SET SQL_MODE = '${name.toLowerCase()}'`);
@@ -150,12 +162,12 @@ describe('SET SQL_MODE 순서', () => {
 
   it('@@SQL_MODE 로 저장했다 되돌려도 같은 값이다', () => {
     const st = freshState();
-    setIn(st, "SET @OLD_MODE = @@SQL_MODE, SQL_MODE = 'NO_BACKSLASH_ESCAPES,ANSI_QUOTES'");
-    expect(st.sqlMode).toBe('ANSI_QUOTES,NO_BACKSLASH_ESCAPES');
+    setIn(st, "SET @OLD_MODE = @@SQL_MODE, SQL_MODE = 'NO_BACKSLASH_ESCAPES,PIPES_AS_CONCAT'");
+    expect(st.sqlMode).toBe('PIPES_AS_CONCAT,NO_BACKSLASH_ESCAPES');
     setIn(st, 'SET @CUR_MODE = @@SQL_MODE, SQL_MODE = @OLD_MODE');
     expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
     setIn(st, 'SET SQL_MODE = @CUR_MODE');
-    expect(st.sqlMode).toBe('ANSI_QUOTES,NO_BACKSLASH_ESCAPES');
+    expect(st.sqlMode).toBe('PIPES_AS_CONCAT,NO_BACKSLASH_ESCAPES');
   });
 });
 

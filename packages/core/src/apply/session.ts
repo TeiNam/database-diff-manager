@@ -22,6 +22,8 @@ const SQL_MODES: readonly string[] = [
 const KNOWN_SQL_MODES: ReadonlySet<string> = new Set(SQL_MODES);
 // 다른 모드 여럿을 묶은 이름. MySQL 은 풀어 쓴 모드에 자기 이름까지 남겨 내는데, 그 규칙은 재현하지 않고 거부한다
 const COMBINATION_SQL_MODES: ReadonlySet<string> = new Set(['ANSI', 'TRADITIONAL']);
+// 이후 테이블 정의를 다르게 읽게 하는 모드: REAL_AS_FLOAT 는 REAL 을 FLOAT 로, ANSI_QUOTES 는 "…" 를 문자열이 아닌 식별자로 읽는다. 모델에 반영하지 않으므로 거부한다
+const DDL_SQL_MODES: ReadonlySet<string> = new Set(['REAL_AS_FLOAT', 'ANSI_QUOTES']);
 
 const FK_CHECKS_OFF: ReadonlySet<string> = new Set(['0', 'OFF', 'FALSE']);
 const FK_CHECKS_ON: ReadonlySet<string> = new Set(['1', 'ON', 'TRUE']);
@@ -86,7 +88,7 @@ function foreignKeyChecksOf(value: string): boolean {
 }
 
 // 쓴 모드를 MySQL 순서로 줄 세워 대문자로 돌려준다 (루틴이 기억하는 sql_mode 가 SHOW CREATE 와 같아야 한다). 같은 이름은 한 번만 쓰고,
-// 빈 항목('A,' · ',A')은 MySQL 처럼 건너뛴다. ANSI·TRADITIONAL 같은 묶음 이름은 받지 않는다
+// 빈 항목('A,' · ',A')은 MySQL 처럼 건너뛴다. ANSI·TRADITIONAL 같은 묶음 이름과 REAL_AS_FLOAT·ANSI_QUOTES 는 받지 않는다
 function sqlModeOf(value: string): string {
   if (value === 'DEFAULT') return DEFAULT_SQL_MODE;
   const written = new Set(value.toUpperCase().split(',').filter((mode) => mode !== ''));
@@ -94,5 +96,7 @@ function sqlModeOf(value: string): string {
   if (unknown !== undefined) fail(`SQL_MODE 에 쓸 수 없는 값입니다: ${unknown} (MySQL 1231)`);
   const combination = [...written].find((mode) => COMBINATION_SQL_MODES.has(mode));
   if (combination !== undefined) fail(`SQL_MODE ${combination} 는 다른 모드 여럿을 묶은 이름이라 받을 수 없습니다 — ${RE_EXPORT}`);
+  const ddl = [...written].find((mode) => DDL_SQL_MODES.has(mode));
+  if (ddl !== undefined) fail(`SQL_MODE ${ddl} 는 이후 테이블 정의를 다르게 읽게 해 받을 수 없습니다 — ${RE_EXPORT}`);
   return SQL_MODES.filter((mode) => written.has(mode)).join(',');
 }

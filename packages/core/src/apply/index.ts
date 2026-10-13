@@ -3,6 +3,7 @@ import { Cursor, ParseError } from '../cursor';
 import type { RenameMapping } from '../diff';
 import { LexError, tokenize, type Token } from '../lexer';
 import type { SchemaModel } from '../model';
+import { routineLexMode } from '../normalize';
 import { splitDump } from '../parse-dump';
 import { UnsafeValueError } from '../sql-safety';
 import { alterTable, createIndex, dropIndexOn } from './alter-table';
@@ -61,6 +62,7 @@ export function resolveDefaults(given: Partial<ApplyDefaults> = {}): ApplyDefaul
 
 // DDL 을 적용했으면 true, 세션 문장(SET·USE)이면 false
 function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): boolean {
+  assertSameBackslashMode(st, ddl, noBackslashEscapes);
   const c = new Cursor(withoutCommentEnd(tokenize(ddl, { noBackslashEscapes })), ddl);
   if (c.isWord('SET')) {
     applySet(st, c);
@@ -72,6 +74,7 @@ function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): bo
     return false;
   }
   if (!isCreateRoutine(ddl)) assertBmpStrings(c.toks);
+  if (noBackslashEscapes && !isCreateRoutine(ddl)) assertNoBackslashTypeValues(c.toks, ddl);
   if (c.acceptWord('ALTER', 'TABLE')) alterTable(st, c);
   else if (c.acceptWord('DROP', 'INDEX')) dropIndexOn(st, c);
   else if (c.isWord('CREATE', 'INDEX') || ['UNIQUE', 'FULLTEXT', 'SPATIAL'].some((w) => c.isWord('CREATE', w, 'INDEX'))) {
@@ -88,6 +91,27 @@ function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): bo
   } else if (isCreateRoutine(ddl)) createRoutine(st, ddl, noBackslashEscapes);
   else return fail(unsupported(ddl));
   return true;
+}
+
+// 문장 나누기(splitDump)는 SET SQL_MODE = '…' 꼴만 따라가 NO_BACKSLASH_ESCAPES 를 켜고 끈다. SET 문(applySet)이 바꾼 세션 SQL_MODE 와 어긋나면
+// (@@sql_mode·:=·@변수·큰따옴표, SET GLOBAL) 이 문장의 문자열을 MySQL 과 다른 이스케이프 규칙으로 읽었으므로, 백슬래시가 든 문장은 받지 않는다 (백슬래시가 없으면 두 규칙이 같다)
+function assertSameBackslashMode(st: State, ddl: string, noBackslashEscapes: boolean): void {
+  if (routineLexMode(st.sqlMode).noBackslashEscapes === noBackslashEscapes || !ddl.includes('\\')) return;
+  fail(`앞의 SET 문이 바꾼 SQL_MODE 의 NO_BACKSLASH_ESCAPES 를 문장 나누기와 다르게 읽어 백슬래시가 든 이 문장을 MySQL 과 같게 읽을 수 없습니다 (SET SQL_MODE = '…' 꼴로 쓰면 됩니다) — ${RE_EXPORT}`);
+}
+
+// NO_BACKSLASH_ESCAPES 세션에서 ENUM·SET 값에 백슬래시가 있으면 거부한다: 타입 정규화가 타입 원문을 보통 이스케이프 규칙으로 다시 읽어 값이 바뀐다.
+// 같은 세션의 COMMENT·DEFAULT 는 토큰 값을 그대로 써서 백슬래시가 MySQL 과 같게 남는다 (8.4.11 실측)
+function assertNoBackslashTypeValues(toks: readonly Token[], ddl: string): void {
+  toks.forEach((t, k) => {
+    const opensTypeArgs = t.t === 'word' && /^(ENUM|SET)$/i.test(t.v) && toks[k + 1]?.t === 'op' && toks[k + 1].v === '(';
+    if (!opensTypeArgs) return;
+    for (let j = k + 2, depth = 1; j < toks.length && depth > 0; j++) {
+      const x = toks[j];
+      if (x.t === 'op' && (x.v === '(' || x.v === ')')) depth += x.v === '(' ? 1 : -1;
+      else if (x.t === 'string' && ddl.slice(x.s, x.e).includes('\\')) fail(`NO_BACKSLASH_ESCAPES 세션에서 백슬래시가 든 ENUM·SET 값은 받을 수 없습니다 — ${RE_EXPORT}`);
+    }
+  });
 }
 
 // 문장의 문자열 리터럴에 4바이트 문자가 있으면 거부한다 (DEFAULT·COMMENT·ENUM 값). 루틴은 본문이 쓴 그대로 찍히므로 COMMENT 만 object-stmt 가 본다
