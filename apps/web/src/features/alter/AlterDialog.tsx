@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, type DragEvent } from 'react';
 import { useApplyAlter } from '../../api/hooks';
 import type { AlterChange, AlterRequest, AlterResponse, VersionSummary } from '../../api/types';
 import { Icon } from '../../components/Icon';
@@ -8,6 +8,8 @@ import s from '../upload/UploadDialog.module.css';
 const MYSQL_DEFAULTS = { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' };
 const OP_TEXT: Record<AlterChange['op'], string> = { add: '추가', drop: '삭제', modify: '변경', rename: '이름 변경' };
 const KIND_TEXT: Record<AlterChange['kind'], string> = { table: '테이블', view: '뷰', function: '함수', procedure: '프로시저' };
+// 서버가 파일 이름을 .sql 로 끝나게 요구한다. 끌어다 놓기와 '모든 파일' 선택은 input 의 accept 필터를 거치지 않는다
+const SQL_FILE = /\.sql$/i;
 
 // 스키마의 SQL 버전에 ALTER 스크립트를 적용해 새 버전을 만든다 (미리보기 → 저장). versions: 최신 버전이 앞
 export function AlterDialog({ versions, onClose }: { versions: VersionSummary[]; onClose: () => void }) {
@@ -22,11 +24,30 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
   const [charset, setCharset] = useState(last.charset);
   const [collation, setCollation] = useState(last.collation);
   const [result, setResult] = useState<AlterResponse>();
+  const [fileError, setFileError] = useState<string>();
   const alter = useApplyAlter();
   // 입력이 바뀌면 이전 미리보기·오류는 더 이상 맞지 않는다
   const edited = () => {
     setResult(undefined);
+    setFileError(undefined);
     alter.reset();
+  };
+  // 고르거나 끌어다 놓은 파일을 스크립트로 읽는다. 받지 못하면 이유를 알리고 지금 스크립트는 그대로 둔다
+  const loadFile = async (file: File) => {
+    if (!SQL_FILE.test(file.name)) {
+      setFileError(`${file.name}: .sql 파일만 받습니다`);
+      return;
+    }
+    let text: string;
+    try {
+      text = await file.text();
+    } catch (error) {
+      setFileError(`${file.name}: 파일을 읽지 못했습니다${error instanceof Error && error.message ? ` (${error.message})` : ''}`);
+      return;
+    }
+    setScript(text);
+    setFilename(file.name);
+    edited();
   };
   const submit = (dryRun: boolean) => {
     if (baseId === undefined) return;
@@ -53,19 +74,8 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
           <label>스키마 기본 콜레이션<input value={collation} aria-label="스키마 기본 콜레이션" onChange={(e) => { setCollation(e.target.value); edited(); }} /></label>
           <label>메모<input value={note} maxLength={500} aria-label="메모" onChange={(e) => setNote(e.target.value)} /></label>
         </fieldset>
-        <label className={s.drop}>
-          <Icon name="upload" size={20} />
-          <span>.sql 파일을 고르거나 아래에 스크립트를 붙여 넣으세요</span>
-          <input type="file" accept=".sql" aria-label="스크립트 파일" className="visually-hidden"
-            onChange={async (e) => {
-              const file = e.target.files?.[0];
-              e.target.value = '';
-              if (!file) return;
-              setScript(await file.text());
-              setFilename(file.name);
-              edited();
-            }} />
-        </label>
+        <ScriptDropBox onFile={loadFile} />
+        {fileError && <p role="alert" className={s.warn}>{fileError}</p>}
         <textarea className="mono" rows={10} spellCheck={false} aria-label="ALTER 스크립트" value={script} placeholder="ALTER TABLE member ADD COLUMN nick VARCHAR(20);"
           onChange={(e) => { setScript(e.target.value); setFilename(undefined); edited(); }} />
         <p className={s.warnLine}>
@@ -87,5 +97,29 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
         </footer>
       </div>
     </div>
+  );
+}
+
+// .sql 파일을 고르거나 끌어다 놓는 상자. 파일을 읽는 일은 부모가 한다.
+// 처리하지 않은 파일 드롭은 브라우저가 그 파일을 열어 화면을 벗어나므로, 끌어 올 때와 놓을 때 기본 동작을 막는다
+function ScriptDropBox({ onFile }: { onFile: (file: File) => void }) {
+  const [dragging, setDragging] = useState(false);
+  const onDrop = (e: DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) onFile(file);
+  };
+  return (
+    <label className={`${s.drop} ${dragging ? s.dragging : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
+      <Icon name="upload" size={20} />
+      <span>.sql 파일을 고르거나 끌어다 놓거나, 아래에 스크립트를 붙여 넣으세요</span>
+      <input type="file" accept=".sql" aria-label="스크립트 파일" className="visually-hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = '';
+          if (file) onFile(file);
+        }} />
+    </label>
   );
 }

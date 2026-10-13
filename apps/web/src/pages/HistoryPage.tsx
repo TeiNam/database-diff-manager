@@ -29,6 +29,8 @@ export function HistoryPage() {
     removeDatabase.reset();
     target.mutate({ id, confirmName: name }, { onSuccess: () => navigate('/') });
   };
+  // 지운 버전의 스크립트 패널은 닫는다. 지운 id 는 다시 쓰일 수 있어, 남기면 같은 id 의 새 버전 행에서 저절로 열린다
+  const closeScriptOf = (id: number) => setScriptOf((open) => (open === id ? undefined : open));
   const list = versions.data ?? [];
   if (schemaId === undefined) return <section className={s.page}><p role="alert" className={s.error}>올바르지 않은 스키마 주소입니다</p></section>;
   return (
@@ -75,14 +77,14 @@ export function HistoryPage() {
                         <a className={s.btn} href={`/api/versions/${v.id}/source`} download>원본</a>
                         {isEditor && (
                           <button type="button" className={`${s.btn} ${s.danger}`} aria-label={`v${v.versionNo} 삭제`} disabled={remove.isPending}
-                            onClick={() => window.confirm(`v${v.versionNo}을(를) 삭제할까요? 다른 버전에는 영향이 없습니다.`) && remove.mutate(v.id)}>
+                            onClick={() => window.confirm(`v${v.versionNo}을(를) 삭제할까요? 다른 버전에는 영향이 없습니다.`) && remove.mutate(v.id, { onSuccess: () => closeScriptOf(v.id) })}>
                             삭제
                           </button>
                         )}
                       </div>
                     </td>
                   </tr>
-                  {scriptOf === v.id && <tr><td colSpan={8}><DerivationScript id={v.id} /></td></tr>}
+                  {v.derivedFrom && scriptOf === v.id && <tr><td colSpan={8}><DerivationScript id={v.id} /></td></tr>}
                 </Fragment>
               );
             })}

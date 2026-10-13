@@ -1,6 +1,6 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VersionSummary } from '../src/api/types';
 import { AlterDialog } from '../src/features/alter/AlterDialog';
 import { HistoryPage } from '../src/pages/HistoryPage';
@@ -135,5 +135,118 @@ describe('HistoryPage — ALTER 적용 버튼 노출', () => {
     expect(await screen.findByRole('button', { name: 'Schema 삭제' })).toBeInTheDocument();
     expect(await screen.findByText('v2')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'ALTER 적용' })).not.toBeInTheDocument();
+  });
+});
+
+// 리뷰 1회차: 파일 끌어다 놓기·읽기 실패, 스키마 기본값 대체값, 열린 스크립트 패널
+describe('AlterDialog — 파일 끌어다 놓기·읽기 실패', () => {
+  const dropBox = () => screen.getByLabelText('스크립트 파일').closest('label')!;
+  const sqlFile = (name: string) => new File(['ALTER TABLE a ADD b INT;'], name, { type: 'text/plain' });
+
+  it('.sql 파일을 점선 상자에 끌어다 놓으면 스크립트로 읽고 파일명을 보낸다 — 브라우저가 파일을 열어 버리지 않게 막는다', async () => {
+    const calls = mockApi({ 'POST /api/versions/1/alter': PREVIEW });
+    renderWithProviders(<AlterDialog versions={[version(1, 1, 'sql')]} onClose={() => undefined} />);
+    const box = dropBox();
+    const dragged = { dataTransfer: { files: [sqlFile('dropped.sql')] } };
+    // fireEvent 는 기본 동작이 막히지 않았을 때만 true 를 돌려준다
+    expect(fireEvent.dragOver(box, dragged)).toBe(false);
+    expect(box).toHaveClass('dragging');
+    expect(fireEvent.drop(box, dragged)).toBe(false);
+    await waitFor(() => expect(screen.getByLabelText('ALTER 스크립트')).toHaveValue('ALTER TABLE a ADD b INT;'));
+    expect(box).not.toHaveClass('dragging');
+    await userEvent.setup().click(screen.getByRole('button', { name: '미리보기' }));
+    await screen.findByRole('list', { name: '미리보기 결과' });
+    expect(alterBodies(calls, 1)).toHaveLength(1);
+    expect(alterBodies(calls, 1)[0]).toMatchObject({ script: 'ALTER TABLE a ADD b INT;', filename: 'dropped.sql', dryRun: true });
+  });
+
+  it('끌어다 놓은 파일이 .sql 이 아니면 읽지 않고 이유를 알린다 (끌어다 놓기는 파일 선택창의 accept 필터를 거치지 않는다)', async () => {
+    renderWithProviders(<AlterDialog versions={[version(1, 1, 'sql')]} onClose={() => undefined} />);
+    expect(fireEvent.drop(dropBox(), { dataTransfer: { files: [sqlFile('notes.txt')] } })).toBe(false);
+    expect(await screen.findByRole('alert')).toHaveTextContent('notes.txt: .sql 파일만 받습니다');
+    expect(screen.getByLabelText('ALTER 스크립트')).toHaveValue('');
+  });
+
+  it('파일을 읽지 못하면 이유를 알리고 기존 스크립트는 그대로 두며, 스크립트를 고치면 안내를 지운다', async () => {
+    renderWithProviders(<AlterDialog versions={[version(1, 1, 'sql')]} onClose={() => undefined} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('ALTER 스크립트'), 'ALTER TABLE keep ADD x INT;');
+    const unreadable = sqlFile('bad.sql');
+    vi.spyOn(unreadable, 'text').mockRejectedValue(new Error('NotReadableError'));
+    await user.upload(screen.getByLabelText('스크립트 파일'), unreadable);
+    expect(await screen.findByRole('alert')).toHaveTextContent('bad.sql: 파일을 읽지 못했습니다 (NotReadableError)');
+    expect(screen.getByLabelText('ALTER 스크립트')).toHaveValue('ALTER TABLE keep ADD x INT;');
+    await user.type(screen.getByLabelText('ALTER 스크립트'), ' ');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+describe('AlterDialog — 스키마 기본값 대체값', () => {
+  it('ALTER 로 만든 버전이 없으면 MySQL 8 기본값(utf8mb4 / utf8mb4_0900_ai_ci)을 채워 보낸다', async () => {
+    const calls = mockApi({ 'POST /api/versions/1/alter': PREVIEW });
+    renderWithProviders(<AlterDialog versions={[version(3, 3, 'md'), version(1, 1, 'sql')]} onClose={() => undefined} />);
+    expect(screen.getByLabelText('스키마 기본 문자셋')).toHaveValue('utf8mb4');
+    expect(screen.getByLabelText('스키마 기본 콜레이션')).toHaveValue('utf8mb4_0900_ai_ci');
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('ALTER 스크립트'), 'ALTER TABLE a ADD b INT;');
+    await user.click(screen.getByRole('button', { name: '미리보기' }));
+    await screen.findByRole('list', { name: '미리보기 결과' });
+    expect(alterBodies(calls, 1)[0].defaults).toEqual({ charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' });
+  });
+});
+
+describe('HistoryPage — viewer 와 열린 스크립트 패널', () => {
+  const route = { route: '/db/1/schema/7/history', path: '/db/:dbId/schema/:schemaId/history' };
+  const SCRIPT = 'ALTER TABLE member ADD age INT;';
+  const mockHistory = (me: { id: number; username: string; role: string }, versions: unknown) => mockApi({
+    '/api/auth/me': me,
+    '/api/schemas/7': { id: 7, name: 'shop', databaseId: 1, databaseName: 'db' },
+    '/api/schemas/7/versions': versions,
+    '/api/versions/12/derivation': { baseVersionId: 11, baseVersionNo: 1, script: SCRIPT, statementCount: 1, defaults: DERIVED.defaults },
+    'DELETE /api/versions/12': { ok: true },
+    'DELETE /api/versions/11': { ok: true },
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('viewer 에게는 ALTER 적용 버튼이 없지만, 파생 버전의 기준 배지와 스크립트 보기는 열린다', async () => {
+    mockHistory({ id: 4, username: 'kim', role: 'viewer' }, [version(12, 2, 'sql', { derivedFrom: DERIVED }), version(11, 1, 'sql')]);
+    renderWithProviders(<HistoryPage />, route);
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'ALTER 적용 (기준 v1)' }));
+    expect(await screen.findByText(SCRIPT)).toBeInTheDocument();
+    // 스크립트가 보일 즈음에는 먼저 요청한 me 응답도 반영되어 있다 (editor 판정을 느슨하게 바꾸면 아래 확인이 실패한다)
+    expect(screen.queryByRole('button', { name: 'ALTER 적용' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Schema 삭제' })).not.toBeInTheDocument();
+  });
+
+  // 첫 목록 조회는 지우기 전, 이후 조회는 `after`. 패널을 연 채로 지운 뒤 `after` 목록의 tbody 행 수를 돌려준다
+  async function deleteWithPanelOpen(after: VersionSummary[], deleteButton: string, settled: () => Promise<unknown>) {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    let listed = 0;
+    const before = [version(12, 2, 'sql', { derivedFrom: DERIVED }), version(11, 1, 'sql')];
+    mockHistory({ id: 3, username: 'park', role: 'dba' }, () => (listed++ === 0 ? before : after));
+    renderWithProviders(<HistoryPage />, route);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'ALTER 적용 (기준 v1)' }));
+    expect(await screen.findByText(SCRIPT)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: deleteButton }));
+    await settled();
+    return screen.getByRole('table').querySelectorAll('tbody tr').length;
+  }
+
+  it('열려 있던 버전을 지우면 패널을 닫아, 같은 id 를 다시 쓴 SQL 버전에서 저절로 열리지 않는다', async () => {
+    const rows = await deleteWithPanelOpen([version(12, 3, 'sql'), version(11, 1, 'sql')], 'v2 삭제', () => screen.findByText('v3'));
+    expect(rows).toBe(2);
+  });
+
+  it('열려 있던 버전을 지우면 패널을 닫아, 같은 id 를 다시 쓴 파생 버전에서도 저절로 열리지 않는다', async () => {
+    const reused = version(12, 3, 'sql', { derivedFrom: { ...DERIVED, baseVersionNo: 2 } });
+    const rows = await deleteWithPanelOpen([reused, version(11, 1, 'sql')], 'v2 삭제', () => screen.findByText('v3'));
+    expect(rows).toBe(2);
+    expect(screen.getByRole('button', { name: 'ALTER 적용 (기준 v2)' })).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('다른 버전을 지운 뒤 열린 패널의 버전이 더 이상 파생 버전이 아니면 패널을 닫는다', async () => {
+    const rows = await deleteWithPanelOpen([version(12, 2, 'sql')], 'v1 삭제', () => waitFor(() => expect(screen.queryByText('v1')).not.toBeInTheDocument()));
+    expect(rows).toBe(1);
   });
 });
