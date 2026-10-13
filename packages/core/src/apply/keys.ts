@@ -1,7 +1,7 @@
 // 인덱스·FK: 추가·삭제·이름 변경·자동 이름, FK 자동 인덱스, 문장 끝 테이블 검사, MySQL 키 저장 순서
 import { quotedIdentifiers } from '../lexer';
-import type { Column, ForeignKey, Index, Table } from '../model';
-import { baseType, BLOB_TYPES, effectiveCollation, tableCharset, type TableCharset } from './normalize-mysql';
+import type { Column, ForeignKey, Index, IndexKind, IndexPart, Table } from '../model';
+import { baseType, BLOB_TYPES, CHARSET_TYPES, effectiveCollation, INT_TYPES, tableCharset } from './normalize-mysql';
 import { findColumn, findTable, sameName, type State } from './state';
 import { fail, RE_EXPORT, type ConstraintItem, type FkItem, type IndexItem } from './types';
 
@@ -13,10 +13,18 @@ export interface KeyDrop {
 const LENGTH_TYPES: ReadonlySet<string> = new Set(['char', 'varchar', 'binary', 'varbinary']);
 const FULLTEXT_TYPES: ReadonlySet<string> = new Set(['char', 'varchar', 'tinytext', 'text', 'mediumtext', 'longtext']);
 
-// 인덱스 i 의 앞쪽 키 파트가 columns 와 같은지 (길이 있는 파트·식 파트·FULLTEXT·SPATIAL 은 FK 를 받치지 못한다)
-export function leadsWith(i: Index, columns: readonly string[]): boolean {
+// 인덱스 i 의 앞쪽 키 파트가 columns 와 이름·순서까지 같은지. 정렬 방향은 보지 않는다
+// (길이 있는 파트·식 파트·FULLTEXT·SPATIAL 은 FK 의 키가 될 수 없다)
+function isFkKey(i: Index, columns: readonly string[]): boolean {
   if (i.kind === 'FULLTEXT' || i.kind === 'SPATIAL' || i.parts.length < columns.length) return false;
   return columns.every((c, k) => i.parts[k].column !== undefined && i.parts[k].length === undefined && sameName(i.parts[k].column!, c));
+}
+
+// 새로 붙이는 FK 를 받치는 인덱스인지: isFkKey 이고 FK 컬럼에 해당하는 앞쪽 파트가 모두 ASC 여야 한다. MySQL 8.0.46 은 DESC 가 낀 인덱스를 받침으로 치지 않고
+// KEY (<컬럼>) 를 따로 만든다 ((a, b DESC) 는 FK (a) 를 받치고 (a DESC, b) 는 받치지 못한다). 이미 있는 FK 의 키를 확인하는 checkTable 과 부모의 참조 키(parentKey)는
+// 방향을 보지 않는다 — ASC 를 지우고 DESC 를 더해도, 부모가 PRIMARY KEY (id DESC) 뿐이어도 MySQL 은 받는다 (실측)
+export function leadsWith(i: Index, columns: readonly string[]): boolean {
+  return isFkKey(i, columns) && i.parts.slice(0, columns.length).every((p) => !p.desc);
 }
 
 // MySQL 자동 인덱스 이름: 기준 이름이 이미 있으면 _2, _3 … (대소문자 무시)
@@ -44,10 +52,21 @@ function notNull(c: Column): Column {
   return next;
 }
 
+// char(10)·varbinary(8) 의 괄호 안 길이 (괄호가 없으면 NaN)
+const declaredLength = (col: Pick<Column, 'type'>): number => Number(/\((\d+)\)/.exec(col.type)?.[1]);
+
+// 한 키(인덱스·FK)에 같은 컬럼을 두 번 쓸 수 없다. 컬럼 이름은 대소문자를 구분하지 않는다 (MySQL 8.0.46 실측: 인덱스 종류·길이와 상관없이 1060)
+function assertDistinct(columns: readonly string[]): void {
+  const dup = columns.find((n, k) => columns.findIndex((m) => sameName(m, n)) !== k);
+  if (dup !== undefined) fail(`키에 컬럼 \`${dup}\` 이 두 번 있습니다 (MySQL 1060)`);
+}
+
 export function addIndex(t: Table, item: IndexItem): Table {
   const parts = item.index.parts.map((p) => ({ ...p, column: (findColumn(t, p.column!) ?? fail(`키 컬럼 \`${p.column}\` 이 없습니다 (MySQL 1072)`)).name }));
-  const index: Index = withoutInnodbHash(t, { ...item.index, parts });
-  checkKeyParts(t, index);
+  assertDistinct(parts.map((p) => p.column));
+  const written: Index = withoutInnodbHash(t, { ...item.index, parts });
+  checkKeyParts(t, written);
+  const index: Index = { ...written, parts: written.parts.map((p) => withoutHiddenLength(t, written.kind, p)) };
   if (index.kind === 'PRIMARY') {
     if (t.indexes.some((i) => i.kind === 'PRIMARY')) fail('PRIMARY KEY 가 이미 있습니다 (MySQL 1068)');
     if (index.invisible) fail('PRIMARY KEY 는 INVISIBLE 로 둘 수 없습니다 (MySQL 3522)');
@@ -68,6 +87,18 @@ function withoutInnodbHash(t: Table, index: Index): Index {
   return next;
 }
 
+// MySQL 이 SHOW CREATE 에 찍지 않는 키 파트 길이는 모델에도 남기지 않는다 (8.0.46 실측): FULLTEXT 는 어떤 길이를 받아도 찍지 않고,
+// char·varchar·binary·varbinary 는 컬럼 길이와 같은 prefix 길이를 전체 컬럼으로 본다 (varchar(10) 의 KEY (c(10)) → KEY (c)). TEXT·BLOB 의 길이는 늘 찍힌다
+function withoutHiddenLength(t: Pick<Table, 'columns'>, kind: IndexKind, part: IndexPart): IndexPart {
+  if (part.length === undefined) return part;
+  const col = findColumn(t, part.column!)!;
+  const isWholeColumn = LENGTH_TYPES.has(baseType(col.type)) && part.length === declaredLength(col);
+  if (kind !== 'FULLTEXT' && !isWholeColumn) return part;
+  const next: IndexPart = { ...part };
+  delete next.length;
+  return next;
+}
+
 function checkKeyParts(t: Table, index: Index): void {
   for (const p of index.parts) {
     const col = findColumn(t, p.column!)!;
@@ -80,7 +111,7 @@ function checkKeyParts(t: Table, index: Index): void {
     if (BLOB_TYPES.has(base) && p.length === undefined) fail(`TEXT·BLOB 컬럼 \`${col.name}\` 의 인덱스에는 길이가 필요합니다 (MySQL 1170)`);
     if (p.length === undefined) continue;
     if (!BLOB_TYPES.has(base) && !LENGTH_TYPES.has(base)) fail(`\`${col.name}\` 에는 길이 있는 키 파트를 쓸 수 없습니다 (MySQL 1089)`);
-    if (LENGTH_TYPES.has(base) && p.length > Number(/\((\d+)\)/.exec(col.type)?.[1])) fail(`키 파트 길이가 컬럼 \`${col.name}\` 의 길이보다 깁니다 (MySQL 1089)`);
+    if (LENGTH_TYPES.has(base) && p.length > declaredLength(col)) fail(`키 파트 길이가 컬럼 \`${col.name}\` 의 길이보다 깁니다 (MySQL 1089)`);
   }
 }
 
@@ -89,13 +120,24 @@ export function addForeignKey(st: State, t: Table, item: FkItem): Table {
   const { refSchema, ...rest } = item.fk;
   if (refSchema !== undefined && refSchema !== st.schemaName) fail(`다른 스키마 \`${refSchema}\` 를 참조하는 FK 는 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
   const columns = rest.columns.map((n) => (findColumn(t, n) ?? fail(`FK 컬럼 \`${n}\` 이 없습니다 (MySQL 1072)`)).name);
+  assertDistinct(columns);
+  const name = item.named ? rest.name : nextFkName(t);
+  checkSetNull(t, columns, rest, name);
   const parent = rest.refTable === t.name ? t : findTable(st, rest.refTable);
   if (!parent && st.fkChecks) fail(`참조하는 테이블 \`${rest.refTable}\` 이 없습니다 (MySQL 1824)`);
+  if (parent?.parseError) fail(`참조하는 테이블 \`${parent.name}\` 은 파싱하지 못한 정의라 FK 를 검사할 수 없습니다 — ${RE_EXPORT}`);
   const refColumns = parent ? parentKey(st, t, columns, rest.refColumns, parent) : rest.refColumns;
-  const name = item.named ? rest.name : nextFkName(t);
   if (st.model.tables.some((x) => x.name !== t.name && x.foreignKeys.some((f) => sameName(f.name, name))) || t.foreignKeys.some((f) => sameName(f.name, name))) fail(`FK 이름 \`${name}\` 이 이미 있습니다 (MySQL 1826)`);
   const fk: ForeignKey = { ...rest, name, columns, refColumns };
   return { ...t, foreignKeys: [...t.foreignKeys, fk] };
+}
+
+// ON DELETE·ON UPDATE SET NULL 은 NOT NULL 컬럼에 쓸 수 없다. 둘 중 하나만 SET NULL 이어도, 여러 컬럼 중 하나만 NOT NULL 이어도 같다
+// (MySQL 8.0.46 실측 1830 — 타입 검사 3780·부모 없음 1824 보다 먼저)
+function checkSetNull(t: Table, columns: readonly string[], fk: Pick<ForeignKey, 'onDelete' | 'onUpdate'>, name: string): void {
+  if (fk.onDelete !== 'SET NULL' && fk.onUpdate !== 'SET NULL') return;
+  const notNullColumn = columns.map((n) => findColumn(t, n)!).find((c) => !c.nullable);
+  if (notNullColumn) fail(`컬럼 \`${notNullColumn.name}\` 은 NOT NULL 이라 FK \`${name}\` 의 SET NULL 을 쓸 수 없습니다 (MySQL 1830)`);
 }
 
 // 부모 쪽 검사: 참조 컬럼이 있고, 타입·콜레이션이 맞고(3780), 참조 컬럼에 정확히 맞는 PRIMARY KEY·UNIQUE 가 있어야 한다 (8.4 6125).
@@ -103,25 +145,31 @@ export function addForeignKey(st: State, t: Table, item: FkItem): Table {
 function parentKey(st: State, child: Table, columns: readonly string[], refNames: readonly string[], parent: Table): string[] {
   const refs = refNames.map((n) => findColumn(parent, n) ?? fail(`참조 컬럼 \`${parent.name}\`.\`${n}\` 이 없습니다 (MySQL 3734)`));
   if (refs.length !== columns.length) fail('FK 컬럼 수와 참조 컬럼 수가 다릅니다 (MySQL 1239)');
-  const childCs = tableCharset(child.options, st.defaults);
-  const parentCs = tableCharset(parent.options, st.defaults);
   columns.forEach((n, k) => {
     const a = findColumn(child, n)!;
-    if (!fkCompatible(a, childCs, refs[k], parentCs)) fail(`FK 컬럼 \`${a.name}\` 과 참조 컬럼 \`${refs[k].name}\` 의 타입·문자셋이 맞지 않습니다 (MySQL 3780)`);
+    if (!fkCompatible(st, child, a, parent, refs[k])) fail(`FK 컬럼 \`${a.name}\` 과 참조 컬럼 \`${refs[k].name}\` 의 타입·문자셋이 맞지 않습니다 (MySQL 3780)`);
   });
   const names = refs.map((r) => r.name);
-  const standard = parent.indexes.some((i) => (i.kind === 'PRIMARY' || i.kind === 'UNIQUE') && i.parts.length === names.length && leadsWith(i, names));
+  const standard = parent.indexes.some((i) => (i.kind === 'PRIMARY' || i.kind === 'UNIQUE') && i.parts.length === names.length && isFkKey(i, names));
   if (!standard) fail(`참조 컬럼 (${names.join(', ')}) 에 정확히 맞는 PRIMARY KEY·UNIQUE 인덱스가 없습니다 (MySQL 8.4 6125 — 8.0 은 일반 인덱스도 받지만 1차에서는 8.4 규칙을 따릅니다)`);
   return names;
 }
 
-// 정수·DECIMAL 은 크기·부호까지 같아야 하고, 문자열은 길이는 달라도 되지만 문자셋·콜레이션이 같아야 한다
-function fkCompatible(a: Column, aCs: TableCharset, b: Column, bCs: TableCharset): boolean {
-  const kind = (c: Column) => {
-    const base = baseType(c.type);
-    return base === 'char' || base === 'varchar' ? 'string' : base === 'binary' || base === 'varbinary' ? 'binary' : c.type;
-  };
-  return kind(a) === kind(b) && effectiveCollation(a, aCs) === effectiveCollation(b, bCs);
+// 정수·DECIMAL 은 크기·부호까지 같아야 하고 (정수는 표시 폭을 보지 않는다), 문자열은 길이는 달라도 되지만 문자셋·콜레이션이 같아야 한다.
+// 테이블 기본 문자셋은 문자열 컬럼 쌍을 비교할 때만 읽는다 (정수 FK 가 지원하지 않는 문자셋 때문에 거부되지 않게)
+function fkCompatible(st: State, child: Table, a: Column, parent: Table, b: Column): boolean {
+  if (fkKind(a) !== fkKind(b)) return false;
+  if (!CHARSET_TYPES.has(baseType(a.type))) return true;
+  return effectiveCollation(a, tableCharset(child.options, st.defaults)) === effectiveCollation(b, tableCharset(parent.options, st.defaults));
+}
+
+// 비교용 종류: char·varchar 는 'string', binary·varbinary 는 'binary' (길이는 달라도 된다). 정수는 표시 폭을 뺀다 —
+// tinyint(1) ↔ tinyint, 5.7 덤프의 int(11) ↔ int 도 같은 타입이다 (8.0.46 실측). 나머지는 타입 원문
+function fkKind(c: Column): string {
+  const base = baseType(c.type);
+  if (base === 'char' || base === 'varchar') return 'string';
+  if (base === 'binary' || base === 'varbinary') return 'binary';
+  return INT_TYPES.has(base) ? c.type.replace(/^\w+\(\d+\)/, base) : c.type;
 }
 
 // 이 문장에서 붙인 FK 에 받치는 인덱스가 없으면 만든다. 이름: CONSTRAINT 이름 → FOREIGN KEY 뒤에 쓴 인덱스 이름 → 첫 컬럼 (겹치면 _2 …, MySQL 8.0 실측)
@@ -197,18 +245,18 @@ export function setIndexVisibility(t: Table, name: string, invisible: boolean): 
 }
 
 // 문장 끝 검사 (MySQL 이 거부하는 상태): AUTO_INCREMENT 는 하나이고 인덱스 첫 컬럼(1075), 보이는 컬럼 하나 이상(4028),
-// 모든 FK 에 받치는 인덱스 — 자기 쪽과 부모 쪽 (1553). renamed: 이 문장에서 바뀐 t 의 컬럼 이름 (다른 테이블 FK 의 참조 이름은 아직 옛 이름)
+// 모든 FK 에 받치는 인덱스 — 자기 쪽과 부모 쪽 (1553, 정렬 방향은 보지 않는다 — leadsWith 주석). renamed: 이 문장에서 바뀐 t 의 컬럼 이름 (다른 테이블 FK 의 참조 이름은 아직 옛 이름)
 export function checkTable(st: State, t: Table, renamed: ReadonlyMap<string, string> = new Map()): void {
   const autos = t.columns.filter((c) => c.autoIncrement);
   if (autos.length > 1) fail('AUTO_INCREMENT 컬럼은 하나만 둘 수 있습니다 (MySQL 1075)');
   if (autos.length && !t.indexes.some((i) => i.parts[0]?.column !== undefined && sameName(i.parts[0].column, autos[0].name))) fail(`AUTO_INCREMENT 컬럼 \`${autos[0].name}\` 은 인덱스의 첫 컬럼이어야 합니다 (MySQL 1075)`);
   if (t.columns.every((c) => c.invisible)) fail('보이는 컬럼이 하나 이상 있어야 합니다 (MySQL 4028)');
-  for (const fk of t.foreignKeys) if (!t.indexes.some((i) => leadsWith(i, fk.columns))) fail(`FK \`${fk.name}\` 에 필요한 인덱스를 지울 수 없습니다 (MySQL 1553)`);
+  for (const fk of t.foreignKeys) if (!t.indexes.some((i) => isFkKey(i, fk.columns))) fail(`FK \`${fk.name}\` 에 필요한 인덱스를 지울 수 없습니다 (MySQL 1553)`);
   for (const child of [...st.model.tables.filter((x) => x.name !== t.name), t]) {
     for (const fk of child.foreignKeys) {
       if (fk.refTable !== t.name || fk.refSchema !== undefined) continue;
       const refs = child === t ? fk.refColumns : fk.refColumns.map((n) => renamed.get(n.toLowerCase()) ?? n);
-      if (!t.indexes.some((i) => leadsWith(i, refs))) fail(`\`${child.name}\` 의 FK \`${fk.name}\` 가 쓰는 인덱스를 지울 수 없습니다 (MySQL 1553)`);
+      if (!t.indexes.some((i) => isFkKey(i, refs))) fail(`\`${child.name}\` 의 FK \`${fk.name}\` 가 쓰는 인덱스를 지울 수 없습니다 (MySQL 1553)`);
     }
   }
 }
