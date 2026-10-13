@@ -7,6 +7,7 @@ import { splitDump } from '../parse-dump';
 import { UnsafeValueError } from '../sql-safety';
 import { alterTable, createIndex, dropIndexOn } from './alter-table';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
+import { createRoutine, dropRoutine, dropView, isCreateRoutine } from './object-stmt';
 import { applySet } from './session';
 import { initialState, type State } from './state';
 import { createTable, dropTable, renameTables } from './table-stmt';
@@ -78,7 +79,11 @@ function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): bo
   else if (c.acceptWord('CREATE', 'TABLE')) createTable(st, c);
   else if (c.acceptWord('DROP', 'TABLE')) dropTable(st, c);
   else if (c.acceptWord('RENAME', 'TABLE')) renameTables(st, c);
-  // Task 6·7: 여기에 else if 를 더한다
+  else if (c.acceptWord('DROP', 'VIEW')) dropView(st, c);
+  else if (c.isWord('DROP', 'FUNCTION') || c.isWord('DROP', 'PROCEDURE')) {
+    c.next();
+    dropRoutine(st, c);
+  } else if (isCreateRoutine(ddl)) createRoutine(st, ddl, noBackslashEscapes);
   else return fail(unsupported(ddl));
   return true;
 }

@@ -11,6 +11,7 @@ import { subpartitionKey } from './partition-ddl';
 import { printColumn, printRoutine, printTable, printView } from './print';
 import { findManualTables, type ManualTable } from './manual-review';
 import { conflictingRenames, findIgnoredRenames, type IgnoredRename } from './rename-check';
+import { ROUTINE_DEFAULTS } from './routine-defaults';
 
 export { renamedAutoName } from './auto-name';
 
@@ -385,8 +386,7 @@ function diffViews(base: View[], target: View[]): ViewDiff[] {
   return changes.map((c) => ({ op: c.op as ViewDiff['op'], name: c.name, from: c.from, to: c.to, fields: c.fields }));
 }
 
-// 기본값과 같은 명시 특성은 생략한 것과 같다
-const ROUTINE_DEFAULTS: Record<string, unknown> = { deterministic: false, dataAccess: 'CONTAINS SQL', security: 'DEFINER', language: 'SQL' };
+// 기본값과 같은 명시 특성은 생략한 것과 같다 (ROUTINE_DEFAULTS: routine-defaults.ts)
 const CHARACTERISTICS = ['deterministic', 'dataAccess', 'security', 'comment', 'language'] as const;
 // MySQL 루틴 이름은 대소문자를 구분하지 않는다. 저장소·화면도 이 키로 같은 루틴을 찾는다
 export const routineNameKey = (name: string): string => name.toLowerCase();
