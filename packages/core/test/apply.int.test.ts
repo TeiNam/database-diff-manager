@@ -1,5 +1,7 @@
 // ALTER 적용 실증: 같은 스크립트를 MySQL 에 실행한 결과와 applyScript 결과가 같은지 확인한다.
 // 기준: 비교 엔진으로 양방향 0문장 + 테이블마다 컬럼·인덱스·FK·CHECK 이름 순서가 같음 + printSqlDump 왕복
+// 시나리오 폴더: script.sql(필수), base.sql(없으면 _base.sql), expect-error.txt(MySQL 오류 번호), only.txt(그 버전에서만),
+// defaults.json({ charset, collation } — 스키마 기본값: DB 를 그 값으로 만들고 applyScript 에도 넘긴다)
 import { readdirSync } from 'node:fs';
 import mysql, { type Connection } from 'mysql2/promise';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -38,15 +40,16 @@ suite.each(MYSQL_TARGETS)('$name ALTER 적용', ({ name: target, port }) => {
     const baseText = (hasFixture(at(name, 'base.sql')) ? fixture(at(name, 'base.sql')) : fixture('alter-scenarios/_base.sql')).replaceAll('__DB__', db);
     const script = fixture(at(name, 'script.sql')).replaceAll('__DB__', db);
     const expectError = hasFixture(at(name, 'expect-error.txt')) ? Number(fixture(at(name, 'expect-error.txt')).trim()) : undefined;
+    const defaults = hasFixture(at(name, 'defaults.json')) ? (JSON.parse(fixture(at(name, 'defaults.json'))) as { charset: string; collation: string }) : undefined;
     await conn.query(`DROP DATABASE IF EXISTS \`${db}\``);
-    await conn.query(`CREATE DATABASE \`${db}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci`);
+    await conn.query(`CREATE DATABASE \`${db}\` DEFAULT CHARACTER SET ${defaults?.charset ?? 'utf8mb4'} COLLATE ${defaults?.collation ?? 'utf8mb4_0900_ai_ci'}`);
     await conn.query(`USE \`${db}\``);
     await conn.query('SET SESSION sql_mode = DEFAULT, foreign_key_checks = 1');
     try {
       for (const { ddl } of splitStatements(baseText)) await conn.query(ddl);
       const base = parseSqlDump(baseText).model;
       expect(zeroDiff(base, await dumpSchema(conn, db)), 'base.sql 이 MySQL 출력과 같아야 한다').toEqual([]);
-      const ours = applyScript(base, script, { schemaName: db });
+      const ours = applyScript(base, script, { schemaName: db, ...(defaults ? { defaults } : {}) });
       let mysqlError: number | undefined;
       try {
         for (const { ddl } of splitStatements(script)) await conn.query(ddl);
