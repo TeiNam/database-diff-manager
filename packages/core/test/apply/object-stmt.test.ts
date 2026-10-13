@@ -139,14 +139,16 @@ describe('CREATE FUNCTION·PROCEDURE', () => {
     expect(JSON.stringify(SHOP)).toBe(before);
   });
 
-  it('스키마를 붙인 루틴 이름은 받지 않고 다시 뽑아 올리라고 안내한다 (백틱 안의 점은 이름의 일부다)', () => {
-    for (const ddl of [
-      'CREATE FUNCTION shop.f_q() RETURNS INT DETERMINISTIC RETURN 1;', 'CREATE PROCEDURE `shop` . `p_q`() SELECT 1;',
-      'CREATE DEFINER=`root`@`localhost` FUNCTION IF NOT EXISTS shop.f_q() RETURNS INT DETERMINISTIC RETURN 1;',
+  it('현재 스키마로 한정한 루틴 이름은 테이블처럼 받고 이름만 남긴다 (SHOW CREATE 도 스키마를 찍지 않는다). 다른 스키마는 거부한다 (백틱 안의 점은 이름의 일부다)', () => {
+    for (const [ddl, name] of [
+      ['CREATE FUNCTION shop.f_q() RETURNS INT DETERMINISTIC RETURN 1;', 'f_q'], ['CREATE PROCEDURE `shop` . `p_q`() SELECT 1;', 'p_q'],
+      ['CREATE DEFINER=`root`@`localhost` FUNCTION IF NOT EXISTS shop.f_q() RETURNS INT DETERMINISTIC RETURN 1;', 'f_q'],
     ]) {
-      const r = apply(ddl);
-      expect(r, ddl).toMatchObject({ ok: false, error: { index: 1 } });
-      expect(!r.ok && r.error.reason.endsWith(RE_EXPORT), ddl).toBe(true);
+      expect(routineOf(ddl, name), ddl).toMatchObject({ name, params: '' });
+    }
+    expect(ok('CREATE FUNCTION IF NOT EXISTS `shop`.tax(a INT) RETURNS INT DETERMINISTIC RETURN a;').model.routines).toHaveLength(SHOP.routines.length);
+    for (const ddl of ['CREATE FUNCTION other.f_q() RETURNS INT DETERMINISTIC RETURN 1;', 'CREATE PROCEDURE `Shop`.p_q() SELECT 1;']) {
+      expect(apply(ddl), ddl).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('다른 스키마') } });
     }
     expect(routineOf('CREATE FUNCTION `a.b`() RETURNS INT DETERMINISTIC RETURN 1;', 'a.b')).toMatchObject({ kind: 'function', params: '' });
   });

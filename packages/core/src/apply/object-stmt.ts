@@ -10,8 +10,8 @@ import { fail, RE_EXPORT } from './types';
 
 const CREATE_ROUTINE_RE = /^CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCEDURE)\b/i;
 const IF_NOT_EXISTS_RE = /^(CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCEDURE)\s+)IF\s+NOT\s+EXISTS\s+/i;
-// 이름 앞에 스키마를 붙인 꼴 (`db`.name). parseRoutine 은 식별자 하나만 이름으로 읽는다 (IF NOT EXISTS 는 이미 뗀 문장을 본다)
-const QUALIFIED_NAME_RE = /^CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCEDURE)\s+(?:`(?:[^`]|``)*`|\w+)\s*\./i;
+// 이름 앞에 스키마를 붙인 꼴 (`db`.name). parseRoutine 은 식별자 하나만 이름으로 읽으므로 현재 스키마면 떼고 읽는다 (IF NOT EXISTS 는 이미 뗀 문장을 본다)
+const QUALIFIED_NAME_RE = /^(CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCEDURE)\s+)(`(?:[^`]|``)*`|\w+)\s*\.\s*/i;
 const label = (kind: RoutineKind) => (kind === 'function' ? 'FUNCTION' : 'PROCEDURE');
 
 export const isCreateRoutine = (ddl: string): boolean => CREATE_ROUTINE_RE.test(ddl);
@@ -19,7 +19,7 @@ export const isCreateRoutine = (ddl: string): boolean => CREATE_ROUTINE_RE.test(
 // 루틴은 만들 때의 세션 SQL_MODE 를 기억한다. 이름은 대소문자를 구분하지 않는다
 export function createRoutine(st: State, ddl: string, noBackslashEscapes: boolean): void {
   const ifNotExists = IF_NOT_EXISTS_RE.test(ddl);
-  const r = readRoutine(withoutTerminator(ifNotExists ? ddl.replace(IF_NOT_EXISTS_RE, '$1') : ddl, noBackslashEscapes), noBackslashEscapes);
+  const r = readRoutine(withoutSchema(st, withoutTerminator(ifNotExists ? ddl.replace(IF_NOT_EXISTS_RE, '$1') : ddl, noBackslashEscapes)), noBackslashEscapes);
   if (st.routineKeys.has(routineKey(r))) {
     if (ifNotExists) return;
     fail(`${label(r.kind)} \`${r.name}\` 이 이미 있습니다 (MySQL 1304)`);
@@ -38,8 +38,16 @@ function withoutTerminator(ddl: string, noBackslashEscapes: boolean): string {
   return cut === ddl.length ? ddl : ddl.slice(0, cut).trimEnd();
 }
 
+// 현재 스키마로 한정한 이름(`shop`.f)은 테이블처럼 받고 스키마를 뗀다 — MySQL 의 SHOW CREATE 도 스키마를 찍지 않는다. 다른 스키마는 거부한다 (objectName 과 같다)
+function withoutSchema(st: State, ddl: string): string {
+  const m = QUALIFIED_NAME_RE.exec(ddl);
+  if (!m) return ddl;
+  const schema = m[2].startsWith('`') ? m[2].slice(1, -1).replace(/``/g, '`') : m[2];
+  if (schema !== st.schemaName) fail(`다른 스키마 \`${schema}\` 의 객체는 바꿀 수 없습니다 — 이 버전은 스키마 \`${st.schemaName}\` 하나를 나타냅니다`);
+  return m[1] + ddl.slice(m[0].length);
+}
+
 function readRoutine(ddl: string, noBackslashEscapes: boolean): Routine {
-  if (QUALIFIED_NAME_RE.test(ddl)) fail(`스키마를 붙인 루틴 이름은 받을 수 없습니다 — ${RE_EXPORT}`);
   const parsed = parseOrFail(ddl, noBackslashEscapes);
   const r: Routine = { ...parsed, characteristics: withoutDefaultCharacteristics(parsed.characteristics) };
   if (r.characteristics.comment !== undefined) assertBmpText(r.characteristics.comment, '루틴 COMMENT');
