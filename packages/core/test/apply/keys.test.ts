@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addForeignKey, addIndex, addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, ensureFkIndexes, enforcePrimaryKeyNotNull, exprUses, leadsWith, nextFkName, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
+import { addForeignKey, addIndex, addKeys, assertAutoKeysKnown, assertReaddedKeysFit, checkNowNotNull, checkTable, classifyFkIndexes, columnKeyItems, dropKeys, ensureFkIndexes, enforcePrimaryKeyNotNull, exprUses, leadsWith, nextFkName, planAutoKeys, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
 import { initialState, replaceTable, type State } from '../../src/apply/state';
 import { DEFAULT_SQL_MODE, MYSQL_DEFAULTS, RE_EXPORT, type ColumnSpec, type FkItem, type IndexItem } from '../../src/apply/types';
 import type { Column, ForeignKey, Index, IndexKind, Table } from '../../src/model';
@@ -521,5 +521,146 @@ describe('ensureFkIndexes·addKeys — FK 자동 인덱스 이름 충돌과 지�
     const c = withColumns(table(st, 'child'), col('extra', 'int unsigned'));
     const gone: Table = { ...c, foreignKeys: [], indexes: [...c.indexes.filter((i) => i.name !== 'pid'), { name: 'child_ibfk_1', kind: 'INDEX', parts: [{ column: 'pid', desc: false }], invisible: false }] };
     expect(() => addKeys(st, gone, [fk(true, ['extra'], 'parent', ['id'], 'child_ibfk_1')], ['child_ibfk_1'])).toThrow(/\(MySQL 1061\)/);
+  });
+});
+
+// MySQL 8.0.46·8.4.11 실측: VIRTUAL 생성 컬럼이나 함수 식이 든 키(HA_VIRTUAL_GEN_KEY)는 같은 무리 안에서 뒤로 간다. 비교 순서는
+// UNIQUE(PRIMARY 포함): NULL 허용 컬럼이 없는 것 → PRIMARY → 길이(prefix) 없는 것 → VIRTUAL 이 없는 것 → 선언 순서 / 일반 인덱스: FULLTEXT 가 마지막 → VIRTUAL 이 없는 것 → 선언 순서.
+// STORED 생성 컬럼은 일반 컬럼과 같다. 함수 인덱스 식의 NULL 허용은 식이 쓰는 컬럼이 하나라도 NULL 허용이면 NULL 허용
+describe('sortIndexes — VIRTUAL 생성 컬럼·함수 인덱스', () => {
+  // 키를 선언한 순서(키 줄 순서)대로 모델을 읽고 sortIndexes 가 MySQL 이 찍은 순서를 내는지 본다
+  const modelOf = (keys: string[]): Table => {
+    const cols = [
+      '`id` int NOT NULL', '`a` int DEFAULT NULL', '`a_nn` int NOT NULL', '`b` varchar(20) DEFAULT NULL', '`b_nn` varchar(20) NOT NULL',
+      '`v` int GENERATED ALWAYS AS ((`a` + 1)) VIRTUAL', '`vn` int GENERATED ALWAYS AS ((`a_nn` + 1)) VIRTUAL NOT NULL', '`v2` int GENERATED ALWAYS AS ((`a` + 3)) VIRTUAL',
+      '`s` int GENERATED ALWAYS AS ((`a` + 2)) STORED', '`sn` int GENERATED ALWAYS AS ((`a_nn` + 2)) STORED NOT NULL',
+    ];
+    const ddl = `CREATE TABLE \`t\` (\n  ${[...cols, 'PRIMARY KEY (`id`)', ...keys].join(',\n  ')}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`;
+    return parseSqlDump(tdExport(ddl)).model.tables[0];
+  };
+  const orderOf = (keys: string[]): string => sortIndexes(modelOf(keys)).map((i) => i.name).join(' ');
+
+  it.each([
+    // 선언 순서 → MySQL 이 찍은 순서
+    [['KEY `kv` (`v`)', 'KEY `ka` (`a`)', 'UNIQUE KEY `uv` (`v`)', 'UNIQUE KEY `ua` (`a`)', 'UNIQUE KEY `uvn` (`vn`)', 'UNIQUE KEY `uan` (`a_nn`)', 'KEY `kva` (`v`,`a`)', 'KEY `kav` (`a`,`v`)',
+      'FULLTEXT KEY `ft` (`b`)', 'KEY `ks` (`s`)', 'KEY `kz` (`a_nn`)'], 'PRIMARY uan uvn ua uv ka ks kz kv kva kav ft'],
+    [['KEY `kv` (`v`)', 'KEY `ka` (`a`)', 'KEY `kva` (`v`,`a`)', 'KEY `kav` (`a`,`v`)', 'KEY `ks` (`s`)', 'KEY `kz` (`a_nn`)'], 'PRIMARY ka ks kz kv kva kav'], // VIRTUAL 이 든 키(혼합 포함)는 뒤로
+    [['KEY `kv2` (`v2`)', 'KEY `kv` (`v`)', 'KEY `ka` (`a`)'], 'PRIMARY ka kv2 kv'], // VIRTUAL 끼리는 선언 순서
+    [['KEY `kv` (`v`)', 'KEY `ks` (`s`)', 'KEY `ka` (`a`)'], 'PRIMARY ks ka kv'], // STORED 는 일반 컬럼
+    [['KEY `kv` (`v`)', 'FULLTEXT KEY `ft` (`b`)'], 'PRIMARY kv ft'], // FULLTEXT 가 VIRTUAL 보다 뒤
+    [['FULLTEXT KEY `ft` (`b`)', 'KEY `kv` (`v`)', 'KEY `ka` (`a`)'], 'PRIMARY ka kv ft'],
+    [['KEY `ka` (`a`)', 'UNIQUE KEY `uv` (`v`)'], 'PRIMARY uv ka'], // UNIQUE 는 VIRTUAL 이어도 일반 인덱스보다 앞
+    [['KEY `kv` (`v`)', 'UNIQUE KEY `ua` (`a`)'], 'PRIMARY ua kv'],
+    [['UNIQUE KEY `uv` (`v`)', 'UNIQUE KEY `ua` (`a`)'], 'PRIMARY ua uv'], // NULL 허용 UNIQUE 안에서 VIRTUAL 이 뒤
+    [['UNIQUE KEY `uvn` (`vn`)', 'UNIQUE KEY `ua` (`a`)'], 'PRIMARY uvn ua'], // NOT NULL 이 VIRTUAL 보다 먼저 비교된다
+    [['UNIQUE KEY `uvn` (`vn`)', 'UNIQUE KEY `usn` (`sn`)', 'UNIQUE KEY `uan` (`a_nn`)'], 'PRIMARY usn uan uvn'],
+    [['UNIQUE KEY `uva` (`v`,`a`)', 'UNIQUE KEY `ua` (`a`)'], 'PRIMARY ua uva'], // 혼합 키 (VIRTUAL 파트가 앞이든 뒤든)
+    [['UNIQUE KEY `uav` (`a`,`v`)', 'UNIQUE KEY `ua` (`a`)'], 'PRIMARY ua uav'],
+    // prefix(길이) 가 VIRTUAL 보다 먼저 비교된다: 길이 있는 키는 VIRTUAL 키보다도 뒤
+    [['UNIQUE KEY `upb` (`b_nn`(5))', 'UNIQUE KEY `uvn` (`vn`)', 'UNIQUE KEY `uan` (`a_nn`)'], 'PRIMARY uan uvn upb'],
+    [['UNIQUE KEY `uvn` (`vn`)', 'UNIQUE KEY `upb` (`b_nn`(5))', 'UNIQUE KEY `uan` (`a_nn`)'], 'PRIMARY uan uvn upb'],
+    [['UNIQUE KEY `upb2` (`b`(5))', 'UNIQUE KEY `uv` (`v`)', 'UNIQUE KEY `ua` (`a`)'], 'PRIMARY ua uv upb2'],
+    // 함수 인덱스는 VIRTUAL 키와 같다
+    [['KEY `kf` (((`a` + 1)))', 'KEY `ka` (`a`)', 'KEY `kv` (`v`)'], 'PRIMARY ka kf kv'],
+    [['KEY `ka` (`a`)', 'KEY `kv` (`v`)', 'KEY `kf` (((`a` + 1)))'], 'PRIMARY ka kv kf'],
+    [['KEY `kfa` (((`a` + 1)),`a`)', 'KEY `kaf` (`a`,((`a` + 1)))', 'KEY `ka` (`a`)'], 'PRIMARY ka kfa kaf'],
+    [['FULLTEXT KEY `ft` (`b`)', 'KEY `kf` (((`a` + 1)))', 'KEY `ka` (`a`)'], 'PRIMARY ka kf ft'],
+    [['UNIQUE KEY `uf` (((`a` + 1)))', 'UNIQUE KEY `ua` (`a`)', 'UNIQUE KEY `uan` (`a_nn`)'], 'PRIMARY uan ua uf'], // 식이 NULL 허용 컬럼을 쓰면 NULL 허용
+    [['UNIQUE KEY `ufn` (((`a_nn` + 1)))', 'UNIQUE KEY `uvn` (`vn`)', 'UNIQUE KEY `uan` (`a_nn`)'], 'PRIMARY uan ufn uvn'], // NOT NULL 컬럼만 쓰는 식은 NOT NULL
+    [['UNIQUE KEY `ufn` (((`a_nn` + 1)))', 'UNIQUE KEY `uv` (`v`)', 'UNIQUE KEY `ua` (`a`)'], 'PRIMARY ufn ua uv'],
+    [['UNIQUE KEY `uvn` (`vn`)', 'UNIQUE KEY `ufn` (((`a_nn` + 1)))'], 'PRIMARY uvn ufn'], // VIRTUAL·함수 UNIQUE 끼리는 선언 순서
+    [['UNIQUE KEY `ufn` (((`a_nn` + 1)))', 'UNIQUE KEY `uvn` (`vn`)'], 'PRIMARY ufn uvn'],
+  ])('선언 %j → %s', (keys, expected) => {
+    expect(orderOf(keys)).toBe(expected);
+  });
+
+  it('이미 MySQL 순서인 목록은 그대로 두고, 입력 테이블은 바꾸지 않는다', () => {
+    const keys = ['UNIQUE KEY `uan` (`a_nn`)', 'UNIQUE KEY `uvn` (`vn`)', 'KEY `ka` (`a`)', 'KEY `kv` (`v`)', 'FULLTEXT KEY `ft` (`b`)'];
+    expect(orderOf(keys)).toBe('PRIMARY uan uvn ka kv ft');
+    expect(orderOf([...keys].reverse())).toBe('PRIMARY uan uvn ka kv ft');
+    const t = modelOf([...keys].reverse());
+    const before = t.indexes.map((i) => i.name);
+    sortIndexes(t);
+    expect(t.indexes.map((i) => i.name)).toEqual(before);
+  });
+});
+
+// FK 가 자동으로 만든 인덱스를 덤프에서 이름으로 가린다 (MySQL 8.0.46·8.4.11 실측 — 자동 키 표시는 SHOW CREATE 에 안 나온다):
+// 이름이 FK 이름과 같으면 자동(generated), FK 첫 컬럼 이름이나 <컬럼>_N 이면 알 수 없음(ambiguous), 그 밖은 직접 만든 것. 받치는 인덱스는 FK 컬럼 그대로인 일반 KEY 하나뿐이어야 한다
+describe('classifyFkIndexes', () => {
+  const plain = (name: string, ...cols: string[]): Index => ({ name, kind: 'INDEX', parts: cols.map((column) => ({ column, desc: false })), invisible: false });
+  const tableOf = (indexes: Index[], fks: ForeignKey[] = [{ name: 'f', columns: ['x0'], refTable: 'par', refColumns: ['id'] }]): Table => ({
+    kind: 'table', name: 't', columns: [col('id', 'int'), col('x0', 'int'), col('x1', 'int')], indexes, foreignKeys: fks, checks: [], options: [], fidelity: 'full',
+  });
+  const classes = (t: Table) => { const c = classifyFkIndexes(t); return { generated: [...c.generated], ambiguous: [...c.ambiguous] }; };
+  const none = { generated: [], ambiguous: [] };
+
+  it('이름이 FK 이름과 같으면 generated (대소문자 무시), 첫 컬럼 이름·<컬럼>_N 이면 ambiguous, 그 밖은 둘 다 아니다', () => {
+    expect(classes(tableOf([plain('f', 'x0')]))).toEqual({ generated: ['f'], ambiguous: [] });
+    expect(classes(tableOf([plain('F', 'x0')]))).toEqual({ generated: ['f'], ambiguous: [] });
+    expect(classes(tableOf([plain('x0', 'x0')]))).toEqual({ generated: [], ambiguous: ['x0'] });
+    expect(classes(tableOf([plain('X0_2', 'x0')]))).toEqual({ generated: [], ambiguous: ['x0_2'] });
+    for (const name of ['idx_user', 'x0_x', 'x0_', 'x00', 'k0']) expect(classes(tableOf([plain(name, 'x0')])), name).toEqual(none);
+  });
+
+  it('FK 이름이 첫 컬럼 이름과도 같으면 generated 가 먼저다', () => {
+    expect(classes(tableOf([plain('x0', 'x0')], [{ name: 'x0', columns: ['x0'], refTable: 'par', refColumns: ['id'] }]))).toEqual({ generated: ['x0'], ambiguous: [] });
+  });
+
+  it('받치는 인덱스의 모양이 FK 컬럼 그대로인 일반 KEY 가 아니면 가리지 않는다 (UNIQUE·FULLTEXT·DESC·prefix 길이·컬럼이 더 많거나 적음)', () => {
+    const odd = (patch: Partial<Index>): Index => ({ ...plain('f', 'x0'), ...patch });
+    expect(classes(tableOf([odd({ kind: 'UNIQUE' })]))).toEqual(none);
+    expect(classes(tableOf([odd({ kind: 'FULLTEXT' })]))).toEqual(none);
+    expect(classes(tableOf([odd({ parts: [{ column: 'x0', desc: true }] })]))).toEqual(none);
+    expect(classes(tableOf([odd({ parts: [{ column: 'x0', length: 5, desc: false }] })]))).toEqual(none);
+    expect(classes(tableOf([plain('f', 'x0', 'x1')]))).toEqual(none); // FK (x0) 보다 길다
+    expect(classes(tableOf([plain('f', 'x0')], [{ name: 'f', columns: ['x0', 'x1'], refTable: 'par', refColumns: ['a', 'b'] }]))).toEqual(none); // FK (x0, x1) 보다 짧다
+  });
+
+  it('그 앞쪽을 가진 다른 인덱스가 있거나 같은 모양이 둘이면 자동 키일 수 없다 (직접 만든 것)', () => {
+    expect(classes(tableOf([plain('f', 'x0'), plain('ix', 'x0', 'x1')]))).toEqual(none);
+    expect(classes(tableOf([plain('f', 'x0'), plain('ix', 'x1', 'x0')]))).toEqual({ generated: ['f'], ambiguous: [] }); // 앞쪽이 아니다
+    expect(classes(tableOf([plain('f', 'x0'), { ...plain('uq', 'x0', 'x1'), kind: 'UNIQUE' }]))).toEqual(none);
+    expect(classes(tableOf([plain('f', 'x0'), plain('g', 'x0')]))).toEqual(none);
+  });
+
+  it('FK 가 둘이 같은 인덱스를 쓰면 이름이 맞는 FK 쪽으로 가린다', () => {
+    const fks: ForeignKey[] = [{ name: 'f1', columns: ['x0'], refTable: 'par', refColumns: ['id'] }, { name: 'f2', columns: ['x0'], refTable: 'par', refColumns: ['id'] }];
+    expect(classes(tableOf([plain('f2', 'x0')], fks))).toEqual({ generated: ['f2'], ambiguous: [] });
+  });
+});
+
+// 이 문장이 더하는 키가 자동 키를 버리는 계획: 버려지는 기존 인덱스 · 만들지 않는 FK 자동 키 · 자동인지 알 수 없는데 버려지는 인덱스
+describe('planAutoKeys / assertAutoKeysKnown', () => {
+  const st = fresh();
+  const child = table(st, 'child'); // KEY pid (pid) + child_ibfk_1 (pid)
+  const auto = (generated: string[], ambiguous: string[] = []) => ({ generated: new Set(generated), ambiguous: new Set(ambiguous) });
+
+  it('자동 인덱스는 같은 컬럼으로 시작하는 새 인덱스가 버린다 (종류·이름 상관없음), 새 키가 앞쪽을 갖지 못하면 남는다', () => {
+    const names = (items: IndexItem[]) => planAutoKeys(child, items, auto(['pid'])).kept.map((i) => i.name);
+    expect(names([idx('ix', 'INDEX', ['pid', 'name'])])).toEqual(['PRIMARY']);
+    expect(names([idx('uq', 'UNIQUE', ['pid'])])).toEqual(['PRIMARY']);
+    expect(names([idx('ft', 'FULLTEXT', ['pid'])])).toEqual(['PRIMARY']); // 종류는 보지 않는다 (MySQL 도 FULLTEXT 가 버린다)
+    expect(names([idx('ix', 'INDEX', ['name', 'pid'])])).toEqual(['PRIMARY', 'pid']);
+    expect(names([idx('ix', 'INDEX', ['pid'], true, 5)])).toEqual(['PRIMARY', 'pid']); // prefix 길이가 다르면 다른 키 파트다
+    expect(planAutoKeys(child, [idx('ix', 'INDEX', ['pid'])], auto([])).kept.map((i) => i.name)).toEqual(['PRIMARY', 'pid']); // 자동 키가 아니면 버리지 않는다
+  });
+
+  it('새 FK 의 자동 키는 직접 만든 인덱스가 받치면 만들지 않고, 자동 인덱스 뿐이면 만들며 옛 자동 인덱스를 버린다', () => {
+    const newFk = fk(true, ['pid'], 'parent', ['id'], 'again');
+    const user = planAutoKeys(child, [newFk], auto([]));
+    expect(user.skipped.has(newFk)).toBe(true);
+    expect(user.kept.map((i) => i.name)).toEqual(['PRIMARY', 'pid']);
+    const replaced = planAutoKeys(child, [newFk], auto(['pid']));
+    expect(replaced.skipped.has(newFk)).toBe(false);
+    expect(replaced.kept.map((i) => i.name)).toEqual(['PRIMARY']);
+  });
+
+  it('자동인지 알 수 없는 인덱스가 버려지면 uncertain 에 이름이 들고, assertAutoKeysKnown 은 RE_EXPORT 로 끝나는 메시지로 거부한다', () => {
+    const plan = planAutoKeys(child, [idx('ix', 'INDEX', ['pid', 'name'])], auto([], ['pid']));
+    expect(plan.uncertain).toEqual(['pid']);
+    expect(() => assertAutoKeysKnown(plan)).toThrow(/`pid`.*자동으로 만든 것인지.*td-export 로 다시 뽑아 올려 주세요$/);
+    expect(planAutoKeys(child, [idx('ix', 'INDEX', ['name'])], auto([], ['pid'])).uncertain).toEqual([]);
+    expect(() => assertAutoKeysKnown(planAutoKeys(child, []))).not.toThrow();
   });
 });

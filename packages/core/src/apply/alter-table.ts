@@ -8,7 +8,7 @@ import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
-import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, enforcePrimaryKeyNotNull, exprUses, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
+import { addKeys, assertAutoKeysKnown, assertReaddedKeysFit, checkNowNotNull, checkTable, classifyFkIndexes, columnKeyItems, dropKeys, enforcePrimaryKeyNotNull, exprUses, planAutoKeys, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type AutoKeyPlan, type KeyDrop } from './keys';
 import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { engineName, optionValue, parseCommonOption, setOption } from './options';
@@ -225,10 +225,13 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
     moveIndexOrigin(st, before.name, r.old, r.to);
   }
   for (const v of pick('indexVisibility')) t = setIndexVisibility(t, v.name, v.invisible);
-  t = addConstraints(st, before, t, pick('key').map((x) => x.item)); // 6) 키 추가와 FK 자동 인덱스
+  const items = pick('key').map((x) => x.item);
+  const plan = planAutoKeys(t, items, classifyFkIndexes(before)); // 이 문장의 키가 FK 자동 인덱스를 대신하는가
+  t = addConstraints(st, before, t, items, plan); // 6) 키 추가와 FK 자동 인덱스
   t = enforcePrimaryKeyNotNull(t, explicitNullColumns(clauses)); // 7) PRIMARY KEY 컬럼 NOT NULL·검사·키 순서 8) 테이블 옵션
   checkNowNotNull(before, t, renamed);
   checkTable(st, t, renamed);
+  assertAutoKeysKnown(plan);
   t = { ...t, indexes: sortIndexes(t) };
   syncIndexOrigins(st, before.name, t);
   for (const o of pick('option')) t = { ...t, options: setOption(t.options, o.key, o.value) };
@@ -259,8 +262,8 @@ function keepKeys(before: Table, entries: readonly Entry[], clauses: readonly Cl
 }
 
 // 6) 키 추가와 FK 자동 인덱스. 이름 없는 FK 번호는 이 문장 앞의 FK 이름(지우는 것 포함) 기준이고, FK 를 더했으면 SHOW CREATE 순서(이름 순)로 다시 놓는다
-function addConstraints(st: State, before: Table, t: Table, items: readonly ConstraintItem[]): Table {
-  const next = addKeys(st, t, items, before.foreignKeys.map((f) => f.name));
+function addConstraints(st: State, before: Table, t: Table, items: readonly ConstraintItem[], plan: AutoKeyPlan): Table {
+  const next = addKeys(st, t, items, before.foreignKeys.map((f) => f.name), plan);
   return items.some((i) => i.kind === 'fk') ? { ...next, foreignKeys: sortForeignKeys(next.foreignKeys) } : next;
 }
 

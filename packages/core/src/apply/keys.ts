@@ -294,26 +294,125 @@ export function ensureFkIndexes(t: Table, added: readonly { name: string; indexN
   return next;
 }
 
+// ── FK 가 자동으로 만든 인덱스 (MySQL 8.0.46·8.4.11 실측, sql_table.cc mysql_prepare_create_table·foreign_key_prefix) ──
+// MySQL 은 FK 마다 "자동 키" 후보를 하나 만들고, 같은 컬럼으로 시작하는 다른 키가 있으면 자동 키를 버린다. 키 목록은 [문장 뒤에 남은 기존 키] + [문장에서 더한 키·
+// FK 의 자동 키, 절 순서] 이다. 자동 키 g 는 다른 키 n 이 앞쪽 파트(컬럼 이름·prefix 길이·정렬 방향)를 g 와 똑같이 가지면 버려진다 (n 의 종류·가시성은 상관없고,
+// FULLTEXT 도 받친다). 둘 다 자동 키면 짧은 쪽이, 길이가 같으면 앞선 쪽이 버려진다. 직접 만든 인덱스는 버려지지 않는다. 자동 키 표시는 SHOW CREATE 에 나오지 않고
+// FK 를 지워도 남는다 (RENAME INDEX 는 표시를 지운다) — 모델에는 표시가 없어 덤프에서 이름으로 가린다. 한계: 앞 문장에서 FK 만 지운 뒤 남은 자동 인덱스,
+// FOREIGN KEY 뒤에 이름을 쓴 자동 인덱스는 알아보지 못해 직접 만든 인덱스로 본다 (같은 이름의 직접 만든 인덱스를 자동으로 보는 오판도 있다)
+
+// 자동 인덱스 이름 (소문자). generated: 이름이 FK 이름과 같다 — 자동으로 만든 것으로 본다. ambiguous: 이름이 FK 첫 컬럼(또는 <컬럼>_N)이라
+// 자동인지 직접 만든 것인지 덤프만으로 알 수 없다. 둘은 겹치지 않는다
+export interface FkAutoIndexes {
+  readonly generated: ReadonlySet<string>;
+  readonly ambiguous: ReadonlySet<string>;
+}
+
+const NO_AUTO_INDEXES: FkAutoIndexes = { generated: new Set(), ambiguous: new Set() };
+
+const samePart = (p: IndexPart, q: IndexPart): boolean =>
+  p.column !== undefined && q.column !== undefined && sameName(p.column, q.column) && p.length === q.length && p.desc === q.desc;
+
+// short 의 키 파트가 long 의 앞쪽과 같다
+const startsWithParts = (long: readonly IndexPart[], short: readonly IndexPart[]): boolean => short.length <= long.length && short.every((p, k) => samePart(p, long[k]));
+
+// FK 컬럼 그대로인 일반 KEY (길이·DESC 없음) — 자동 인덱스의 모양
+const isPlainKeyOn = (i: Index, columns: readonly string[]): boolean =>
+  i.kind === 'INDEX' && i.parts.length === columns.length && i.parts.every((p, k) => p.column !== undefined && sameName(p.column, columns[k]) && p.length === undefined && !p.desc);
+
+// 인덱스 이름이 FK 이름이나 FK 첫 컬럼 이름(충돌하면 <컬럼>_2 …)과 같은지로 자동 인덱스를 가린다. 받치는 인덱스가 하나뿐이고 그 앞쪽을 가진 다른 인덱스가 없을 때만 본다
+// (그런 인덱스가 있으면 자동 키는 버려졌을 것이므로 직접 만든 것이다)
+export function classifyFkIndexes(t: Table): FkAutoIndexes {
+  const generated = new Set<string>();
+  const ambiguous = new Set<string>();
+  for (const fk of t.foreignKeys) {
+    const exact = t.indexes.filter((i) => isPlainKeyOn(i, fk.columns));
+    if (exact.length !== 1 || t.indexes.some((i) => i !== exact[0] && startsWithParts(i.parts, exact[0].parts))) continue;
+    const name = exact[0].name.toLowerCase();
+    const first = fk.columns[0].toLowerCase();
+    if (name === fk.name.toLowerCase()) generated.add(name);
+    else if (name === first || (name.startsWith(`${first}_`) && /^\d+$/.test(name.slice(first.length + 1)))) ambiguous.add(name);
+  }
+  return { generated, ambiguous: new Set([...ambiguous].filter((n) => !generated.has(n))) };
+}
+
+interface KeyCandidate {
+  parts: readonly IndexPart[];
+  auto: boolean; // 자동 키
+  isNew: boolean; // 이 문장에서 더한 키 (기존 키끼리는 서로 버리지 않는다)
+}
+
+// 뒤 키(later)와 앞 키(earlier) 중 버려지는 쪽: 자동 키가 아닌 상대가 앞쪽을 같게 가지면 자동 키, 둘 다 자동이면 짧은 쪽(같으면 앞선 쪽)
+function discarded(later: KeyCandidate, earlier: KeyCandidate): KeyCandidate | undefined {
+  if (!later.auto && !earlier.auto) return undefined;
+  const [loser, other] = !later.auto ? [earlier, later] : !earlier.auto ? [later, earlier] : later.parts.length < earlier.parts.length ? [later, earlier] : [earlier, later];
+  return startsWithParts(other.parts, loser.parts) ? loser : undefined;
+}
+
+function discardedKeys(list: readonly KeyCandidate[]): Set<KeyCandidate> {
+  const out = new Set<KeyCandidate>();
+  list.forEach((key, k) => {
+    for (const earlier of list.slice(0, k)) {
+      if (out.has(earlier) || (!key.isNew && !earlier.isNew)) continue;
+      const loser = discarded(key, earlier);
+      if (loser) {
+        out.add(loser);
+        break;
+      }
+    }
+  });
+  return out;
+}
+
+// 이 문장이 더하는 키가 자동 키를 버리는 계획. kept: 버려지지 않은 기존 인덱스, skipped: 자동 키가 버려져 만들지 않는 FK,
+// uncertain: 자동인지 알 수 없는데(ambiguous) 버려지는 기존 인덱스 이름 — 자동이면 MySQL 이 지우고 직접 만든 것이면 남긴다 (assertAutoKeysKnown)
+export interface AutoKeyPlan {
+  readonly kept: readonly Index[];
+  readonly skipped: ReadonlySet<ConstraintItem>;
+  readonly uncertain: readonly string[];
+}
+
+export function planAutoKeys(t: Table, items: readonly ConstraintItem[], auto: FkAutoIndexes = NO_AUTO_INDEXES): AutoKeyPlan {
+  const isAuto = (i: Index) => auto.generated.has(i.name.toLowerCase()) || auto.ambiguous.has(i.name.toLowerCase());
+  const existing = t.indexes.map((index) => ({ index, key: { parts: index.parts, auto: isAuto(index), isNew: false } }));
+  const added = items.map((item) => ({
+    item,
+    key: item.kind === 'index' ? { parts: item.index.parts, auto: false, isNew: true } : { parts: item.fk.columns.map((column) => ({ column, desc: false })), auto: true, isNew: true },
+  }));
+  const dropped = discardedKeys([...existing, ...added].map((x) => x.key));
+  return {
+    kept: existing.filter((e) => !dropped.has(e.key)).map((e) => e.index),
+    skipped: new Set(added.filter((a) => dropped.has(a.key)).map((a) => a.item)),
+    uncertain: existing.filter((e) => dropped.has(e.key) && auto.ambiguous.has(e.index.name.toLowerCase())).map((e) => e.index.name),
+  };
+}
+
+// 자동인지 알 수 없는 인덱스가 버려지는 문장은 결과를 정할 수 없어 거부한다. 문장이 어느 쪽으로 읽어도 MySQL 오류인 경우를 가리지 않도록 다른 검사를 다 마친 뒤에 부른다
+export function assertAutoKeysKnown(plan: Pick<AutoKeyPlan, 'uncertain'>): void {
+  if (!plan.uncertain.length) return;
+  fail(`인덱스 ${plan.uncertain.map((n) => `\`${n}\``).join(', ')} 이 FK 때문에 MySQL 이 자동으로 만든 것인지 덤프만으로는 알 수 없습니다 — 자동으로 만든 것이면 이 문장이 더하는 키가 대신해 `
+    + `MySQL 이 지우고 직접 만든 것이면 남기므로 결과를 정할 수 없습니다 — ${RE_EXPORT}`);
+}
+
 // 인덱스·FK 정의를 차례로 붙이고, 붙인 FK 에 받치는 인덱스가 없으면 만든다 (ALTER TABLE ADD·CREATE TABLE 공용).
 // fkNamesBefore: 이 문장이 시작할 때 있던 FK 이름 (지우는 FK 포함) — 이름 없는 FK 는 이 중 가장 큰 번호 + 1 부터 하나씩 번호를 받는다 (MySQL 8.0.46·8.4.11 실측: 같은 문장에서
 // 직접 쓴 이름은 번호에 영향을 주지 않고, 겹치면 1826). 같은 문장에서 지운 FK 와 같은 이름을 다시 쓰는 것도 1826. 안 주면 t 에 있는 FK 이름 (CREATE TABLE 은 빈 테이블로 부른다).
 // FK 를 붙인 뒤 sortForeignKeys 를 부르는 것은 부른 쪽의 몫이다
-export function addKeys(st: State, t: Table, items: readonly ConstraintItem[], fkNamesBefore: readonly string[] = t.foreignKeys.map((f) => f.name)): Table {
-  let next = t;
+export function addKeys(st: State, t: Table, items: readonly ConstraintItem[], fkNamesBefore: readonly string[] = t.foreignKeys.map((f) => f.name), plan: AutoKeyPlan = planAutoKeys(t, items)): Table {
+  let next: Table = { ...t, indexes: [...plan.kept] };
   let generated = highestFkNumber(t.name, fkNamesBefore);
-  const added: { name: string; indexName?: string; named: boolean }[] = [];
   for (const item of items) {
-    if (item.kind === 'index') next = addIndex(next, item);
-    else {
-      next = addForeignKey(st, next, item, item.named ? undefined : `${t.name}_ibfk_${++generated}`);
-      added.push({ name: next.foreignKeys.at(-1)!.name, ...(item.indexName !== undefined ? { indexName: item.indexName } : {}), named: item.named });
+    if (item.kind === 'index') {
+      next = addIndex(next, item);
+      continue;
     }
+    next = addForeignKey(st, next, item, item.named ? undefined : `${t.name}_ibfk_${++generated}`);
+    if (!plan.skipped.has(item)) next = ensureFkIndexes(next, [{ name: next.foreignKeys.at(-1)!.name, ...(item.indexName !== undefined ? { indexName: item.indexName } : {}), named: item.named }]);
   }
-  const done = ensureFkIndexes(next, added);
   // 같은 문장에서 지운 FK 와 같은 이름(대소문자 무시)으로 다시 더할 수 없다 — 받치는 인덱스가 있어도 1826 (인덱스 이름 충돌 1061 이 먼저 걸린다)
   const reused = items.find((i): i is FkItem => i.kind === 'fk' && i.named && fkNamesBefore.some((n) => sameName(n, i.fk.name)));
   if (reused) fail(`FK 이름 \`${reused.fk.name}\` 이 이미 있습니다 — 같은 문장에서 지운 FK 와 같은 이름으로 다시 더할 수 없습니다 (MySQL 1826)`);
-  return done;
+  return next;
 }
 
 export function dropKeys(t: Table, drops: readonly KeyDrop[]): Table {
@@ -379,14 +478,19 @@ export function checkTable(st: State, t: Table, renamed: ReadonlyMap<string, str
   }
 }
 
-// MySQL 이 키를 저장하는 순서 (sql_table.cc sort_keys): UNIQUE(PRIMARY 포함) 먼저 — 그 안에서 NULL 허용 컬럼이 없는 것, PRIMARY,
-// 길이 있는 파트가 없는 것 순 — 그다음 일반 인덱스, FULLTEXT 는 마지막. 같은 무리 안은 원래 순서
+// MySQL 이 키를 저장하는 순서 (sql_table.cc sort_keys, 8.0.46·8.4.11 실측): UNIQUE(PRIMARY 포함) 먼저 — 그 안에서 NULL 허용 파트가 없는 것, PRIMARY,
+// 길이 있는 파트가 없는 것, VIRTUAL 이 아닌 것 순 — 그다음 일반 인덱스: FULLTEXT 가 아닌 것, VIRTUAL 이 아닌 것 순. 같은 무리 안은 원래 순서.
+// VIRTUAL 키: VIRTUAL 생성 컬럼이나 함수 식 파트가 하나라도 든 키 (STORED 생성 컬럼은 일반 컬럼과 같다). 함수 식 파트가 NULL 허용인지는 쓰는 컬럼 중
+// NULL 허용이 있는지로 본다 (IFNULL 처럼 NULL 을 없애는 식은 구분하지 못하는 한계)
 export function sortIndexes(t: Table): Index[] {
-  const nullable = (i: Index) => i.parts.some((p) => p.column !== undefined && findColumn(t, p.column)?.nullable === true);
-  const rank = (i: Index): number[] =>
-    i.kind === 'PRIMARY' || i.kind === 'UNIQUE'
-      ? [0, nullable(i) ? 1 : 0, i.kind === 'PRIMARY' ? 0 : 1, i.parts.some((p) => p.length !== undefined) ? 1 : 0]
-      : [1, i.kind === 'FULLTEXT' ? 1 : 0, 0, 0];
+  const nullable = (p: IndexPart) =>
+    (p.column === undefined ? quotedIdentifiers(p.expr ?? '') ?? [] : [p.column]).some((n) => findColumn(t, n)?.nullable === true);
+  const virtual = (p: IndexPart) => p.column === undefined || findColumn(t, p.column)?.generated?.stored === false;
+  const rank = (i: Index): number[] => {
+    const isVirtual = i.parts.some(virtual) ? 1 : 0;
+    if (i.kind !== 'PRIMARY' && i.kind !== 'UNIQUE') return [1, i.kind === 'FULLTEXT' ? 1 : 0, isVirtual, 0, 0];
+    return [0, i.parts.some(nullable) ? 1 : 0, i.kind === 'PRIMARY' ? 0 : 1, i.parts.some((p) => p.length !== undefined) ? 1 : 0, isVirtual];
+  };
   const cmp = (a: number[], b: number[]) => a.reduce((r, x, k) => r || x - b[k], 0);
   return t.indexes.map((i, n) => ({ i, n, r: rank(i) })).sort((a, b) => cmp(a.r, b.r) || a.n - b.n).map((x) => x.i);
 }
