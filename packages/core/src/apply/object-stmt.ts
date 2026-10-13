@@ -1,12 +1,11 @@
 // CREATE·DROP FUNCTION·PROCEDURE, DROP VIEW. 루틴 본문은 쓴 그대로 저장한다 (MySQL SHOW CREATE 도 그렇다)
 import { ParseError, type Cursor } from '../cursor';
-import { routineNameKey } from '../diff';
 import { tokenize } from '../lexer';
 import type { Routine, RoutineCharacteristics, RoutineKind } from '../model';
 import { parseRoutine } from '../parse-routine';
 import { isDefaultCharacteristic } from '../routine-defaults';
 import { assertBmpText, routineReturns } from './normalize-mysql';
-import { objectName, objectNameList, type State } from './state';
+import { objectName, objectNameList, routineKey, type State } from './state';
 import { fail, RE_EXPORT } from './types';
 
 const CREATE_ROUTINE_RE = /^CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCEDURE)\b/i;
@@ -21,12 +20,13 @@ export const isCreateRoutine = (ddl: string): boolean => CREATE_ROUTINE_RE.test(
 export function createRoutine(st: State, ddl: string, noBackslashEscapes: boolean): void {
   const ifNotExists = IF_NOT_EXISTS_RE.test(ddl);
   const r = readRoutine(withoutTerminator(ifNotExists ? ddl.replace(IF_NOT_EXISTS_RE, '$1') : ddl, noBackslashEscapes), noBackslashEscapes);
-  if (st.model.routines.some((x) => x.kind === r.kind && routineNameKey(x.name) === routineNameKey(r.name))) {
+  if (st.routineKeys.has(routineKey(r))) {
     if (ifNotExists) return;
     fail(`${label(r.kind)} \`${r.name}\` 이 이미 있습니다 (MySQL 1304)`);
   }
   const returns = r.returns === undefined ? {} : { returns: routineReturns(r.returns, st.defaults.charset, st.defaults.collation) };
   st.model.routines = [...st.model.routines, { ...r, ...returns, sqlMode: st.sqlMode }];
+  st.routineKeys.add(routineKey(r));
 }
 
 // 문장 끝의 ';' 는 본문이 아니다: DELIMITER 를 바꾼 스크립트의 'RETURN x + 1; //' 에서 MySQL 은 본문을 'RETURN x + 1' 로 저장한다 (8.0.46·8.4.11 실측; 공백이 끼어도, ';' 가 여럿이어도 같다).
@@ -76,16 +76,22 @@ export function dropRoutine(st: State, c: Cursor): void {
   const ifExists = c.acceptWord('IF', 'EXISTS');
   const name = objectName(c, st);
   if (!c.done) fail(`알 수 없는 내용입니다: ${c.peek()!.v} (MySQL 1064)`);
-  const left = st.model.routines.filter((r) => !(r.kind === kind && routineNameKey(r.name) === routineNameKey(name)));
-  if (left.length === st.model.routines.length && !ifExists) fail(`${label(kind)} \`${name}\` 이 없습니다 (MySQL 1305)`);
-  st.model.routines = left;
+  const key = routineKey({ kind, name });
+  if (!st.routineKeys.has(key)) {
+    if (!ifExists) fail(`${label(kind)} \`${name}\` 이 없습니다 (MySQL 1305)`);
+    return;
+  }
+  st.model.routines = st.model.routines.filter((r) => routineKey(r) !== key);
+  st.routineKeys.delete(key);
 }
 
 // DROP VIEW [IF EXISTS] v [, w …] [RESTRICT|CASCADE]. 하나라도 없으면(IF EXISTS 제외) 아무것도 지우지 않는다
 export function dropView(st: State, c: Cursor): void {
   const ifExists = c.acceptWord('IF', 'EXISTS');
   const names = objectNameList(c, st);
-  const missing = names.filter((n) => !st.model.views.some((v) => v.name === n));
+  const present = new Set(st.model.views.map((v) => v.name));
+  const missing = names.filter((n) => !present.has(n));
   if (missing.length && !ifExists) fail(`뷰 \`${missing.join('`, `')}\` 이 없습니다 (MySQL 1051)`);
-  st.model.views = st.model.views.filter((v) => !names.includes(v.name));
+  const dropped = new Set(names);
+  st.model.views = st.model.views.filter((v) => !dropped.has(v.name));
 }

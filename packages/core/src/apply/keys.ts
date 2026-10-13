@@ -2,6 +2,7 @@
 import { LexError, quotedIdentifiers, tokenize } from '../lexer';
 import type { Check, Column, ForeignKey, Index, IndexKind, IndexPart, Partitioning, Table } from '../model';
 import { markProvenance, planAutoKeys, type AutoKeyPlan } from './auto-index';
+import { assertForeignKeyCount, assertKeyCount } from './limits';
 import { baseType, BLOB_TYPES, CHARSET_TYPES, effectiveCollation, INT_TYPES, tableCharset } from './normalize-mysql';
 import { findColumn, findTable, sameName, type State } from './state';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type FkItem, type IndexItem } from './types';
@@ -30,16 +31,18 @@ export function leadsWith(i: Index, columns: readonly string[]): boolean {
 
 // MySQL 자동 인덱스 이름: 기준 이름이 이미 있으면 _2, _3 … (대소문자 무시)
 export function uniqueIndexName(t: Pick<Table, 'indexes'>, base: string): string {
-  const taken = (n: string) => t.indexes.some((i) => sameName(i.name, n));
-  if (!taken(base)) return base;
-  for (let n = 2; ; n++) if (!taken(`${base}_${n}`)) return `${base}_${n}`;
+  const taken = new Set(t.indexes.map((i) => i.name.toLowerCase()));
+  if (!taken.has(base.toLowerCase())) return base;
+  for (let n = 2; ; n++) if (!taken.has(`${base}_${n}`.toLowerCase())) return `${base}_${n}`;
 }
 
 // 자동 FK 이름 '<테이블>_ibfk_<N>' 의 N 중 가장 큰 값 (없으면 0). 접두어는 대소문자를 구분하고 (`T_IBFK_9` 는 세지 않는다), 숫자로만 된 꼬리만 센다 (`_x`·`_` 는 세지 않는다)
+// (Math.max(...numbers) 는 FK 가 아주 많으면 인자 수 한도에 걸린다)
 function highestFkNumber(table: string, names: readonly string[]): number {
   const prefix = `${table}_ibfk_`;
-  const numbers = names.filter((n) => n.startsWith(prefix) && /^\d+$/.test(n.slice(prefix.length))).map((n) => Number(n.slice(prefix.length)));
-  return Math.max(0, ...numbers);
+  let highest = 0;
+  for (const n of names) if (n.startsWith(prefix) && /^\d+$/.test(n.slice(prefix.length))) highest = Math.max(highest, Number(n.slice(prefix.length)));
+  return highest;
 }
 
 // '<테이블>_ibfk_<N>': N 은 이 테이블의 같은 꼴 FK 번호 중 가장 큰 값 + 1
@@ -61,9 +64,10 @@ export function sortChecks(checks: readonly Check[]): Check[] {
   return byLowerName(checks);
 }
 
+// 소문자 이름은 항목마다 한 번만 만든다 (비교마다 만들면 FK 가 많을 때 정렬이 느리다)
 function byLowerName<T extends { name: string }>(items: readonly T[]): T[] {
-  const key = (x: T) => x.name.toLowerCase();
-  return [...items].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+  const keyed = items.map((item) => ({ item, key: item.name.toLowerCase() }));
+  return keyed.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)).map((x) => x.item);
 }
 
 // 식(생성 컬럼·CHECK·함수 인덱스)이 컬럼을 쓰는지. SHOW CREATE 의 식은 컬럼을 늘 백틱으로 쓴다
@@ -260,8 +264,8 @@ export function assertReaddedKeysFit(before: Table, t: Table, readded: ReadonlyS
   }
 }
 
-// FK 를 붙인다 (받치는 인덱스는 ensureFkIndexes 가 문장 끝에 만든다)
-export function addForeignKey(st: State, t: Table, item: FkItem, generatedName?: string): Table {
+// FK 를 붙인다 (받치는 인덱스는 ensureFkIndexes 가 문장 끝에 만든다). taken: 스키마에 이미 있는 FK 이름 (fkNames) — FK 이름은 스키마 안에서 유일하다
+export function addForeignKey(st: State, t: Table, item: FkItem, generatedName?: string, taken: FkNames = fkNames(st, t)): Table {
   const { refSchema, ...rest } = item.fk;
   if (refSchema !== undefined && refSchema !== st.schemaName) fail(`다른 스키마 \`${refSchema}\` 를 참조하는 FK 는 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
   const columns = rest.columns.map((n) => (findColumn(t, n) ?? fail(`FK 컬럼 \`${n}\` 이 없습니다 (MySQL 1072)`)).name);
@@ -272,7 +276,7 @@ export function addForeignKey(st: State, t: Table, item: FkItem, generatedName?:
   if (!parent && st.fkChecks) fail(`참조하는 테이블 \`${rest.refTable}\` 이 없습니다 (MySQL 1824)`);
   if (parent?.parseError) fail(`참조하는 테이블 \`${parent.name}\` 은 파싱하지 못한 정의라 FK 를 검사할 수 없습니다 — ${RE_EXPORT}`);
   const refColumns = parent ? parentKey(st, t, columns, rest.refColumns, parent) : rest.refColumns;
-  if (st.model.tables.some((x) => x.name !== t.name && x.foreignKeys.some((f) => sameName(f.name, name))) || t.foreignKeys.some((f) => sameName(f.name, name))) fail(`FK 이름 \`${name}\` 이 이미 있습니다 (MySQL 1826)`);
+  if (taken.has(name)) fail(`FK 이름 \`${name}\` 이 이미 있습니다 (MySQL 1826)`);
   const fk: ForeignKey = { ...rest, name, columns, refColumns };
   return { ...t, foreignKeys: [...t.foreignKeys, fk] };
 }
@@ -338,10 +342,11 @@ function fkKind(c: Column): string {
 
 // 이 문장에서 붙인 FK 에 받치는 인덱스가 없으면 만든다. 이름: CONSTRAINT 이름 → FOREIGN KEY 뒤에 쓴 인덱스 이름 (둘 다 직접 정한 이름이라 겹치면 1061) → 첫 컬럼 (겹치면 _2 …).
 // 받치는 인덱스가 이미 있으면 새 인덱스가 필요 없으므로 이름이 같아도 된다 (MySQL 8.0.46·8.4.11 실측)
-export function ensureFkIndexes(t: Table, added: readonly { name: string; indexName?: string; named: boolean }[]): Table {
+// known: added 가 하나일 때 그 FK (FK 가 많을 때 이름으로 다시 찾지 않는다)
+export function ensureFkIndexes(t: Table, added: readonly { name: string; indexName?: string; named: boolean }[], known?: ForeignKey): Table {
   let next = t;
   for (const a of added) {
-    const fk = next.foreignKeys.find((f) => f.name === a.name)!;
+    const fk = known?.name === a.name ? known : next.foreignKeys.find((f) => f.name === a.name)!;
     if (next.indexes.some((i) => leadsWith(i, fk.columns))) continue;
     const given = a.named ? fk.name : a.indexName;
     if (given !== undefined) assertIndexNameFree(next, given);
@@ -358,22 +363,46 @@ export function ensureFkIndexes(t: Table, added: readonly { name: string; indexN
 export function addKeys(st: State, t: Table, items: readonly ConstraintItem[], fkNamesBefore: readonly string[] = t.foreignKeys.map((f) => f.name), plan: AutoKeyPlan = planAutoKeys(t, items)): Table {
   let next: Table = { ...t, indexes: [...plan.kept] };
   let generated = highestFkNumber(t.name, fkNamesBefore);
+  const taken = fkNames(st, t);
   for (const item of items) {
     if (item.kind === 'index') {
       next = addIndex(next, item);
       markProvenance(st, t.name, [next.indexes.at(-1)!.name], 'user'); // 직접 더한 인덱스: 이 실행이 안다
       continue;
     }
-    next = addForeignKey(st, next, item, item.named ? undefined : `${t.name}_ibfk_${++generated}`);
+    next = addForeignKey(st, next, item, item.named ? undefined : `${t.name}_ibfk_${++generated}`, taken);
+    assertForeignKeyCount(next);
+    const fk = next.foreignKeys.at(-1)!;
+    taken.add(fk.name);
     if (plan.skipped.has(item)) continue;
-    const made = ensureFkIndexes(next, [{ name: next.foreignKeys.at(-1)!.name, ...(item.indexName !== undefined ? { indexName: item.indexName } : {}), named: item.named }]);
+    const made = ensureFkIndexes(next, [{ name: fk.name, ...(item.indexName !== undefined ? { indexName: item.indexName } : {}), named: item.named }], fk);
     if (made.indexes.length > next.indexes.length) markProvenance(st, t.name, [made.indexes.at(-1)!.name], 'auto'); // FK 가 만든 인덱스
     next = made;
   }
+  assertKeyCount(next.indexes.length);
   // 같은 문장에서 지운 FK 와 같은 이름(대소문자 무시)으로 다시 더할 수 없다 — 받치는 인덱스가 있어도 1826 (인덱스 이름 충돌 1061 이 먼저 걸린다)
-  const reused = items.find((i): i is FkItem => i.kind === 'fk' && i.named && fkNamesBefore.some((n) => sameName(n, i.fk.name)));
+  const before = new Set(fkNamesBefore.map((n) => n.toLowerCase()));
+  const reused = items.find((i): i is FkItem => i.kind === 'fk' && i.named && before.has(i.fk.name.toLowerCase()));
   if (reused) fail(`FK 이름 \`${reused.fk.name}\` 이 이미 있습니다 — 같은 문장에서 지운 FK 와 같은 이름으로 다시 더할 수 없습니다 (MySQL 1826)`);
   return next;
+}
+
+// 스키마에 있는 FK 이름 (대소문자 무시): t 의 지금 FK 와 다른 테이블의 FK. st.fkNames(스키마 전체)에는 st.model 에 있는 t 의 옛 정의가 들어 있으므로
+// 그만큼 빼고 본다 (이 문장에서 지운 FK 는 없다 — 같은 이름으로 다시 더하는 것은 addKeys 가 따로 1826 으로 막는다)
+interface FkNames {
+  has(name: string): boolean;
+  add(name: string): void; // 이 문장에서 더한 FK
+}
+
+function fkNames(st: State, t: Table): FkNames {
+  const lowerNames = (fks: readonly ForeignKey[]) => fks.map((f) => f.name.toLowerCase());
+  const own = new Set(lowerNames(t.foreignKeys));
+  const old = lowerNames(findTable(st, t.name)?.foreignKeys ?? []);
+  const inOtherTable = (lower: string) => (st.fkNames.get(lower) ?? 0) > old.filter((n) => n === lower).length;
+  return {
+    has: (name) => own.has(name.toLowerCase()) || inOtherTable(name.toLowerCase()),
+    add: (name) => own.add(name.toLowerCase()),
+  };
 }
 
 export function dropKeys(t: Table, drops: readonly KeyDrop[]): Table {
@@ -398,8 +427,9 @@ const missingKey = (d: KeyDrop): string =>
     : d.what === 'constraint' ? `제약 \`${d.name}\` 이 없습니다 (MySQL 3940)`
       : `${d.what === 'fk' ? 'FK' : '인덱스'} \`${d.name}\` 이 없습니다 (MySQL 1091)`;
 
-// 컬럼 삭제·이름 변경을 남은 인덱스·자기 FK 에 반영한다 (dropped: 지운 컬럼 이름(소문자), renamed: 문장 전 이름(소문자) → 새 이름)
+// 컬럼 삭제·이름 변경을 남은 인덱스·자기 FK 에 반영한다 (dropped: 지운 컬럼 이름(소문자), renamed: 문장 전 이름(소문자) → 새 이름). 둘 다 없으면 그대로 돌려준다
 export function remapKeys(t: Table, dropped: ReadonlySet<string>, renamed: ReadonlyMap<string, string>): Table {
+  if (!dropped.size && !renamed.size) return t;
   const rename = (n: string) => renamed.get(n.toLowerCase()) ?? n;
   const indexes = t.indexes.flatMap((i) => {
     const parts = i.parts.filter((p) => p.column === undefined || !dropped.has(p.column.toLowerCase())).map((p) => (p.column === undefined ? p : { ...p, column: rename(p.column) }));
@@ -430,14 +460,27 @@ export function checkTable(st: State, t: Table, renamed: ReadonlyMap<string, str
   if (autos.length && !t.indexes.some((i) => i.parts[0]?.column !== undefined && sameName(i.parts[0].column, autos[0].name))) fail(`AUTO_INCREMENT 컬럼 \`${autos[0].name}\` 은 인덱스의 첫 컬럼이어야 합니다 (MySQL 1075)`);
   if (t.columns.every((c) => c.invisible)) fail('보이는 컬럼이 하나 이상 있어야 합니다 (MySQL 4028)');
   assertPartitionKeys(t);
-  for (const fk of t.foreignKeys) if (!t.indexes.some((i) => isFkKey(i, fk.columns))) fail(`FK \`${fk.name}\` 에 필요한 인덱스를 지울 수 없습니다 (MySQL 1553)`);
-  for (const child of [...st.model.tables.filter((x) => x.name !== t.name), t]) {
+  const hasKey = keyLookup(t);
+  for (const fk of t.foreignKeys) if (!hasKey(fk.columns)) fail(`FK \`${fk.name}\` 에 필요한 인덱스를 지울 수 없습니다 (MySQL 1553)`);
+  const checkChild = (child: Table) => {
     for (const fk of child.foreignKeys) {
       if (fk.refTable !== t.name || fk.refSchema !== undefined) continue;
       const refs = child === t ? fk.refColumns : fk.refColumns.map((n) => renamed.get(n.toLowerCase()) ?? n);
-      if (!t.indexes.some((i) => isFkKey(i, refs))) fail(`\`${child.name}\` 의 FK \`${fk.name}\` 가 쓰는 인덱스를 지울 수 없습니다 (MySQL 1553)`);
+      if (!hasKey(refs)) fail(`\`${child.name}\` 의 FK \`${fk.name}\` 가 쓰는 인덱스를 지울 수 없습니다 (MySQL 1553)`);
     }
-  }
+  };
+  for (const child of st.model.tables) if (child.foreignKeys.length && child.name !== t.name) checkChild(child);
+  checkChild(t);
+}
+
+// 컬럼 목록 → 그 컬럼으로 시작하는 키가 t 에 있는가 (isFkKey). 같은 컬럼의 FK 가 많아도 컬럼 목록마다 한 번만 키를 훑는다
+function keyLookup(t: Table): (columns: readonly string[]) => boolean {
+  const seen = new Map<string, boolean>();
+  return (columns) => {
+    const key = JSON.stringify(columns.map((c) => c.toLowerCase()));
+    if (!seen.has(key)) seen.set(key, t.indexes.some((i) => isFkKey(i, columns)));
+    return seen.get(key)!;
+  };
 }
 
 // MySQL 이 키를 저장하는 순서 (sql_table.cc sort_keys, 8.0.46·8.4.11 실측): UNIQUE(PRIMARY 포함) 먼저 — 그 안에서 NULL 허용 파트가 없는 것, PRIMARY,

@@ -1,13 +1,14 @@
 // CREATE·DROP·RENAME TABLE
 import { renamedAutoName } from '../auto-name';
 import { Cursor } from '../cursor';
-import type { Table, TableOption } from '../model';
+import type { ForeignKey, Table, TableOption } from '../model';
 import { parseTableItem } from './def-parser';
 import { addKeys, checkSetNullFks, checkTable, columnKeyItems, enforcePrimaryKeyNotNull, isExplicitNull, sortChecks, sortForeignKeys, sortIndexes } from './keys';
 import { splitList } from './lists';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, finalizeColumn, primaryCollation, tableCharset } from './normalize-mysql';
 import { innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
-import { findTable, forgetOrigins, moveOrigins, nameTaken, needTable, objectName, objectNameList, sameName, trackNew, type State } from './state';
+import { appendTable, forgetOrigins, moveOrigins, nameTaken, needTable, objectName, objectNameList, removeTables, replaceTable, sameName, trackNew, type State } from './state';
+import { assertColumnCount, assertKeyCount } from './limits';
 import { fail, RE_EXPORT, type ConstraintItem } from './types';
 
 // 테이블(또는 뷰) 이름 변경: 다른 테이블 FK 의 참조 테이블과 자동 제약명('<옛>_ibfk_N'·'<옛>_chk_N')이 따라 바뀐다 (MySQL 8.0)
@@ -28,16 +29,24 @@ export function renameTable(st: State, from: string, to: string): void {
     foreignKeys: foreignKeys.some((f, i) => f.name !== t.foreignKeys[i].name) ? sortForeignKeys(foreignKeys) : foreignKeys,
     checks: checks.some((k, i) => k.name !== t.checks[i].name) ? sortChecks(checks) : checks,
   };
-  st.model.tables = st.model.tables
-    .map((x) => (x.name === from ? renamed : x))
-    .map((x) => ({ ...x, foreignKeys: x.foreignKeys.map((f) => (f.refTable === from && f.refSchema === undefined ? { ...f, refTable: to } : f)) }));
+  replaceTable(st, from, renamed);
+  st.model.tables = withRefTableRenamed(st.model.tables, from, to);
   moveOrigins(st.origins, from, to);
+}
+
+// FK 가 옛 이름을 참조하는 테이블만 새로 만든 배열 (없으면 그대로). 테이블이 수만 개인 스크립트에서 RENAME 마다 모든 테이블을 새로 만들지 않게 FK 가 없는 테이블은 바로 넘긴다
+function withRefTableRenamed(tables: readonly Table[], from: string, to: string): Table[] {
+  const refersFrom = (f: ForeignKey) => f.refTable === from && f.refSchema === undefined;
+  const refers = (x: Table) => x.foreignKeys.length > 0 && x.foreignKeys.some(refersFrom);
+  if (!tables.some(refers)) return tables as Table[];
+  return tables.map((x) => (refers(x) ? { ...x, foreignKeys: x.foreignKeys.map((f) => (refersFrom(f) ? { ...f, refTable: to } : f)) } : x));
 }
 
 // 테이블 이름을 바꾸면 자동 FK 이름 '<옛>_ibfk_N' 이 '<새>_ibfk_N' 이 된다. FK 이름은 스키마 안에서 유일하고 대소문자를 구분하지 않으므로, 바뀐 이름이 같은 테이블의 다른 FK 나
 // 다른 테이블의 FK 와 겹치면 1826 이다 (MySQL 8.0.46·8.4.11 실측: RENAME TABLE·ALTER TABLE … RENAME TO 모두)
 function assertRenamedFkNamesFree(st: State, t: Table, to: string): void {
   const names = t.foreignKeys.map((f) => renamedAutoName(f.name, t.name, to, 'ibfk'));
+  if (names.every((name, k) => name === t.foreignKeys[k].name)) return; // 바뀌는 이름이 없다
   const others = st.model.tables.filter((x) => x.name !== t.name).flatMap((x) => x.foreignKeys.map((f) => f.name));
   const clash = names.find((name, k) => name !== t.foreignKeys[k].name && [...others, ...names.filter((_, j) => j !== k)].some((n) => sameName(n, name)));
   if (clash !== undefined) fail(`이름을 바꾸면 자동 FK 이름 \`${clash}\` 이 다른 FK 와 겹칩니다: \`${t.name}\` → \`${to}\` (MySQL 1826)`);
@@ -62,16 +71,19 @@ export function createTable(st: State, c: Cursor): void {
     if (seen.has(s.name.toLowerCase())) fail(`컬럼 \`${s.name}\` 이 두 번 있습니다 (MySQL 1060)`);
     seen.add(s.name.toLowerCase());
   }
+  assertColumnCount(specs.length);
   const explicitNull = new Set(specs.filter(isExplicitNull).map((s) => s.name.toLowerCase()));
   let t: Table = { kind: 'table', name, columns: specs.map((s) => finalizeColumn(s, charset)), indexes: [], foreignKeys: [], checks: [], options, fidelity: 'full' };
   // 키는 쓴 차례대로 들어간다: 컬럼 안 PRIMARY KEY·UNIQUE(columnKeyItems)는 그 컬럼 정의를 쓴 자리에서, 표 수준 키·FK 는 쓴 자리에서 (ALTER 의 columnKeys 와 같다).
   // SHOW CREATE 의 같은 무리 안 순서가 이 차례다 (sortIndexes). addKeys 가 인덱스 출처(provenance)도 적는다
-  t = addKeys(st, t, items.flatMap((i): ConstraintItem[] => (i.kind === 'column' ? columnKeyItems(i.spec) : [i])));
+  const keyItems = items.flatMap((i): ConstraintItem[] => (i.kind === 'column' ? columnKeyItems(i.spec) : [i]));
+  assertKeyCount(keyItems.filter((i) => i.kind === 'index').length); // 인덱스 정의만 세어도 64개를 넘으면 1069 (FK 자동 인덱스는 addKeys 가 센다)
+  t = addKeys(st, t, keyItems);
   t = enforcePrimaryKeyNotNull(t, explicitNull); // PRIMARY KEY 컬럼은 NOT NULL, NULL 을 직접 쓴 컬럼이면 1171
   checkSetNullFks(t); // FK 를 붙인 뒤에 PRIMARY KEY 가 컬럼을 NOT NULL 로 만들었으면 addForeignKey 의 검사가 놓친다 (1830)
   checkTable(st, t);
   t = { ...t, indexes: sortIndexes(t), foreignKeys: sortForeignKeys(t.foreignKeys) };
-  st.model.tables = [...st.model.tables, t];
+  appendTable(st, t);
   trackNew(st.origins, t, false);
 }
 
@@ -108,15 +120,15 @@ const showsCollate = (charset: string, collation: string): boolean => charset ==
 export function dropTable(st: State, c: Cursor): void {
   const ifExists = c.acceptWord('IF', 'EXISTS');
   const names = objectNameList(c, st);
-  const targets = names.filter((n) => findTable(st, n) !== undefined || (ifExists ? false : fail(`테이블 \`${n}\` 이 없습니다 (MySQL 1051)`)));
+  const targets = new Set(names.filter((n) => st.tableAt.has(n) || (ifExists ? false : fail(`테이블 \`${n}\` 이 없습니다 (MySQL 1051)`))));
   if (st.fkChecks) {
     for (const child of st.model.tables) {
-      if (targets.includes(child.name)) continue;
-      const fk = child.foreignKeys.find((f) => f.refSchema === undefined && targets.includes(f.refTable));
+      if (targets.has(child.name)) continue;
+      const fk = child.foreignKeys.find((f) => f.refSchema === undefined && targets.has(f.refTable));
       if (fk) fail(`\`${child.name}\` 의 FK \`${fk.name}\` 가 참조하는 테이블 \`${fk.refTable}\` 은 지울 수 없습니다 (MySQL 3730)`);
     }
   }
-  st.model.tables = st.model.tables.filter((t) => !targets.includes(t.name));
+  removeTables(st, targets);
   for (const n of targets) forgetOrigins(st.origins, n);
 }
 

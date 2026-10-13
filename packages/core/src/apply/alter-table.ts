@@ -8,10 +8,11 @@ import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
-import { assertAutoKeysKnown, assertTargetsKept, classifyFkIndexes, planAutoKeys, renameProvenance, shrunkIndexes, syncProvenance, withoutNames, type AutoKeyPlan } from './auto-index';
+import { assertAutoKeysKnown, assertTargetsKept, classifyFkIndexes, isFlagged, planAutoKeys, renameProvenance, shrunkIndexes, syncProvenance, withoutNames, type AutoKeyPlan } from './auto-index';
 import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, dropSoleColumnChecks, enforcePrimaryKeyNotNull, exprUses, isExplicitNull, isSoleColumnCheck, partitionColumns, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
 import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
+import { assertColumnCount, assertForeignKeyCount, assertKeyCount } from './limits';
 import { assertInnoDbTable, innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
 import { findColumn, needTable, objectName, replaceTable, sameName, type State } from './state';
 import { renameTable } from './table-stmt';
@@ -73,6 +74,7 @@ export function dropIndexOn(st: State, c: Cursor): void {
 function alterWith(st: State, name: string, clauses: readonly Clause[]): void {
   const before = needTable(st, name);
   assertInnoDbTable(before);
+  assertForeignKeyCount(before);
   const { table, renamed } = applyClauses(st, before, clauses);
   replaceTable(st, name, table);
   renameReferencedColumns(st, name, renamed);
@@ -215,6 +217,7 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   const charset = tableCharset(before.options, st.defaults);
   const pick = <K extends Clause['k']>(k: K) => clauses.filter((x): x is Extract<Clause, { k: K }> => x.k === k);
   const dropped = droppedColumns(before, pick('dropColumn')); // 1) 기존 컬럼 삭제
+  assertColumnCount(before.columns.length - dropped.size + pick('add').length); // 컬럼 1017개 한도 (1117) — 위치를 찾기 전에 보아 계산량을 묶는다
   const entries = arrangeColumns(st, before, clauses, charset, dropped); // 2) 기존 컬럼 변경 (이름은 문장 전 기준) 3) 컬럼 추가 4) 위치
   assertUniqueColumns(entries);
   const renamed = new Map(entries.filter((e) => e.from !== undefined && e.from !== e.col.name).map((e) => [e.from!.toLowerCase(), e.col.name]));
@@ -231,6 +234,7 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   }
   for (const v of pick('indexVisibility')) t = setIndexVisibility(t, v.name, v.invisible);
   const items = pick('key').map((x) => x.item);
+  assertKeyCount(t.indexes.filter((i) => !isFlagged(flagged, i.name)).length + items.filter((i) => i.kind === 'index').length); // 버려지지 않는 키만 세어도 64개를 넘으면 1069
   const plan = planAutoKeys(t, items, flagged, shrunkIndexes(before, t, renames)); // 이 문장의 키(더한 키·DROP COLUMN 으로 줄어든 키)가 FK 자동 인덱스를 대신하는가
   t = addConstraints(st, before, t, items, plan); // 6) 키 추가와 FK 자동 인덱스
   assertTargetsKept(plan, t, pick('indexVisibility').map((v) => v.name)); // 버려진 자동 인덱스에 ALTER INDEX 를 썼으면 1176
@@ -396,9 +400,10 @@ function syncIndexOrigins(st: State, table: string, t: Table): void {
 function renameReferencedColumns(st: State, table: string, renamed: ReadonlyMap<string, string>): void {
   if (!renamed.size) return;
   const rename = (n: string) => renamed.get(n.toLowerCase()) ?? n;
-  st.model.tables = st.model.tables.map((x) => (x.name === table ? x : {
+  const refersTable = (f: { refTable: string; refSchema?: string }) => f.refTable === table && f.refSchema === undefined;
+  st.model.tables = st.model.tables.map((x) => (x.name === table || !x.foreignKeys.some(refersTable) ? x : {
     ...x,
-    foreignKeys: x.foreignKeys.map((f) => (f.refTable === table && f.refSchema === undefined ? { ...f, refColumns: f.refColumns.map(rename) } : f)),
+    foreignKeys: x.foreignKeys.map((f) => (refersTable(f) ? { ...f, refColumns: f.refColumns.map(rename) } : f)),
   }));
 }
 

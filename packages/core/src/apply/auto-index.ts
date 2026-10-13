@@ -1,5 +1,6 @@
 // FK 가 자동으로 만든 인덱스: 새 키가 자동 키를 버리는 규칙, 덤프에서 이름으로 가리기, 이 실행(applyScript) 안에서 아는 인덱스 출처(provenance) 추적
 import type { ForeignKey, Index, IndexPart, Table } from '../model';
+import { assertKeyCount } from './limits';
 import { sameName, type IndexProvenance, type State } from './state';
 import { fail, RE_EXPORT, type ConstraintItem } from './types';
 
@@ -49,10 +50,23 @@ function guessProvenance(table: string, fk: ForeignKey, indexName: string): Inde
   return isColumnName ? 'ambiguous' : undefined;
 }
 
-// FK 의 자동 인덱스일 수 있는 인덱스: FK 컬럼 그대로인 일반 KEY 가 하나뿐이고 그 앞쪽을 가진 다른 인덱스가 없을 때만이다 (있으면 자동 키는 버려졌을 것이므로 직접 만든 것이다)
-function candidateIndex(t: Table, fk: ForeignKey): Index | undefined {
-  const exact = t.indexes.filter((i) => isPlainKeyOn(i, fk.columns));
-  return exact.length === 1 && !t.indexes.some((i) => i !== exact[0] && startsWithParts(i.parts, exact[0].parts)) ? exact[0] : undefined;
+// FK 의 자동 인덱스일 수 있는 인덱스: FK 컬럼 그대로인 일반 KEY 가 하나뿐이고 그 앞쪽을 가진 다른 인덱스가 없을 때만이다 (있으면 자동 키는 버려졌을 것이므로 직접 만든 것이다).
+// 테이블마다 한 번 만들어 FK 마다 쓴다: 일반 KEY 를 첫 컬럼(소문자)으로 묶어 두고 판정은 인덱스마다 한 번만 하므로, FK 가 많아도 FK 수 + 키 수 × 키 수다
+function candidateIndexes(t: Table): (fk: ForeignKey) => Index | undefined {
+  const byFirst = new Map<string, Index[]>();
+  for (const i of t.indexes) {
+    const first = i.kind === 'INDEX' ? i.parts[0]?.column?.toLowerCase() : undefined;
+    if (first !== undefined) byFirst.set(first, [...(byFirst.get(first) ?? []), i]);
+  }
+  const isSole = new Map<Index, boolean>(); // 그 앞쪽을 가진 다른 인덱스가 없다
+  const sole = (i: Index): boolean => {
+    if (!isSole.has(i)) isSole.set(i, !t.indexes.some((o) => o !== i && startsWithParts(o.parts, i.parts)));
+    return isSole.get(i)!;
+  };
+  return (fk) => {
+    const exact = (byFirst.get(fk.columns[0].toLowerCase()) ?? []).filter((i) => isPlainKeyOn(i, fk.columns));
+    return exact.length === 1 && sole(exact[0]) ? exact[0] : undefined;
+  };
 }
 
 // 이 테이블에서 자동(generated)이거나 자동인지 알 수 없는(ambiguous) 인덱스. 이 실행이 아는 출처(known)가 먼저고 — FK 가 없는 남은 인덱스도 포함 —
@@ -65,8 +79,9 @@ export function classifyFkIndexes(t: Table, known: ReadonlyMap<string, IndexProv
     if (provenance === 'auto') generated.add(i.name.toLowerCase());
     else if (provenance === 'ambiguous') ambiguous.add(i.name.toLowerCase());
   }
+  const candidateIndex = candidateIndexes(t);
   for (const fk of t.foreignKeys) {
-    const index = candidateIndex(t, fk);
+    const index = candidateIndex(fk);
     if (!index || known.has(index.name.toLowerCase())) continue;
     const guess = guessProvenance(t.name, fk, index.name);
     if (guess === 'auto') generated.add(index.name.toLowerCase());
@@ -88,28 +103,46 @@ function discarded(later: KeyCandidate, earlier: KeyCandidate): KeyCandidate | u
   return startsWithParts(other.parts, loser.parts) ? loser : undefined;
 }
 
+// 버려지는 키. 키마다 앞서 남은 키(alive, 순서대로)만 본다 — 이미 버려진 키와는 다시 비교하지 않는다. 키 하나는 남은 키 하나를 대신하거나(그 키가 버려진다)
+// 자기가 버려지거나 그냥 남으므로 남은 키 수는 줄지 않는다: 남은 키가 64개를 넘으면 문장 끝 키도 64개를 넘어 1069 다 (그래서 FK 를 얼마나 더해도 비교는 키마다 64번 안쪽이다)
 function discardedKeys(list: readonly KeyCandidate[]): Set<KeyCandidate> {
   const out = new Set<KeyCandidate>();
-  list.forEach((key, k) => {
-    for (const earlier of list.slice(0, k)) {
-      if (out.has(earlier) || (!key.isNew && !earlier.isNew)) continue;
-      const loser = discarded(key, earlier);
-      if (loser) {
-        out.add(loser);
-        break;
-      }
+  const alive: KeyCandidate[] = [];
+  for (const key of list) {
+    const [k, loser] = firstLoser(key, alive);
+    if (loser === key) {
+      out.add(key);
+      continue;
     }
-  });
+    if (loser) {
+      out.add(loser);
+      alive.splice(k, 1);
+    }
+    alive.push(key);
+    assertKeyCount(alive.length);
+  }
   return out;
+}
+
+// key 와 앞서 남은 키 중 처음으로 한쪽이 버려지는 짝: [그 앞 키의 자리, 버려지는 키]. 문장이 건드리지 않은 기존 키끼리는 서로 버리지 않는다
+function firstLoser(key: KeyCandidate, alive: readonly KeyCandidate[]): [number, KeyCandidate | undefined] {
+  for (const [k, earlier] of alive.entries()) {
+    if (!key.isNew && !earlier.isNew) continue;
+    const loser = discarded(key, earlier);
+    if (loser) return [k, loser];
+  }
+  return [-1, undefined];
 }
 
 // DROP COLUMN 이 파트를 지운 기존 인덱스(소문자 이름): before 의 같은 인덱스(이름을 바꿨으면 옛 이름)보다 파트가 줄었다. 줄어든 키는 앞쪽이 자동 키와 같아질 수 있다
 // (MySQL 8.0.46·8.4.11 실측: KEY k (x1, x0) 에서 x1 을 지우면 k (x0) 가 자동 f (x0) 를 버린다). 컬럼 이름 변경·인덱스 이름 변경만으로는 줄어든 것이 아니다
 export function shrunkIndexes(before: Table, t: Table, renames: readonly { old: string; to: string }[] = []): ReadonlySet<string> {
-  const wasNamed = (name: string) => renames.find((r) => sameName(r.to, name))?.old ?? name;
+  const firstByName = <T>(pairs: [string, T][]) => pairs.reduce((m, [k, v]) => (m.has(k) ? m : m.set(k, v)), new Map<string, T>()); // 소문자 이름 → 처음 것
+  const oldName = firstByName(renames.map((r) => [r.to.toLowerCase(), r.old.toLowerCase()]));
+  const partsBefore = firstByName(before.indexes.map((b) => [b.name.toLowerCase(), b.parts.length]));
   const shrunk = t.indexes.filter((i) => {
-    const was = before.indexes.find((b) => sameName(b.name, wasNamed(i.name)));
-    return was !== undefined && i.parts.length < was.parts.length;
+    const was = partsBefore.get(oldName.get(i.name.toLowerCase()) ?? i.name.toLowerCase());
+    return was !== undefined && i.parts.length < was;
   });
   return new Set(shrunk.map((i) => i.name.toLowerCase()));
 }
@@ -129,8 +162,11 @@ export interface AutoKeyPlan {
   readonly uncertain: readonly string[];
 }
 
+// 자동(generated)이거나 자동인지 알 수 없는(ambiguous) 인덱스 이름인가 — 새 키가 버릴 수 있는 기존 인덱스다 (직접 만든 인덱스는 버려지지 않는다)
+export const isFlagged = (auto: FkAutoIndexes, name: string): boolean => auto.generated.has(name.toLowerCase()) || auto.ambiguous.has(name.toLowerCase());
+
 export function planAutoKeys(t: Table, items: readonly ConstraintItem[], auto: FkAutoIndexes = NO_AUTO_INDEXES, shrunk: ReadonlySet<string> = new Set()): AutoKeyPlan {
-  const isAuto = (i: Index) => auto.generated.has(i.name.toLowerCase()) || auto.ambiguous.has(i.name.toLowerCase());
+  const isAuto = (i: Index) => isFlagged(auto, i.name);
   const existing = t.indexes.map((index) => ({ index, key: { parts: index.parts, auto: isAuto(index), isNew: shrunk.has(index.name.toLowerCase()) } }));
   const added = items.map((item) => ({
     item,
@@ -187,8 +223,9 @@ export function syncProvenance(st: State, table: string, t: Table, flagged: FkAu
     const provenance = current.get(key) ?? (flagged.generated.has(key) ? 'auto' : flagged.ambiguous.has(key) ? 'ambiguous' : undefined);
     return provenance === undefined ? [] : [[key, provenance]];
   }));
+  const candidateIndex = candidateIndexes(t);
   for (const fk of t.foreignKeys) {
-    const key = candidateIndex(t, fk)?.name.toLowerCase();
+    const key = candidateIndex(fk)?.name.toLowerCase();
     if (key !== undefined && !known.has(key)) known.set(key, 'user');
   }
   st.origins.provenance.set(table, known);
