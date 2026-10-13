@@ -1,6 +1,6 @@
 # ALTER 적용으로 새 버전 만들기 — 설계
 
-작성일: 2026-10-13 · 상태: 검토 대기
+작성일: 2026-10-13 · 상태: 검토 완료 (2026-10-13, 구현 계획 작성 중 보완)
 
 ## 1. 목적
 
@@ -15,6 +15,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 1. 스키마의 버전 목록에서 **ALTER 적용**을 누른다. admin·dba만 보인다.
 2. 기준 버전을 고른다. 기본값은 최신 버전이다.
 3. 스크립트를 넣는다. `.sql` 파일을 고르거나 텍스트를 붙여 넣는다.
+   - **스키마 기본 문자셋·콜레이션**도 확인한다. 기본값은 MySQL 8.0/8.4 서버 기본값인 `utf8mb4` / `utf8mb4_0900_ai_ci`이다. 문자셋 없이 쓴 `CREATE TABLE`과 문자열을 반환하는 함수에 MySQL은 DB 기본값을 쓰는데, td-export 덤프에는 DB 기본값이 없기 때문이다. 입력값은 저장되고, 같은 스키마에서 다음에 열 때 기본값으로 쓴다.
 4. **미리보기**를 누르면 서버가 저장하지 않고 적용만 해서 돌려준다.
    - 성공하면 적용한 문장 수와 "기준 → 결과" 비교 요약(객체별 변경 개수)을 보여 준다.
    - 실패하면 `N번째 문장 (줄 L): 이유`와 그 문장을 보여 준다.
@@ -41,7 +42,8 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 | ALTER TABLE 제약 절 | `ADD [CONSTRAINT [sym]] FOREIGN KEY [name] (cols) REFERENCES t (cols) [ON DELETE …] [ON UPDATE …]`, `DROP FOREIGN KEY name`, `DROP CHECK name`, `DROP CONSTRAINT name` |
 | ALTER TABLE 테이블 절 | `COMMENT [=] '…'`, `ENGINE [=] …`, `ROW_FORMAT [=] …`, `KEY_BLOCK_SIZE [=] n`, `RENAME [TO\|AS] new`, `ALGORITHM=…`·`LOCK=…`(무시) |
 | 단독 문장 | `CREATE [UNIQUE\|FULLTEXT\|SPATIAL] INDEX name ON t (…)`, `DROP INDEX name ON t`, `RENAME TABLE a TO b [, c TO d …]`, `CREATE TABLE [IF NOT EXISTS] …`, `DROP TABLE [IF EXISTS] a [, b …]`, `CREATE FUNCTION/PROCEDURE …`(DELIMITER 포함), `DROP {FUNCTION\|PROCEDURE} [IF EXISTS] …`, `DROP VIEW [IF EXISTS] …` |
-| 무시하는 문장 | `SET NAMES …`, `SET FOREIGN_KEY_CHECKS …`, `SET SQL_MODE …`(루틴 SQL_MODE 추적에만 씀), 주석, 현재 스키마와 같은 `USE` |
+| 세션 문장 | `SET FOREIGN_KEY_CHECKS = 0\|1`(`@OLD_…` 저장·복원 포함): 0인 동안은 MySQL처럼 FK 부모 테이블이 없어도 되는 검사(FK 추가 시 부모 없음, 참조되는 테이블 삭제)를 건너뛴다. `SET [SESSION] SQL_MODE = '…'`: 뒤에 만드는 루틴의 SQL_MODE로 쓴다 |
+| 무시하는 문장 | `SET NAMES …`와 그 밖의 `SET`, 주석, 현재 스키마와 같은 `USE` |
 
 - `CREATE TABLE`의 컬럼 정의 안에 `PRIMARY KEY`, `UNIQUE [KEY]`, `KEY`(PK의 동의어)를 쓰면 인덱스로 바꾼다.
 - 컬럼 정의 안의 `REFERENCES …`는 MySQL처럼 무시한다.
@@ -78,7 +80,10 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - NULL 허용 컬럼에 기본값이 없으면 `DEFAULT NULL`을 붙인다. TEXT·BLOB·JSON·GEOMETRY 계열은 붙이지 않는다.
   - `timestamp`는 `explicit_defaults_for_timestamp=ON`(8.0 기본) 규칙을 따른다.
   - PRIMARY KEY에 들어간 컬럼은 NOT NULL이 되고, `DEFAULT NULL`은 사라진다.
-- **문자셋:** 새 문자열 컬럼은 테이블 기본 문자셋·콜레이션을 물려받는다. 명시된 값은 덤프 파서와 같은 규칙으로 저장한다. 테이블 기본값과 같은 문자셋을 생략한 표기는 기존 비교 규칙(암묵 문자셋 동일 처리)이 같게 본다.
+- **문자셋:**
+  - 새 문자열 컬럼(그리고 문자셋 없이 쓴 `MODIFY`·`CHANGE`)은 테이블 기본 문자셋·콜레이션을 물려받는다. 예전 컬럼의 문자셋을 물려받지 않는 것도 MySQL과 같다.
+  - 저장 표기는 `SHOW CREATE` 규칙을 따른다. 컬럼 콜레이션이 테이블 기본 콜레이션과 다르면 `CHARACTER SET`을 붙이고, 콜레이션이 그 문자셋의 기본 콜레이션이 아니면 `COLLATE`를 붙인다. `COLLATE`를 명시하면 둘 다 붙인다.
+  - 새 테이블은 옵션에 쓴 문자셋·콜레이션을 쓰고, 없으면 2장의 스키마 기본값을 쓴다. 문자셋만 쓰면 그 문자셋의 기본 콜레이션, 콜레이션만 쓰면 그 콜레이션의 문자셋이다.
 - **자동 이름:**
   - 이름 없는 인덱스·UNIQUE는 첫 키 파트의 컬럼 이름을 쓴다. 이미 있으면 `_2`, `_3`…을 붙인다.
   - 이름 없는 FK는 `<테이블>_ibfk_<N>`이다. N은 기존 최대값+1이다.
@@ -91,6 +96,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - 본문은 쓴 그대로 저장한다. MySQL의 `SHOW CREATE FUNCTION`도 그렇다.
   - `sqlMode`는 스크립트에서 그 문장 앞의 마지막 `SET [SESSION] SQL_MODE` 값을 쓴다. 없으면 MySQL 8.0/8.4 기본 모드(`ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`)를 쓴다.
   - DEFINER는 저장하지 않는다. 비교 대상이 아니다.
+  - 함수의 `RETURNS` 타입은 타입 규칙으로 정규화한다. 문자열 타입이면 MySQL처럼 ` CHARSET <스키마 기본 문자셋>`을 붙인다. `RETURNS` 안에 `CHARSET`·`COLLATE`를 직접 쓴 경우는 1차에서 거부한다.
 - **테이블 옵션:**
   - `ENGINE` 값은 MySQL 표기로 맞춘다(`innodb`→`InnoDB`). `ROW_FORMAT`은 대문자로 쓴다.
   - `COMMENT=''`이면 옵션을 지운다.
@@ -120,20 +126,24 @@ MySQL의 모든 검사를 재현하지는 않는다. 화면 안내와 이 문서
 
 | 파일 | 책임 |
 |---|---|
-| `index.ts` | `applyScript(model: SchemaModel, script: string, opts: { schemaName: string }): ApplyResult` — 문장을 나누고(기존 `splitStatements`·세션 SQL_MODE 추적 재사용) 문장마다 처리기로 보낸다. 실패하면 즉시 `{ ok: false, error }` |
-| `def-parser.ts` | 사람이 쓴 컬럼 정의·인덱스 정의·FK 정의를 읽는 관대한 파서. 백틱 없는 이름, 소문자 키워드, 생략 가능한 키워드, 컬럼 안 제약을 받는다. 기존 lexer·cursor 재사용 |
-| `normalize-mysql.ts` | 4장의 정규화 규칙(타입·기본값·NULL·자동 이름) |
-| `alter-table.ts` | ALTER TABLE 절 처리(컬럼·인덱스·제약·테이블 옵션) |
-| `table-stmt.ts` | CREATE/DROP/RENAME TABLE, CREATE/DROP INDEX … ON |
+| `index.ts` | `applyScript(model, script, { schemaName, defaults? }): ApplyResult` — 문장을 나누고(기존 `splitDump`·세션 SQL_MODE 추적 재사용) 문장마다 처리기로 보낸다. 실패하면 즉시 `{ ok: false, error }` |
+| `types.ts` | 공용 타입, `ApplyFailure`, `MYSQL_DEFAULTS`, `DEFAULT_SQL_MODE` |
+| `normalize-mysql.ts` | 4장의 정규화 규칙(타입·기본값·NULL·문자셋), `finalizeColumn` |
+| `options.ts` | 테이블 옵션 값 정규화와 SHOW CREATE 옵션 순서 |
+| `def-parser.ts` | 사람이 쓴 컬럼 정의·인덱스 정의·FK 정의를 읽는 관대한 파서. 백틱 없는 이름, 소문자 키워드, 생략 가능한 키워드, 컬럼 안 제약을 받는다. 기존 lexer·cursor·parse-table 의 키 파트·FK 파서 재사용 |
+| `state.ts` | 작업용 모델 사본, 세션 값, 기준 이름 추적(rename 매핑용) |
+| `session.ts` | `SET` 문 (FOREIGN_KEY_CHECKS·SQL_MODE, `@OLD_…` 저장·복원) |
+| `keys.ts` | 인덱스·FK 추가·삭제·자동 이름, FK 자동 인덱스, 문장 끝 검사(4.1), MySQL 키 순서 |
+| `alter-table.ts` | ALTER TABLE 절 처리(단계별 적용, 연쇄 변경), `CREATE INDEX … ON`·`DROP INDEX … ON` |
+| `table-stmt.ts` | CREATE/DROP/RENAME TABLE |
 | `object-stmt.ts` | CREATE/DROP FUNCTION·PROCEDURE, DROP VIEW |
-| `cascade.ts` | rename·삭제의 연쇄 변경(인덱스·자기 FK·다른 테이블 FK)과 4.1의 FK 관련 검사 |
-| `print-dump.ts` | `printSqlDump(model, schemaName): string` — td-export 0.1.52 형식(헤더 주석, `SET @OLD_…`, 테이블·뷰·루틴, 복원 트레일러)으로 출력 |
+| `print-dump.ts` | `printSqlDump(model): string` — td-export 0.1.52 형식(헤더 주석, `SET @OLD_…`, 테이블·뷰·루틴, 복원 트레일러)으로 출력 |
 
 `ApplyResult`의 모양은 다음과 같다.
 
 ```ts
 type ApplyResult =
-  | { ok: true; model: SchemaModel; applied: number; renames: RenameMapping[] }
+  | { ok: true; model: SchemaModel; applied: number; renames: RenameMapping[]; defaults: ApplyDefaults }
   | { ok: false; error: { index: number; line: number; statement: string; reason: string } };
 ```
 
@@ -143,13 +153,15 @@ type ApplyResult =
 ### 5.2 서버
 
 - **마이그레이션 `009_version_derivations.sql`:**
-  - `schema_version_derivations(version_id PK → schema_versions ON DELETE CASCADE, base_version_id → schema_versions ON DELETE SET NULL, script TEXT NOT NULL, statement_count INTEGER NOT NULL)`
+  - `schema_version_derivations(version_id PK → schema_versions ON DELETE CASCADE, base_version_id → schema_versions ON DELETE SET NULL, base_version_no INTEGER NOT NULL, script TEXT NOT NULL, statement_count INTEGER NOT NULL, default_charset TEXT NOT NULL, default_collation TEXT NOT NULL)`. `base_version_no`는 기준 버전이 지워져도 배지에 `기준 vN`을 보여 주려고 남긴다
 - **`POST /versions/:id/alter`:**
   - 권한은 admin·dba이다. `onRequest`에서 검사하는 기존 방식을 따르고 CSRF 헤더도 기존대로 요구한다.
-  - 본문은 JSON `{ script: string, filename?: string, note?: string, dryRun?: boolean }`이다. 크기 제한은 업로드와 같다.
+  - 본문은 JSON `{ script: string, filename?: string, note?: string, dryRun?: boolean, defaults?: { charset?: string, collation?: string } }`이다. 크기 제한은 업로드와 같다.
   - `:id` 버전이 SQL 출처가 아니거나 stale이면 400을 돌려준다.
   - `dryRun: true`면 `{ applied, summary }`를 돌려준다. `summary`는 기존 비교 요약과 같은 모양이다.
-  - 저장할 때는 결과 모델을 `printSqlDump`로 출력하고, 기존 `ingest` 경로로 새 버전을 만든다. `source_filename`은 업로드한 파일 이름 또는 `alter.sql`이다. 같은 트랜잭션에서 아래를 기록한다.
+  - 결과 모델을 `printSqlDump`로 출력하고 다시 파싱한 모델을 쓴다. 그래야 저장 모델과 원문 재파싱 모델이 항상 같아서 서버 시작 시 stale로 잘못 표시되지 않는다.
+  - "변경 없음" 판정은 모델 해시가 아니라 기존 비교 엔진으로 한다(`diffSchemas(기준, 결과, renames)`의 변경이 0개).
+  - 저장할 때는 출력한 텍스트를 원문으로 기존 `ingest` 경로에 넘겨 새 버전을 만든다. `source_filename`은 업로드한 파일 이름 또는 `alter.sql`이다. 같은 트랜잭션에서 아래를 기록한다.
     - (a) `schema_version_derivations` 행
     - (b) 완전성 판정: 기준 버전의 판정 수준과 사유를 복사한다
     - (c) `renames`를 (기준, 새 버전) 쌍의 rename 매핑으로 저장한다(기존 저장 경로와 rename set 표시 재사용)
@@ -162,12 +174,14 @@ type ApplyResult =
 
 - 버전 목록(스키마 화면)에 **ALTER 적용** 버튼을 둔다. admin·dba에게만 보인다.
 - 대화상자의 구성은 다음과 같다.
-  - 기준 버전 선택
+  - 기준 버전 선택 (SQL 출처 버전만)
+  - 스키마 기본 문자셋·콜레이션 (이 스키마의 마지막 ALTER 적용 값, 없으면 `utf8mb4` / `utf8mb4_0900_ai_ci`)
   - 파일 선택 또는 텍스트 붙여넣기
   - 메모
   - 미리보기 결과
   - 저장
 - 실패하면 해당 문장을 강조해서 보여 준다.
+- SQL 출처 버전이 없으면 버튼을 보이지 않는다. 기준 버전이 stale 이면(목록에서는 알 수 없다) 서버가 400 으로 이유를 돌려주고 대화상자가 그대로 보여 준다.
 - 버전 이력의 배지는 `ALTER 적용 (기준 vN)`이다. 배지를 누르면 스크립트 원문을 보는 패널이 열린다.
 
 ## 6. 검증
