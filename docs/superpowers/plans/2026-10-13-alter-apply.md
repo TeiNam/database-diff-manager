@@ -893,7 +893,7 @@ git commit -m "feat(core): ALTER 적용 — 사람이 쓴 컬럼·인덱스·FK 
 **Interfaces:**
 - Consumes: Task 1 의 `fail`, `ApplyFailure`, `MYSQL_DEFAULTS`, `DEFAULT_SQL_MODE`, `ApplyOptions`, `ApplyResult`, `canonicalCharset`, `canonicalCollation`, `charsetOfCollation`; parse-dump 의 `splitDump`; sql-safety 의 `UnsafeValueError`
 - Produces:
-  - `state.ts`: `State`, `Origins`, `initialState(base, schemaName, defaults, sqlMode)`, `trackNew(origins, table, fromBase)`, `moveOrigins(origins, from, to)`, `forgetOrigins(origins, name)`, `sameName(a, b)`, `findColumn(t, name)`, `findTable(st, name)`, `nameTaken(st, name)`, `needTable(st, name)`, `replaceTable(st, name, next)`, `objectName(c, st)`
+  - `state.ts`: `State`, `Origins`, `initialState(base, schemaName, defaults, sqlMode)`, `trackNew(origins, table, fromBase)`, `moveOrigins(origins, from, to)`, `forgetOrigins(origins, name)`, `sameName(a, b)`, `findColumn(t, name)`, `findTable(st, name)`, `nameTaken(st, name)`, `needTable(st, name)`, `replaceTable(st, name, next)`, `objectName(c, st)`, `objectNameList(c, st)`
   - `session.ts`: `applySet(st, c)` — `c` 는 `SET` 앞
   - `index.ts`: `applyScript(base, script, opts): ApplyResult`, re-export `MYSQL_DEFAULTS`·타입. 문장 분기 함수 `applyStatement` 는 Task 5~7 이 한 줄씩 늘린다
 
@@ -978,7 +978,7 @@ Run: `npx vitest run test/apply/session.test.ts test/apply/apply-script.test.ts`
 
 ```ts
 // ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE), 기준 이름 추적
-import type { Cursor } from '../cursor';
+import { Cursor, splitTopLevel } from '../cursor';
 import type { Column, SchemaModel, Table } from '../model';
 import { fail, type ApplyDefaults } from './types';
 
@@ -1052,6 +1052,17 @@ export function objectName(c: Cursor, st: State): string {
   if (!c.acceptOp('.')) return first;
   if (first !== st.schemaName) fail(`다른 스키마 \`${first}\` 의 객체는 바꿀 수 없습니다 — 이 버전은 스키마 \`${st.schemaName}\` 하나를 나타냅니다`);
   return c.ident();
+}
+
+// 'a [, b …] [RESTRICT|CASCADE]' 이름 목록 (DROP TABLE·DROP VIEW). c 는 목록 앞
+export function objectNameList(c: Cursor, st: State): string[] {
+  return splitTopLevel(c.toks.slice(c.i)).map((toks) => {
+    const one = new Cursor(toks, c.src);
+    const name = objectName(one, st);
+    if (!one.acceptWord('RESTRICT')) one.acceptWord('CASCADE');
+    if (!one.done) fail(`알 수 없는 내용입니다: ${one.peek()!.v}`);
+    return name;
+  });
 }
 ```
 
@@ -1236,6 +1247,7 @@ git commit -m "feat(core): ALTER 적용 — 작업 상태·SET 문(FOREIGN_KEY_C
   - `addIndex(t, item): Table`
   - `addForeignKey(st, t, item): Table` — 자동 인덱스는 만들지 않는다
   - `ensureFkIndexes(t, added: { name; indexName?; named }[]): Table`
+  - `addKeys(st, t, items: ConstraintItem[]): Table` — 인덱스·FK 를 차례로 붙이고 FK 자동 인덱스까지 (ALTER·CREATE 공용)
   - `dropKeys(t, drops): Table`
   - `remapKeys(t, dropped: Set<소문자>, renamed: Map<소문자, 새 이름>): Table`
   - `renameIndex(t, from, to): Table`
@@ -1249,7 +1261,7 @@ git commit -m "feat(core): ALTER 적용 — 작업 상태·SET 문(FOREIGN_KEY_C
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { addForeignKey, addIndex, checkTable, dropKeys, ensureFkIndexes, nextFkName, remapKeys, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
+import { addForeignKey, addIndex, addKeys, checkTable, dropKeys, ensureFkIndexes, nextFkName, remapKeys, sortIndexes, uniqueIndexName } from '../../src/apply/keys';
 import { initialState, type State } from '../../src/apply/state';
 import { DEFAULT_SQL_MODE, MYSQL_DEFAULTS, type FkItem, type IndexItem } from '../../src/apply/types';
 import type { IndexKind, Table } from '../../src/model';
@@ -1322,6 +1334,16 @@ describe('addForeignKey / ensureFkIndexes', () => {
     st.fkChecks = false;
     expect(addForeignKey(st, c, fk(false, ['pid'], 'nope', ['id'])).foreignKeys).toHaveLength(2);
   });
+
+  it('addKeys: 정의를 차례로 붙이고 붙인 FK 에 받치는 인덱스를 만든다', () => {
+    const st = fresh();
+    const c = table(st, 'child');
+    const t = addKeys(st, c, [idx('ix_name', 'INDEX', ['name'])]);
+    expect(t.indexes.map((i) => i.name)).toEqual(['PRIMARY', 'pid', 'ix_name']);
+    const withFk = addKeys(st, { ...c, columns: [...c.columns, { name: 'pid2', type: 'int unsigned', nullable: true, invisible: false, autoIncrement: false, default: 'NULL' }] }, [fk(false, ['pid2'], 'parent', ['id'])]);
+    expect(withFk.foreignKeys.at(-1)!.name).toBe('child_ibfk_2');
+    expect(withFk.indexes.at(-1)!.name).toBe('pid2');
+  });
 });
 
 describe('삭제·이름 반영·검사·순서', () => {
@@ -1369,7 +1391,7 @@ import { quotedIdentifiers } from '../lexer';
 import type { Column, ForeignKey, Index, Table } from '../model';
 import { baseType, BLOB_TYPES, effectiveCollation, tableCharset, type TableCharset } from './normalize-mysql';
 import { findColumn, findTable, sameName, type State } from './state';
-import { fail, type FkItem, type IndexItem } from './types';
+import { fail, type ConstraintItem, type FkItem, type IndexItem } from './types';
 
 export interface KeyDrop {
   what: 'index' | 'primary' | 'fk' | 'check' | 'constraint';
@@ -1494,6 +1516,20 @@ export function ensureFkIndexes(t: Table, added: readonly { name: string; indexN
   return next;
 }
 
+// 인덱스·FK 정의를 차례로 붙이고, 붙인 FK 에 받치는 인덱스가 없으면 만든다 (ALTER TABLE ADD·CREATE TABLE 공용)
+export function addKeys(st: State, t: Table, items: readonly ConstraintItem[]): Table {
+  let next = t;
+  const added: { name: string; indexName?: string; named: boolean }[] = [];
+  for (const item of items) {
+    if (item.kind === 'index') next = addIndex(next, item);
+    else {
+      next = addForeignKey(st, next, item);
+      added.push({ name: next.foreignKeys.at(-1)!.name, ...(item.indexName !== undefined ? { indexName: item.indexName } : {}), named: item.named });
+    }
+  }
+  return ensureFkIndexes(next, added);
+}
+
 export function dropKeys(t: Table, drops: readonly KeyDrop[]): Table {
   let next = t;
   for (const d of drops) {
@@ -1601,7 +1637,7 @@ git commit -m "feat(core): ALTER 적용 — 인덱스·FK 추가·삭제·자동
     - `createIndex` 의 `c` 는 `CREATE` 뒤를 가리킨다
     - `dropIndexOn` 의 `c` 는 `DROP INDEX` 뒤를 가리킨다
   - `table-stmt.ts`: `renameTable(st, from, to)`
-  - `options.ts`: `optionValue(c)`
+  - `options.ts`: `optionValue(c)`, `parseCommonOption(c)`
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -1732,13 +1768,33 @@ Run: `npx vitest run test/apply/alter-table.test.ts` — Expected: FAIL (`지원
 
 - [ ] **Step 2: options.ts 에 optionValue 를 더한다**
 
-`packages/core/src/apply/options.ts` 맨 위 import 에 `import type { Cursor } from '../cursor';` 를 넣고, 파일 끝에 덧붙인다:
+`packages/core/src/apply/options.ts` 맨 위 import 에 `import type { Cursor } from '../cursor';` 와 `import { quoteString } from '../lexer';` 를 넣고, 파일 끝에 덧붙인다:
 
 ```ts
 // 옵션 값: [=] 값 (따옴표 값도 받는다)
 export function optionValue(c: Cursor): string {
   c.acceptOp('=');
   return c.next().v;
+}
+
+// COMMENT·ROW_FORMAT·KEY_BLOCK_SIZE 옵션 하나 (ALTER TABLE·CREATE TABLE 공용). 이 셋이 아니면 소비하지 않고 undefined.
+// value undefined 는 옵션을 지운다 (COMMENT=''·ROW_FORMAT=DEFAULT·KEY_BLOCK_SIZE=0)
+export function parseCommonOption(c: Cursor): { key: string; value: string | undefined } | undefined {
+  if (c.acceptWord('COMMENT')) {
+    c.acceptOp('=');
+    const v = c.string();
+    return { key: 'COMMENT', value: v === '' ? undefined : quoteString(v) };
+  }
+  if (c.acceptWord('ROW_FORMAT')) {
+    const v = rowFormatName(optionValue(c));
+    return { key: 'ROW_FORMAT', value: v === 'DEFAULT' ? undefined : v };
+  }
+  if (c.acceptWord('KEY_BLOCK_SIZE')) {
+    const v = optionValue(c);
+    if (!/^\d+$/.test(v)) fail(`KEY_BLOCK_SIZE 는 숫자여야 합니다: ${v}`);
+    return { key: 'KEY_BLOCK_SIZE', value: Number(v) === 0 ? undefined : String(Number(v)) };
+  }
+  return undefined;
 }
 ```
 
@@ -1781,12 +1837,12 @@ export function renameTable(st: State, from: string, to: string): void {
 // 4) 위치(FIRST·AFTER) 5) 키 삭제 → 남은 키에 컬럼 삭제·이름 변경 반영 → 인덱스 이름 변경·가시성 6) 키 추가, FK 자동 인덱스
 // 7) 검사·키 순서 8) 테이블 옵션 9) 다른 테이블 FK 가 참조하는 컬럼 이름 10) 테이블 이름 변경
 import { Cursor, splitTopLevel } from '../cursor';
-import { quoteString, type Token } from '../lexer';
+import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, startsConstraint } from './def-parser';
-import { addForeignKey, addIndex, checkTable, dropKeys, ensureFkIndexes, exprUses, remapKeys, renameIndex, setIndexVisibility, sortIndexes, type KeyDrop } from './keys';
+import { addKeys, checkTable, dropKeys, exprUses, remapKeys, renameIndex, setIndexVisibility, sortIndexes, type KeyDrop } from './keys';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
-import { engineName, optionValue, rowFormatName, setOption } from './options';
+import { engineName, optionValue, parseCommonOption, setOption } from './options';
 import { findColumn, needTable, objectName, replaceTable, sameName, type State } from './state';
 import { renameTable } from './table-stmt';
 import { fail, type ColumnSpec, type ConstraintItem, type Position } from './types';
@@ -1815,8 +1871,6 @@ interface Entry {
   col: Column;
   pos: Position;
 }
-
-type Added = { name: string; indexName?: string; named: boolean };
 
 export function alterTable(st: State, c: Cursor): void {
   const name = objectName(c, st);
@@ -1956,19 +2010,10 @@ function parseOptions(c: Cursor): Clause[] {
   const out: Clause[] = [];
   while (!c.done) {
     const word = c.peek()!.v.toUpperCase();
-    if (c.acceptWord('ENGINE')) out.push({ k: 'option', key: 'ENGINE', value: engineName(optionValue(c)) });
-    else if (c.acceptWord('COMMENT')) {
-      c.acceptOp('=');
-      const v = c.string();
-      out.push({ k: 'option', key: 'COMMENT', value: v === '' ? undefined : quoteString(v) });
-    } else if (c.acceptWord('ROW_FORMAT')) {
-      const v = rowFormatName(optionValue(c));
-      out.push({ k: 'option', key: 'ROW_FORMAT', value: v === 'DEFAULT' ? undefined : v });
-    } else if (c.acceptWord('KEY_BLOCK_SIZE')) {
-      const v = optionValue(c);
-      if (!/^\d+$/.test(v)) fail(`KEY_BLOCK_SIZE 는 숫자여야 합니다: ${v}`);
-      out.push({ k: 'option', key: 'KEY_BLOCK_SIZE', value: Number(v) === 0 ? undefined : String(Number(v)) });
-    } else if (c.acceptWord('AUTO_INCREMENT') || c.acceptWord('ALGORITHM') || c.acceptWord('LOCK')) {
+    const common = parseCommonOption(c);
+    if (common) out.push({ k: 'option', ...common });
+    else if (c.acceptWord('ENGINE')) out.push({ k: 'option', key: 'ENGINE', value: engineName(optionValue(c)) });
+    else if (c.acceptWord('AUTO_INCREMENT') || c.acceptWord('ALGORITHM') || c.acceptWord('LOCK')) {
       optionValue(c);
       out.push({ k: 'noop' });
     } else if (c.acceptWord('FORCE')) out.push({ k: 'noop' });
@@ -2003,15 +2048,7 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   }
   for (const v of pick('indexVisibility')) t = setIndexVisibility(t, v.name, v.invisible);
   // 6) 키 추가와 FK 자동 인덱스
-  const added: Added[] = [];
-  for (const { item } of pick('key')) {
-    if (item.kind === 'index') t = addIndex(t, item);
-    else {
-      t = addForeignKey(st, t, item);
-      added.push({ name: t.foreignKeys.at(-1)!.name, ...(item.indexName !== undefined ? { indexName: item.indexName } : {}), named: item.named });
-    }
-  }
-  t = ensureFkIndexes(t, added);
+  t = addKeys(st, t, pick('key').map((x) => x.item));
   // 7) 검사·키 순서 8) 테이블 옵션
   checkTable(st, t, renamed);
   t = { ...t, indexes: sortIndexes(t) };
@@ -2259,13 +2296,12 @@ Run: `npx vitest run test/apply/table-stmt.test.ts` — Expected: FAIL (`지원�
 ```ts
 import { fkAutoNameCollides, renamedAutoName } from '../auto-name';
 import { Cursor, splitTopLevel } from '../cursor';
-import { quoteString } from '../lexer';
 import type { Table, TableOption } from '../model';
 import { parseTableItem } from './def-parser';
-import { addForeignKey, addIndex, checkTable, ensureFkIndexes, sortIndexes } from './keys';
+import { addKeys, checkTable, sortIndexes } from './keys';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, finalizeColumn, primaryCollation, tableCharset } from './normalize-mysql';
-import { engineName, optionValue, rowFormatName, setOption } from './options';
-import { findTable, forgetOrigins, moveOrigins, nameTaken, needTable, objectName, trackNew, type State } from './state';
+import { engineName, optionValue, parseCommonOption, setOption } from './options';
+import { findTable, forgetOrigins, moveOrigins, nameTaken, needTable, objectName, objectNameList, trackNew, type State } from './state';
 import { fail, type ColumnSpec, type ConstraintItem, type IndexItem } from './types';
 ```
 
@@ -2292,15 +2328,7 @@ export function createTable(st: State, c: Cursor): void {
     seen.add(s.name.toLowerCase());
   }
   let t: Table = { kind: 'table', name, columns: specs.map((s) => finalizeColumn(s, charset)), indexes: [], foreignKeys: [], checks: [], options, fidelity: 'full' };
-  const added: { name: string; indexName?: string; named: boolean }[] = [];
-  for (const item of [...inlineKeys(specs), ...items.filter((i): i is ConstraintItem => i.kind !== 'column')]) {
-    if (item.kind === 'index') t = addIndex(t, item);
-    else {
-      t = addForeignKey(st, t, item);
-      added.push({ name: t.foreignKeys.at(-1)!.name, ...(item.indexName !== undefined ? { indexName: item.indexName } : {}), named: item.named });
-    }
-  }
-  t = ensureFkIndexes(t, added);
+  t = addKeys(st, t, [...inlineKeys(specs), ...items.filter((i): i is ConstraintItem => i.kind !== 'column')]);
   checkTable(st, t);
   t = { ...t, indexes: sortIndexes(t) };
   st.model.tables = [...st.model.tables, t];
@@ -2323,21 +2351,12 @@ function createOptions(c: Cursor, st: State): TableOption[] {
   let rest: TableOption[] = [];
   while (!c.done) {
     c.acceptWord('DEFAULT');
-    if (c.acceptWord('ENGINE')) engine = engineName(optionValue(c));
+    const common = parseCommonOption(c);
+    if (common) rest = setOption(rest, common.key, common.value);
+    else if (c.acceptWord('ENGINE')) engine = engineName(optionValue(c));
     else if (c.acceptWord('CHARACTER', 'SET') || c.acceptWord('CHARSET')) charset = canonicalCharset(optionValue(c));
     else if (c.acceptWord('COLLATE')) collation = canonicalCollation(optionValue(c));
-    else if (c.acceptWord('COMMENT')) {
-      c.acceptOp('=');
-      const v = c.string();
-      rest = setOption(rest, 'COMMENT', v === '' ? undefined : quoteString(v));
-    } else if (c.acceptWord('ROW_FORMAT')) {
-      const v = rowFormatName(optionValue(c));
-      rest = setOption(rest, 'ROW_FORMAT', v === 'DEFAULT' ? undefined : v);
-    } else if (c.acceptWord('KEY_BLOCK_SIZE')) {
-      const v = optionValue(c);
-      if (!/^\d+$/.test(v)) fail(`KEY_BLOCK_SIZE 는 숫자여야 합니다: ${v}`);
-      rest = setOption(rest, 'KEY_BLOCK_SIZE', Number(v) === 0 ? undefined : String(Number(v)));
-    } else if (c.acceptWord('AUTO_INCREMENT')) optionValue(c);
+    else if (c.acceptWord('AUTO_INCREMENT')) optionValue(c);
     else if (c.isWord('PARTITION')) fail('파티션 절은 1차 지원 범위가 아닙니다 — td-export 로 다시 뽑아 올려 주세요');
     else fail(`지원하지 않는 테이블 옵션입니다: ${c.peek()?.v ?? '(끝)'}`);
     c.acceptOp(',');
@@ -2351,13 +2370,7 @@ function createOptions(c: Cursor, st: State): TableOption[] {
 // DROP TABLE [IF EXISTS] a [, b …] [RESTRICT|CASCADE]. 하나라도 없으면(IF EXISTS 제외) 아무것도 지우지 않는다
 export function dropTable(st: State, c: Cursor): void {
   const ifExists = c.acceptWord('IF', 'EXISTS');
-  const names = splitTopLevel(c.toks.slice(c.i)).map((toks) => {
-    const one = new Cursor(toks, c.src);
-    const name = objectName(one, st);
-    if (!one.acceptWord('RESTRICT')) one.acceptWord('CASCADE');
-    if (!one.done) fail(`알 수 없는 내용입니다: ${one.peek()!.v}`);
-    return name;
-  });
+  const names = objectNameList(c, st);
   const targets = names.filter((n) => findTable(st, n) !== undefined || (ifExists ? false : fail(`테이블 \`${n}\` 이 없습니다 (MySQL 1051)`)));
   if (st.fkChecks) {
     for (const child of st.model.tables) {
@@ -2466,12 +2479,12 @@ Run: `npx vitest run test/apply/object-stmt.test.ts` — Expected: FAIL
 
 ```ts
 // CREATE·DROP FUNCTION·PROCEDURE, DROP VIEW. 루틴 본문은 쓴 그대로 저장한다 (MySQL SHOW CREATE 도 그렇다)
-import { Cursor, splitTopLevel } from '../cursor';
+import type { Cursor } from '../cursor';
 import { routineNameKey } from '../diff';
 import type { RoutineKind } from '../model';
 import { parseRoutine } from '../parse-routine';
 import { routineReturns } from './normalize-mysql';
-import { objectName, type State } from './state';
+import { objectName, objectNameList, type State } from './state';
 import { fail } from './types';
 
 const CREATE_ROUTINE_RE = /^CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCEDURE)\b/i;
@@ -2510,13 +2523,7 @@ export function dropRoutine(st: State, c: Cursor): void {
 // DROP VIEW [IF EXISTS] v [, w …] [RESTRICT|CASCADE]. 하나라도 없으면(IF EXISTS 제외) 아무것도 지우지 않는다
 export function dropView(st: State, c: Cursor): void {
   const ifExists = c.acceptWord('IF', 'EXISTS');
-  const names = splitTopLevel(c.toks.slice(c.i)).map((toks) => {
-    const one = new Cursor(toks, c.src);
-    const name = objectName(one, st);
-    if (!one.acceptWord('RESTRICT')) one.acceptWord('CASCADE');
-    if (!one.done) fail(`알 수 없는 내용입니다: ${one.peek()!.v}`);
-    return name;
-  });
+  const names = objectNameList(c, st);
   const missing = names.filter((n) => !st.model.views.some((v) => v.name === n));
   if (missing.length && !ifExists) fail(`뷰 \`${missing.join('`, `')}\` 이 없습니다 (MySQL 1051)`);
   st.model.views = st.model.views.filter((v) => !names.includes(v.name));
