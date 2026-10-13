@@ -256,6 +256,15 @@ describe('CREATE TABLE — 기본 문자셋 binary 는 범위 밖', () => {
   });
 });
 
+describe('입력 모델은 바뀌지 않는다', () => {
+  it('CREATE·DROP·RENAME TABLE 을 섞어 적용해도 기준 모델 JSON 이 그대로다', () => {
+    const before = JSON.stringify(BASE);
+    const r = ok('CREATE TABLE tag (id INT PRIMARY KEY, member_id INT UNSIGNED, FOREIGN KEY (member_id) REFERENCES member (id));\nRENAME TABLE orders TO purchase;\nDROP TABLE tag;\nDROP TABLE purchase;');
+    expect(r.model.tables.map((t) => t.name)).toEqual(['member']);
+    expect(JSON.stringify(BASE)).toBe(before);
+  });
+});
+
 // 계약 (Task 5 재검토): addKeys 는 st.origins.provenance 에 인덱스 출처를 적으므로 모델에 들어가는 테이블에만 부르고,
 // moveOrigins 는 from 항목이 없는 표를 건너뛰므로 DROP TABLE 이 forgetOrigins 로 옛 항목을 지워야 같은 이름을 다시 쓸 때 낡은 출처가 남지 않는다
 describe('인덱스 출처(provenance) 계약', () => {
