@@ -3431,7 +3431,7 @@ export function replaceRenames(db: Db, baseId: number, targetId: number, renames
 ```ts
 // ALTER 스크립트를 기준 버전 모델에 적용해 새 버전을 만든다: core applyScript → printSqlDump(원문) → ingest (같은 트랜잭션에서
 // 파생 정보·rename 매핑을 쓰고, 완전성 판정은 기준 버전에서 물려받는다)
-import { applyScript, diffSchemas, MYSQL_DEFAULTS, parseSqlDump, printSqlDump, type ApplyDefaults, type RenameMapping, type SchemaDiff, type SchemaEvidence } from '@tdm/core';
+import { applyScript, diffSchemas, parseSqlDump, printSqlDump, type ApplyDefaults, type RenameMapping, type SchemaDiff, type SchemaEvidence } from '@tdm/core';
 import type { Db } from '../db/connection';
 import { AppError } from '../errors';
 import { saveDerivation } from '../repos/derivations';
@@ -3466,7 +3466,8 @@ export function applyAlter(db: Db, input: AlterInput): AlterResult {
   const base = loadVersion(db, input.baseId);
   if (base.version.sourceFormat !== 'sql') throw new AppError(400, 'MD 로 올린 버전에는 ALTER 를 적용할 수 없습니다 — SQL 덤프 버전을 기준으로 고르세요');
   if (base.staleReason) throw new AppError(400, `기준 버전 v${base.version.versionNo} 은 예전 파서로 저장된 모델이라 ALTER 를 적용할 수 없습니다 — 같은 원문을 다시 올린 버전을 기준으로 고르세요`);
-  const result = applyScript(base.model, input.script, { schemaName: base.version.schemaName, defaults: { ...MYSQL_DEFAULTS, ...input.defaults } });
+  // 기본값 병합(문자셋만 주면 그 문자셋의 기본 콜레이션)은 core 가 한다 — 여기서 MYSQL_DEFAULTS 와 먼저 합치면 문자셋만 준 요청이 1253 으로 실패한다
+  const result = applyScript(base.model, input.script, { schemaName: base.version.schemaName, ...(input.defaults ? { defaults: input.defaults } : {}) });
   if (!result.ok) {
     const { index, line, reason } = result.error;
     throw new AppError(400, index > 0 ? `${index}번째 문장 (줄 ${line}): ${reason}` : reason, { error: result.error });
