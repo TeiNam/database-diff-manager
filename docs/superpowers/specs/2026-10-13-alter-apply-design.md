@@ -48,6 +48,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 - `CREATE TABLE`의 컬럼 정의 안에 `PRIMARY KEY`, `UNIQUE [KEY]`, `KEY`(PK의 동의어)를 쓰면 인덱스로 바꾼다.
 - 컬럼 정의 안의 `REFERENCES …`는 MySQL처럼 무시한다.
 - `IF NOT EXISTS`는 대상이 이미 있으면 아무것도 하지 않는다. `IF EXISTS`는 대상이 없으면 아무것도 하지 않는다. MySQL의 경고 동작과 같다.
+- 실행 주석(`/*!NNNNN … */`, 번호 없는 `/*!`도)으로 감싼 문장은 안의 문장으로 읽는다. mysqldump 머리·꼬리의 `/*!40101 SET … */;`가 `SET`으로 무시된다.
 
 ### 3.2 거부하는 문장 (1차)
 
@@ -59,6 +60,8 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 | 문자셋·파티션 | `CONVERT TO CHARACTER SET`, `[DEFAULT] CHARACTER SET=`·`COLLATE=` 테이블 옵션, 파티션 절 전부(`PARTITION BY`, `ADD/DROP/REORGANIZE/COALESCE/TRUNCATE PARTITION`, `REMOVE PARTITIONING`) | 컬럼 상속과 행 이동 규칙이 복잡하다 |
 | FK로 이어진 타입 변경 | FK 컬럼 또는 FK가 참조하는 컬럼의 타입·문자셋·콜레이션을 바꾸는 `MODIFY`/`CHANGE` | MySQL이 거부하는 경우(3780)와 허용하는 경우를 1차에서는 가르지 않는다 |
 | 데이터·권한·기타 | `INSERT`·`UPDATE`·`DELETE`·`REPLACE`·`TRUNCATE`, `GRANT`, `CREATE TABLE … SELECT`, `CREATE TABLE … LIKE`, `CREATE/DROP TRIGGER·EVENT`, `ALTER DATABASE`, 그 밖에 표에 없는 문장 | 범위 밖 |
+| 정의 옵션 | FK의 `MATCH FULL\|SIMPLE` 절, 인덱스(`KEY`·`UNIQUE`·`PRIMARY KEY`) 정의의 `KEY_BLOCK_SIZE` | MySQL이 `MATCH`를 읽고 무시한다. 인덱스의 `KEY_BLOCK_SIZE`는 테이블에 `KEY_BLOCK_SIZE`가 있을 때만 저장되고 문장 순서에 따라 달라진다(8.0/8.4 실측) |
+| 날짜·시간 기본값의 비표준 꼴 | `DEFAULT '20200101'`, `'2020-1-1'`, `'2020-01-01T10:20:30'`, 숫자 리터럴(`DEFAULT 20200101`), 반올림되는 소수 초 | MySQL이 값을 다시 써서 저장한다. 표준 꼴(`YYYY-MM-DD[ HH:MM[:SS[.f]]]`, `[-]H:MM[:SS[.f]]`)만 다시 쓴다 |
 | InnoDB가 아닌 엔진 | `ENGINE=`이 InnoDB가 아닌 `CREATE TABLE`·`ALTER TABLE`, InnoDB가 아닌 기준 테이블을 바꾸는 문장 | 1차는 InnoDB만 지원한다(사용자 결정) |
 | 다른 스키마 | 다른 스키마를 한정한 이름(`other.t`), 다른 스키마로의 `USE` | 버전은 스키마 하나를 나타낸다. 현재 스키마 이름으로 한정한 경우(`cur.t`)는 허용한다 |
 
@@ -79,8 +82,9 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 - **기본값과 NULL:**
   - 숫자 리터럴은 따옴표로 감싸고 타입 자릿수에 맞춘다(`DEFAULT 0` → `decimal(12,4)`면 `'0.0000'`).
   - `NOW()`·`CURRENT_TIMESTAMP()`·`LOCALTIME`류는 `CURRENT_TIMESTAMP[(fsp)]`로 바꾼다. `ON UPDATE` 가 잘못되면 MySQL 1294 다.
-  - NULL 허용 컬럼에 기본값이 없으면 `DEFAULT NULL`을 붙인다. TEXT·BLOB 계열은 붙이지 않는다(명시한 `DEFAULT NULL`도 SHOW CREATE 에 보이지 않는다). JSON 은 붙인다(td-export 실출력 `json DEFAULT NULL`). GEOMETRY 계열은 시나리오로 확인한다.
+  - NULL 허용 컬럼에 기본값이 없으면 `DEFAULT NULL`을 붙인다. TEXT·BLOB 계열은 붙이지 않는다(명시한 `DEFAULT NULL`도 SHOW CREATE 에 보이지 않는다). JSON 은 붙인다(td-export 실출력 `json DEFAULT NULL`). GEOMETRY 계열도 NULL 허용이면 붙인다(8.0/8.4 실측, 시나리오 `column-geometry`).
   - 리터럴 기본값은 TEXT·BLOB·JSON·GEOMETRY 계열에 쓸 수 없다(MySQL 1101).
+  - 날짜·시간 기본값은 MySQL이 값을 다시 써서 저장한다(8.0/8.4 실측, 시나리오 `temporal-defaults`). `DATETIME DEFAULT '2020-01-01'`은 `'2020-01-01 00:00:00'`, `DATETIME(3) DEFAULT '2020-01-01 10:20:30'`은 `'2020-01-01 10:20:30.000'`, `TIME DEFAULT '12:34'`는 `'12:34:00'`이다. 표준 꼴만 다시 쓰고(3.2), 없는 날짜(`2020-02-30`)·`0000-00-00`·시각 범위 밖은 1067이다. `0000-00-00`은 `NO_ZERO_DATE`가 꺼진 `SQL_MODE`에서는 MySQL이 받지만 1차는 받지 않는다.
   - `timestamp`는 `explicit_defaults_for_timestamp=ON`(8.0 기본) 규칙을 따른다.
   - PRIMARY KEY에 들어간 컬럼은 NOT NULL이 되고, `DEFAULT NULL`은 사라진다. 다른 기본값은 남는다. `NULL`이나 `DEFAULT NULL`을 직접 쓴 컬럼이 PRIMARY KEY에 들어가면 1171이다(컬럼 안 `DEFAULT NULL PRIMARY KEY`만 1067).
   - AUTO_INCREMENT 컬럼은 `NULL`을 써도 NOT NULL이 된다. `DEFAULT NULL`은 받되 남지 않고, 다른 기본값은 1067이다. `ALTER COLUMN … SET DEFAULT 5`는 받지만 SHOW CREATE에 찍히지 않으므로 저장하지 않는다.
@@ -93,6 +97,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - 저장 표기는 `SHOW CREATE` 규칙을 따른다(8.0/8.4 실측). 컬럼에 `CHARACTER SET`이나 `COLLATE`를 하나라도 쓰면 둘 다 붙는다. 문자셋만 쓰면 그 문자셋의 기본 콜레이션, `COLLATE`만 쓰면 그 콜레이션의 문자셋이다. 둘 다 안 쓰면 테이블 기본을 물려받고, 콜레이션이 그 문자셋의 기본 콜레이션이 아닐 때만 `COLLATE`를 붙인다.
   - `CHARACTER SET binary`·`COLLATE binary`는 MySQL이 타입을 VARBINARY·BLOB으로 바꾸므로 1차에서 거부한다.
   - 새 테이블은 옵션에 쓴 문자셋·콜레이션을 쓰고, 없으면 2장의 스키마 기본값을 쓴다. 문자셋만 쓰면 그 문자셋의 기본 콜레이션, 콜레이션만 쓰면 그 콜레이션의 문자셋이다.
+  - 테이블 옵션 표기(8.0/8.4 실측): `SHOW CREATE TABLE`은 utf8mb4의 콜레이션은 늘 찍고(기본 `utf8mb4_0900_ai_ci`도), 그 밖의 문자셋은 콜레이션이 그 문자셋의 기본이면 `COLLATE`를 찍지 않는다. 예를 들어 `DEFAULT CHARSET=utf8`은 `DEFAULT CHARSET=utf8mb3`이고, `utf8_unicode_ci`는 `DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci`이다(시나리오 `create-table-charsets`·`schema-defaults-latin1`).
 - **자동 이름:**
   - 이름 없는 인덱스·UNIQUE는 첫 키 파트의 컬럼 이름을 쓴다. 이미 있으면 `_2`, `_3`…을 붙인다.
   - 이름 없는 FK는 `<테이블>_ibfk_<N>`이다. N은 문장 앞 FK 이름(그 문장에서 지우는 것 포함)의 최댓값+1부터, 이름 없이 더한 FK마다 1씩 는다. 직접 쓴 `_ibfk_N` 이름은 세지 않고, 겹치면 1826이다. 같은 문장에서 지운 FK와 같은 이름의 FK도 1826이다(다시 만들려면 문장을 둘로 나눈다).
@@ -104,6 +109,8 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
     - FK 이름이 `<테이블>_ibfk_N` 꼴이고 인덱스 이름이 FK의 첫 컬럼(`_N` 포함)이면 자동인지 알 수 없다. 그 인덱스를 지우거나 바꾸게 되는 문장은 거부하고 다시 추출하도록 안내한다.
     - 그 밖의 인덱스는 직접 만든 것으로 본다. `FOREIGN KEY ix_g (…)`로 이름을 정한 자동 인덱스, 그리고 기준 덤프나 앞선 업로드에서 FK가 이미 지워져 남은 자동 인덱스도 직접 만든 것으로 보는 한계가 있다.
   - 키 순서는 MySQL 규칙(PRIMARY, UNIQUE, 일반, FULLTEXT 무리)을 따르고, VIRTUAL 생성 컬럼·함수 파트가 든 키는 같은 무리 안에서 맨 뒤로 간다.
+  - 위 이름 규칙은 8.0/8.4 실측이고, 시나리오 `foreign-keys`·`keys-measured`·`alter-measured`·`error-fk-auto-index-name`이 고정한다.
+- **FK 옵션 표기:** `ON DELETE|UPDATE NO ACTION`은 저장하지 않는다. `SHOW CREATE`가 찍지 않기 때문이다(`RESTRICT`는 찍는다, 8.0/8.4 실측). MySQL Workbench 같은 ERD 도구가 늘 쓰는 꼴이다.
 - **연쇄 변경:**
   - 컬럼을 지우면 그 컬럼을 인덱스에서 빼고, 빈 인덱스는 지운다.
   - 같은 문장에서 지운 컬럼을 같은 이름으로 다시 더하면 키 파트가 새 컬럼을 따라간다. 타입 모양이 달라지면 MySQL이 옛 키 파트의 바이트 길이를 prefix로 넘기므로, 1차에서는 거부하고 다시 추출하도록 안내한다.
@@ -111,13 +118,17 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - `FIRST`·`AFTER`는 절 순서대로 하나씩 처리한다. 그 시점에 없는 컬럼을 `AFTER`로 가리키면 1054다.
   - `RENAME COLUMN`·`CHANGE`로 이름이 바뀌면 같은 테이블의 인덱스·FK와, 그 컬럼을 참조하는 다른 테이블의 FK `refColumns`를 바꾼다.
   - `RENAME TABLE`은 다른 테이블 FK의 `refTable`을 바꾼다. 뷰 본문은 바꾸지 않는다. MySQL도 바꾸지 않는다.
+  - 기존 CHECK(td-export 덤프에 있다, 추가는 3.2에서 거부):
+    - 8.0/8.4 실측: 컬럼을 지우면 그 컬럼만 쓰는 CHECK는 함께 사라진다(이름을 직접 붙인 것도, 같은 이름으로 다시 더해도 같다). 다른 컬럼도 쓰는 CHECK는 그 컬럼들을 모두 지워도 3959이고, 같은 문장에서 그 CHECK를 지우면 된다. 이름을 바꾸는 `RENAME COLUMN`·`CHANGE`는 하나의 컬럼만 쓰는 CHECK도 3959이다.
+    - `SHOW CREATE`는 CHECK를 이름 순(FK와 같은 소문자 코드 포인트 순)으로 찍는다. 테이블 이름을 바꿔 자동 이름 `<테이블>_chk_N`이 바뀌면 다시 정렬한다(시나리오 `check-columns`).
+  - 파티션된 기준 테이블(파티션 절 자체는 3.2에서 거부하지만 덤프에는 있다): 8.0/8.4 실측으로 파티션 식이 쓰는 컬럼을 지우거나 이름을 바꾸면 3855이고, PRIMARY KEY·UNIQUE가 파티션 컬럼을 (prefix 없이) 모두 포함하지 않으면 1503이다. 파티션 절은 그대로 둔다(시나리오 `partitioned-base`).
 - **루틴:**
-  - 본문은 쓴 그대로 저장한다. MySQL의 `SHOW CREATE FUNCTION`도 그렇다.
+  - 본문은 쓴 그대로 저장한다. MySQL의 `SHOW CREATE FUNCTION`도 그렇다. 다만 `DELIMITER`를 `;`가 아닌 것으로 바꾸고 `RETURN x + 1; //`처럼 끝에 `;`를 함께 쓰면 MySQL은 그 `;`를 본문에 넣지 않는다(8.0/8.4 실측: 공백이 끼어도 `;`가 여럿이어도 같고, 뒤에 주석이 따르는 `;`는 남는다). 같은 규칙으로 끝의 `;`를 뗀다(시나리오 `routine-terminator`).
   - `sqlMode`는 스크립트에서 그 문장 앞의 마지막 `SET [SESSION] SQL_MODE` 값을 쓴다. 없으면 MySQL 8.0/8.4 기본 모드(`ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`)를 쓴다. 모드 이름은 MySQL 순서로 정렬하고 중복을 지운다(SHOW CREATE 의 `sql_mode` 표기). 묶음 모드(`ANSI`·`TRADITIONAL`)는 거부하고 다시 추출하도록 안내한다.
   - DEFINER는 저장하지 않는다. 비교 대상이 아니다.
-  - 함수의 `RETURNS` 타입은 타입 규칙으로 정규화한다. 문자열 타입이면 MySQL처럼 ` CHARSET <스키마 기본 문자셋>`을 붙인다. `RETURNS` 안에 `CHARSET`·`COLLATE`를 직접 쓴 경우는 1차에서 거부한다.
+  - 함수의 `RETURNS` 타입은 타입 규칙으로 정규화한다. 문자열 타입이면 MySQL처럼 ` CHARSET <스키마 기본 문자셋>`을 붙이고, 스키마 기본 콜레이션이 그 문자셋의 기본(`utf8mb4_0900_ai_ci`·`latin1_swedish_ci`·`utf8mb3_general_ci` …)이 아니면 ` COLLATE <콜레이션>`도 붙인다(8.0/8.4 실측, 시나리오 `schema-defaults-unicode`). `RETURNS` 안에 `CHARSET`·`COLLATE`를 직접 쓴 경우는 1차에서 거부한다.
 - **테이블 옵션:**
-  - `ENGINE` 값은 MySQL 표기로 맞춘다(`innodb`→`InnoDB`). `ROW_FORMAT`은 대문자로 쓴다.
+  - `ENGINE` 값은 MySQL 표기로 맞춘다(`innodb`→`InnoDB`). `ROW_FORMAT`은 대문자로 쓴다. `ROW_FORMAT=DEFAULT`·`KEY_BLOCK_SIZE=0`은 옵션을 지운다(8.0/8.4 실측, 시나리오 `table-options`).
   - `COMMENT=''`이면 옵션을 지운다.
   - `AUTO_INCREMENT=n`은 비교에서 무시되므로 기준 값을 그대로 둔다.
   - InnoDB 테이블만 지원한다(사용자 결정). `ENGINE`을 InnoDB가 아닌 것으로 만들거나 바꾸는 문장, 그리고 InnoDB가 아닌 기준 테이블을 바꾸는 `ALTER TABLE`·`CREATE INDEX`·`DROP INDEX`는 거부하고 다시 추출하도록 안내한다. `DROP TABLE`·`RENAME TABLE`은 받는다. `ENGINE` 옵션이 없는 테이블은 InnoDB로 본다.
@@ -137,9 +148,12 @@ MySQL이 오류를 내는 다음 경우는 적용을 실패시킨다.
 - **키 파트:** TEXT·BLOB 키 파트에 prefix 길이가 없을 때(1170)
 - **NULL과 키:** PRIMARY KEY 컬럼에 NULL을 직접 쓸 때(1171). `ON DELETE`·`ON UPDATE SET NULL` FK의 컬럼이 NOT NULL이 될 때(1830). `ADD PRIMARY KEY`가 컬럼을 NOT NULL로 만드는 경우도 포함한다.
 - **한 문장의 두 번째 참조:** 한 문장에서 같은 컬럼을 두 번 바꿀 때(1054), 같은 컬럼을 두 번 지울 때(1091)
+- **CHECK:** 다른 컬럼도 쓰는 CHECK가 걸린 컬럼을 지울 때, CHECK가 쓰는 컬럼의 이름을 바꿀 때(3959)
+- **파티션:** 파티션 식이 쓰는 컬럼을 지우거나 이름을 바꿀 때(3855), PRIMARY KEY·UNIQUE가 파티션 컬럼을 모두 포함하지 않을 때(1503)
+- **날짜·시간 기본값:** 없는 날짜·시각, `0000-00-00`(1067)
 - **8.4 규칙:** 8.4만 거부하는 문장은 8.0에서도 거부하고, 메시지에 `MySQL 8.4 NNNN`으로 적는다. 예: FLOAT·DOUBLE AUTO_INCREMENT(1063), 고유 키가 아닌 키를 참조하는 FK(6125)
 
-MySQL의 모든 검사를 재현하지는 않는다. 화면 안내와 이 문서에 "실제 DB에 적용했을 때 MySQL이 거부할 수 있는 스크립트를 이 도구가 받아들일 수 있다"고 적는다. 예를 들어 키 길이 한도나 행 크기 한도 검사는 하지 않는다.
+MySQL의 모든 검사를 재현하지는 않는다. 화면 안내와 이 문서에 "실제 DB에 적용했을 때 MySQL이 거부할 수 있는 스크립트를 이 도구가 받아들일 수 있다"고 적는다. 예를 들어 키 길이 한도나 행 크기 한도 검사는 하지 않고, TIMESTAMP의 표현 범위(서버 시간대에 따라 달라진다)도 보지 않는다.
 
 ## 5. 구조
 
@@ -211,7 +225,7 @@ type ApplyResult =
 
 - **TDD:** 절마다 단위 테스트를 먼저 쓴다(`packages/core/test/apply/*.test.ts`).
 - **`test:mysql` ALTER 시나리오:**
-  - 위치는 `packages/core/test/fixtures/alter-scenarios/<이름>/`이고, 파일은 `base.sql`(td-export 형식)과 `script.sql`이다. 실패 시나리오에는 `expect-error.txt`(MySQL 오류 번호)를 둔다.
+  - 위치는 `packages/core/test/fixtures/alter-scenarios/<이름>/`이고, 파일은 `script.sql`(필수)과 `base.sql`(td-export 형식, 없으면 공용 `_base.sql`)이다. 실패 시나리오에는 `expect-error.txt`(MySQL 오류 번호)를 둔다. `only.txt`(`MySQL 8.4`처럼 그 버전에서만 실행)와 `defaults.json`(스키마 기본 문자셋·콜레이션, DB도 그 값으로 만든다)은 선택이다.
   - 성공 시나리오는 다음을 확인한다.
     - MySQL 8.0/8.4에 `base.sql`을 적용하고 `script.sql`을 mysql 클라이언트로 실행한 뒤, `SHOW CREATE` 결과를 덤프 파서로 읽는다.
     - `applyScript(parse(base), script)` 결과와 비교해 `generateDdl(diffSchemas(ours, mysql))`이 0문장이어야 한다.
