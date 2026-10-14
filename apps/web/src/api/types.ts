@@ -171,6 +171,11 @@ export type AlterResponse =
   | { status: 'preview'; applied: number; changes: AlterChange[]; renames: RenameMapping[] }
   | { status: 'ok' | 'duplicate'; versionId: number; versionNo: number; applied: number; changes: AlterChange[] };
 
+// 기준 버전 테이블의 DEFAULT CHARSET·COLLATE 최빈값 (서버 GET /versions/:id/alter-defaults). 알 수 있는 테이블이 없으면 null
+export interface AlterDefaultsSuggestion {
+  defaults: { charset: string; collation: string } | null;
+}
+
 export interface Derivation {
   baseVersionId: number | null;
   baseVersionNo: number;

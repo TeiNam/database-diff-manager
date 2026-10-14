@@ -5,25 +5,26 @@ import type { AlterChange, AlterRequest, AlterResponse, VersionSummary } from '.
 import { Icon } from '../../components/Icon';
 import { trapTab, useDialogFocus } from '../../hooks/useDialog';
 import s from '../upload/UploadDialog.module.css';
+import { readScriptFile } from './script-file';
+import { useSchemaDefaults } from './useSchemaDefaults';
 
-const MYSQL_DEFAULTS = { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' };
 const OP_TEXT: Record<AlterChange['op'], string> = { add: '추가', drop: '삭제', modify: '변경', rename: '이름 변경' };
 const KIND_TEXT: Record<AlterChange['kind'], string> = { table: '테이블', view: '뷰', function: '함수', procedure: '프로시저' };
-// 서버가 파일 이름을 .sql 로 끝나게 요구한다. 끌어다 놓기와 '모든 파일' 선택은 input 의 accept 필터를 거치지 않는다
-const SQL_FILE = /\.sql$/i;
 
 // 스키마의 SQL 버전에 ALTER 스크립트를 적용해 새 버전을 만든다 (미리보기 → 저장). versions: 최신 버전이 앞
 export function AlterDialog({ versions, onClose }: { versions: VersionSummary[]; onClose: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogFocus(dialogRef, onClose);
   const candidates = versions.filter((v) => v.sourceFormat === 'sql');
-  const last = versions.find((v) => v.derivedFrom)?.derivedFrom?.defaults ?? MYSQL_DEFAULTS;
   const [baseId, setBaseId] = useState(candidates[0]?.id);
+  // 고른 기준 버전이 지금 목록에 아직 있는지. 다른 곳에서 지워졌거나 목록이 다른 스키마의 것으로 바뀌었다면 없다 —
+  // 그때는 미리보기·저장을 막아, 화면에 보이는 버전과 요청을 보내는 버전이 어긋나지 않게 한다
+  const base = candidates.find((v) => v.id === baseId);
+  const isBaseGone = base === undefined && candidates.length > 0;
+  const defaults = useSchemaDefaults(versions, base?.id);
   const [script, setScript] = useState('');
   const [filename, setFilename] = useState<string>();
   const [note, setNote] = useState('');
-  const [charset, setCharset] = useState(last.charset);
-  const [collation, setCollation] = useState(last.collation);
   const [result, setResult] = useState<AlterResponse>();
   const [fileError, setFileError] = useState<string>();
   const alter = useApplyAlter();
@@ -35,27 +36,22 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
   };
   // 고르거나 끌어다 놓은 파일을 스크립트로 읽는다. 받지 못하면 이유를 알리고 지금 스크립트는 그대로 둔다
   const loadFile = async (file: File) => {
-    if (!SQL_FILE.test(file.name)) {
-      setFileError(`${file.name}: .sql 파일만 받습니다`);
+    const read = await readScriptFile(file);
+    if ('error' in read) {
+      setFileError(read.error);
       return;
     }
-    let text: string;
-    try {
-      text = await file.text();
-    } catch (error) {
-      setFileError(`${file.name}: 파일을 읽지 못했습니다${error instanceof Error && error.message ? ` (${error.message})` : ''}`);
-      return;
-    }
-    setScript(text);
+    setScript(read.text);
     setFilename(file.name);
     edited();
   };
   const submit = (dryRun: boolean) => {
-    if (baseId === undefined) return;
-    const body: AlterRequest = { script, dryRun, defaults: { charset: charset.trim(), collation: collation.trim() }, ...(filename ? { filename } : {}), ...(note.trim() ? { note: note.trim() } : {}) };
-    alter.mutate({ baseId, body }, { onSuccess: setResult });
+    if (!base) return;
+    const body: AlterRequest = { script, dryRun, defaults: { charset: defaults.charset.trim(), collation: defaults.collation.trim() }, ...(filename ? { filename } : {}), ...(note.trim() ? { note: note.trim() } : {}) };
+    alter.mutate({ baseId: base.id, body }, { onSuccess: setResult });
   };
-  const ready = baseId !== undefined && script.trim().length > 0 && !alter.isPending;
+  const ready = base !== undefined && script.trim().length > 0 && !alter.isPending && !defaults.isWaiting;
+  const preview = base && result?.status === 'preview' ? result : undefined;
   const saved = result && result.status !== 'preview' ? result : undefined;
   return (
     <div className={s.backdrop} role="presentation" onClick={onClose}>
@@ -65,16 +61,21 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
           <button type="button" className={s.iconBtn} aria-label="닫기" onClick={onClose}><Icon name="x" /></button>
         </header>
         {candidates.length === 0 && <p className={s.warn}>SQL 덤프로 올린 버전이 없습니다 — MD 버전에는 ALTER 를 적용할 수 없습니다</p>}
-        <fieldset className={s.row} aria-label="기준 버전과 스키마 기본값">
+        {/* 요청이 가는 동안에는 입력을 잠가, 보낸 값과 화면의 값이 어긋나지 않게 한다 (저장 직후 메모를 고치면 성공 문구 옆에 저장하지 않은 메모가 보인다) */}
+        <fieldset className={s.row} aria-label="기준 버전과 스키마 기본값" disabled={alter.isPending}>
           <label>기준 버전
-            <select value={baseId} aria-label="기준 버전" onChange={(e) => { setBaseId(Number(e.target.value)); edited(); }}>
+            <select value={base?.id ?? ''} aria-label="기준 버전" onChange={(e) => { setBaseId(Number(e.target.value)); edited(); }}>
+              {isBaseGone && <option value="" disabled>기준 버전을 고르세요</option>}
               {candidates.map((v) => <option key={v.id} value={v.id}>v{v.versionNo} · {v.sourceFilename}</option>)}
             </select>
           </label>
-          <label>스키마 기본 문자셋<input value={charset} aria-label="스키마 기본 문자셋" onChange={(e) => { setCharset(e.target.value); edited(); }} /></label>
-          <label>스키마 기본 콜레이션<input value={collation} aria-label="스키마 기본 콜레이션" onChange={(e) => { setCollation(e.target.value); edited(); }} /></label>
+          <label>스키마 기본 문자셋<input value={defaults.charset} aria-label="스키마 기본 문자셋" disabled={defaults.isWaiting} onChange={(e) => { defaults.changeCharset(e.target.value); edited(); }} /></label>
+          <label>스키마 기본 콜레이션<input value={defaults.collation} aria-label="스키마 기본 콜레이션" disabled={defaults.isWaiting} onChange={(e) => { defaults.changeCollation(e.target.value); edited(); }} /></label>
           <label>메모<input value={note} maxLength={500} aria-label="메모" onChange={(e) => setNote(e.target.value)} /></label>
         </fieldset>
+        {isBaseGone && <p role="alert" className={s.warn}>선택한 기준 버전이 목록에 없습니다 — 다른 곳에서 지웠을 수 있습니다. 기준 버전을 다시 고르세요</p>}
+        {defaults.isWaiting && <p className={s.warnLine}>기준 버전 테이블의 기본 문자셋을 읽는 중…</p>}
+        {defaults.error && <p role="alert" className={s.warn}>{defaults.error}</p>}
         <ScriptDropBox onFile={loadFile} />
         {fileError && <p role="alert" className={s.warn}>{fileError}</p>}
         <textarea className="mono" rows={10} spellCheck={false} aria-label="ALTER 스크립트" value={script} placeholder="ALTER TABLE member ADD COLUMN nick VARCHAR(20);"
@@ -83,10 +84,10 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
           받는 문장: ALTER·CREATE·DROP·RENAME TABLE, CREATE·DROP INDEX, CREATE·DROP FUNCTION·PROCEDURE, DROP VIEW. VIEW·CHECK·생성 컬럼·식 기본값·파티션·문자셋 변환은 td-export 로 다시 뽑아 올려 주세요.
           이 도구는 MySQL 의 모든 검사를 재현하지 않아, 실제 DB 에서는 거부될 스크립트를 받을 수 있습니다.
         </p>
-        {result?.status === 'preview' && (
+        {preview && (
           <ul className={s.results} aria-label="미리보기 결과">
-            <li className={s.ok}><b>문장 {result.applied}개 적용</b> <span>변경 객체 {result.changes.length}개</span></li>
-            {result.changes.map((c) => <li key={`${c.kind}:${c.name}`}>{KIND_TEXT[c.kind]} <span className="mono">{c.name}</span> {OP_TEXT[c.op]}</li>)}
+            <li className={s.ok}><b>문장 {preview.applied}개 적용</b> <span>변경 객체 {preview.changes.length}개</span></li>
+            {preview.changes.map((c) => <li key={`${c.kind}:${c.name}`}>{KIND_TEXT[c.kind]} <span className="mono">{c.name}</span> {OP_TEXT[c.op]}</li>)}
           </ul>
         )}
         {saved && <p role="status" className={s.ok}>{saved.status === 'ok' ? `v${saved.versionNo} 생성` : `v${saved.versionNo}와 내용이 같습니다`}</p>}
@@ -94,7 +95,7 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
         <footer className={s.foot}>
           <button type="button" className={s.btn} onClick={onClose}>닫기</button>
           <button type="button" className={s.btn} disabled={!ready} onClick={() => submit(true)}>미리보기</button>
-          <button type="button" className={`${s.btn} ${s.primary}`} disabled={!ready || result?.status !== 'preview'} onClick={() => submit(false)}>저장</button>
+          <button type="button" className={`${s.btn} ${s.primary}`} disabled={!ready || !preview} onClick={() => submit(false)}>저장</button>
         </footer>
       </div>
     </div>

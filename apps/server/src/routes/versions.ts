@@ -9,6 +9,7 @@ import { loadDerivation } from '../repos/derivations';
 import { deleteVersion, getSource, getVersionMeta, listVersions, loadVersion } from '../repos/versions';
 import { IdParams, NoteSchema, SafeFilename } from '../schemas';
 import { applyAlter } from '../services/alter';
+import { suggestAlterDefaults } from '../services/alter-defaults';
 
 const CharsetName = z.string().regex(/^\w{1,64}$/, '문자셋·콜레이션 이름은 영문·숫자·_ 만 쓸 수 있습니다');
 const AlterBody = z.object({
@@ -44,6 +45,13 @@ export function versionRoutes(app: FastifyInstance, ctx: AppContext): void {
     const derivation = loadDerivation(ctx.db, id);
     if (!derivation) throw new AppError(404, 'ALTER 적용으로 만든 버전이 아닙니다');
     return derivation;
+  });
+
+  // ALTER 적용 대화상자의 스키마 기본값 제안: 기준 버전 테이블의 DEFAULT CHARSET·COLLATE 최빈값. 알 수 있는 테이블이 없으면 defaults 는 null.
+  // /derivation 은 ALTER 로 만든 버전에만 있어(그 밖은 404) 아직 ALTER 를 적용한 적 없는 스키마의 기준 버전에는 쓸 수 없다
+  app.get('/versions/:id/alter-defaults', { onRequest: requireLogin }, async (req) => {
+    const { id } = IdParams.parse(req.params);
+    return { defaults: suggestAlterDefaults(loadVersion(ctx.db, id).model.tables) };
   });
 
   app.delete('/versions/:id', { onRequest: requireEditor }, async (req) => {
