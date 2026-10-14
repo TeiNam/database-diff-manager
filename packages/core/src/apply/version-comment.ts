@@ -9,7 +9,7 @@
 // 덤프 파서와 함께 쓰므로 그대로 두고, 문장 나누기가 알려 준 표지(ApplyStatement.marks)로 이 문장에서 MySQL 이 실행하는 글을 만든다. 문장 앞의 문장 없는 덩어리
 // (ApplyStatement.leading)와 마지막 문장 뒤(ApplySplit.trailing)의 표지도 본다 (리뷰 12·13회차). DELIMITER 줄의 인자 뒤는 mysql 클라이언트처럼 읽지 않는다 (리뷰 14회차 F3)
 import { lineOf } from '../cursor';
-import type { ApplyStatement, LexNotes, VersionMark } from '../parse-dump';
+import type { ApplyStatement, LexNotes, NestedComment, VersionMark } from '../parse-dump';
 import { isCreateRoutine } from './object-stmt';
 import { fail, RE_EXPORT } from './types';
 
@@ -34,10 +34,11 @@ const IN_STATEMENT: Place = { where: () => '', until: '문장 안에서' };
 const beforeStatement = (script: string, until: string): Place => ({ where: (at) => `앞 문장 뒤(줄 ${lineOf(script, at)})의 `, until });
 
 // 이 문장의 덩어리에서 MySQL 이 건너뛰는 실행 주석의 자리. 실행 여부가 버전에 따라 갈리면 거부하고, 실행하는 주석이 문장 끝까지 닫히지 않았으면 1064 다 (assertRunsClosed).
-// script: 문장을 나눈 원문
+// 실행하는 주석 안의 일반 주석도 거부한다 (assertNoNestedComment). script: 문장을 나눈 원문
 export function skippedComments(script: string, s: ApplyStatement): Region[] {
   const regions = s.marks.filter((m) => !runs(m)).map((m) => skippedRegion(script, m, s.offset + s.ddl.length, IN_STATEMENT));
   assertRunsClosed(s.marks, s.closes, IN_STATEMENT);
+  assertNoNestedComment(s.nested, IN_STATEMENT);
   return regions;
 }
 
@@ -47,21 +48,23 @@ export function skippedComments(script: string, s: ApplyStatement): Region[] {
 // 뒤 덩어리에서 닫힌 '/*!99999 ;' 줄바꿈 '*/;' 도 받았다). 마지막 덩어리(DELIMITER 줄 앞)는 이 문장 앞까지 본다 — DELIMITER 줄의 인자 뒤는 mysql 클라이언트처럼 문장 나누기가
 // 읽지 않아 표지가 없다 (리뷰 14회차 F3). 거부 안내는 표지가 있는 줄을 밝힌다 (Place)
 export function leadingSkippedComments(script: string, s: ApplyStatement): Region[] {
-  const { marks, closes, ends } = s.leading;
+  const { marks, closes, nested, ends } = s.leading;
   const closesOf = byChunk(closes, (at) => at, ends);
   const delimited = beforeStatement(script, '구분자까지');
   const beforeCommand = beforeStatement(script, 'DELIMITER 줄 앞에서');
-  return byChunk(marks, (m) => m.at, ends).flatMap((chunk, i) => {
+  const regions = byChunk(marks, (m) => m.at, ends).flatMap((chunk, i) => {
     const bound = ends[i] ?? s.offset;
     const place = i < ends.length ? delimited : beforeCommand;
-    const regions = chunk.flatMap((m) => {
+    const found = chunk.flatMap((m) => {
       const gate = gateOf(m, place);
       if (gate === 'either') assertSameEitherWay(script, m, bound, place);
       return gate === 'skip' ? [skippedRegion(script, m, bound, place)] : [];
     });
     assertRunsClosed(chunk, closesOf[i], place);
-    return regions;
+    return found;
   });
+  assertNoNestedComment(nested, delimited);
+  return regions;
 }
 
 // items(자리 순서)를 덩어리 끝(ends, 자리 순서)으로 나눈다: i 번째는 ends[i] 앞의 것, 마지막은 모든 끝 뒤의 것
@@ -180,6 +183,19 @@ function opensComment(script: string, content: number, close: number): boolean {
 
 const innerCommentReason = (m: VersionMark): string => `${commentName(m)} 안의 주석은 받지 않습니다 — ${RE_EXPORT}`;
 
+// 실행하는 실행 주석(어느 판이든 건너뛸 수 있는 번호가 아닌 것) 안에서 연 일반 주석 (리뷰 14회차 F1, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 '/*!' 를 연 줄에서
+// 그 뒤에 연 '/*' 를 둘째 '*/' 까지 주석으로 보고(첫 '*/' 는 '/*!' 만 닫는다 — add_line 의 ss_comment) 그동안 구분자·줄 주석을 보지 않으며, 8.0 기본(--skip-comments)은 그 글을
+// 지우고 보낸다. 서버와 렉서는 첫 '*/' 에서 닫아, 'ADD a INT /*!40101 , ADD b INT /* x */ , ADD c INT */ , ADD d INT' 은 8.0 클라이언트가 a·b·d, 8.4 클라이언트가 a·b·c·d 를
+// 더한다. 다음 줄에서 연 것은 두 클라이언트가 같지만 함께 거부한다 (보수적 — 서버도 실행 주석 안의 주석에 경고 1681 'Nested comment syntax is deprecated' 를 낸다).
+// 건너뛰는 실행 주석 안의 것은 원문으로 보는 opensComment 가 거부한다
+function assertNoNestedComment(nested: readonly NestedComment[], place: Place): void {
+  const found = nested.find((n) => !skippable(n.mark));
+  if (found) fail(place.where(found.mark.at) + nestedReason(found.mark));
+}
+
+const nestedReason = (m: VersionMark): string => `실행 주석 /*!${m.digits} 안의 주석('/* … */')은 받지 않습니다 — mysql 클라이언트가 판과 설정(--comments)에 따라 `
+  + `실행 주석과 같은 줄에서 연 주석을 둘째 '*/' 까지 지우고 보내거나 그대로 보내 MySQL 이 실행하는 글이 달라집니다 — ${RE_EXPORT}`;
+
 // 건너뛰는 실행 주석 안의 줄 주석 (리뷰 12회차 R12-3·Claude F3, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 서버는 첫 '*/' 까지 건너뛰지만 mysql 클라이언트는 '/*!' 안에서도
 // 줄 주석을 줄 끝까지 떼고 보내거나(8.0 기본) 그대로 보내(8.4 기본·--comments), 같은 스크립트가 판에 따라 1064 이거나 다른 DDL 을 실행한다. 렉서는 줄 주석으로 읽어 닫는
 // '*/' 와 뒤 DDL 을 삼킬 수 있다
@@ -197,9 +213,18 @@ export interface HiddenComment {
 // 8.0·8.4 가 모두 건너뛰는 것이면 어디에 있든(닫히지 않았으면 원문 끝까지), 판에 따라 갈리는 것이면 첫 '*/' 를 가릴 때만 거부한다 (문장 없는 덩어리와 같다). 안의 주석은 서버가
 // 닫는 '*/' 를 뒤로 밀어 그 '*/' 를 가린 줄 주석을 놓치므로 거부한다. 그 밖의 것은 MySQL 이 오류를 내도 앞 DDL 을 모두 적용한 뒤라 모델이 같아 받는다.
 // 번호를 먼저 보고 표지마다 첫 '*/' 까지만 훑는다 — 받은 것 안에는 '/*' 가 없어 다음 표지는 그 뒤에 있으므로 원문을 한 번만 훑는다 (리뷰 13회차 F1·R13-1 — 번호를 보기 전에
-// 표지마다 원문 끝까지 다시 훑어, 닫지 않은 표지가 가득한 1,000,000자 스크립트 하나가 50 초였다)
+// 표지마다 원문 끝까지 다시 훑어, 닫지 않은 표지가 가득한 1,000,000자 스크립트 하나가 50 초였다). 실행하는 실행 주석 안의 일반 주석도 거부한다 (리뷰 14회차 F1 — 렉서는 그 뒤의
+// 줄 주석에서 뒤 DDL 을 삼키는데, 8.0 클라이언트는 그 DDL 을 실행한다). 둘 다 있으면 앞의 표지의 것이다
 export function hiddenAfterLast(script: string, trailing: LexNotes): HiddenComment | undefined {
-  for (const m of trailing.marks) {
+  const hidden = hiddenSkipped(script, trailing.marks);
+  const nested = trailing.nested.find((n) => !skippable(n.mark));
+  if (nested && (!hidden || nested.mark.at < hidden.at)) return { at: nested.mark.at, reason: nestedReason(nested.mark) };
+  return hidden;
+}
+
+// 마지막 문장 뒤의 어느 판이든 건너뛸 수 있는 표지 가운데 렉서가 뒤 DDL 을 삼켰을 수 있는 첫 것 (hiddenAfterLast)
+function hiddenSkipped(script: string, marks: readonly VersionMark[]): HiddenComment | undefined {
+  for (const m of marks) {
     if (!skippable(m)) continue;
     const content = contentStart(m);
     const close = script.indexOf('*/', content);

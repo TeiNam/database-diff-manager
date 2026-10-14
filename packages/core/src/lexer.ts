@@ -24,6 +24,8 @@ export interface LexWatch {
   versioned(at: number, digits: string): void;
   // 열린 실행 주석을 닫는 '*/' 를 읽었다 (따옴표·주석 안의 것은 아니다): at 은 '*/' 의 원문 자리 (리뷰 13회차)
   closed(at: number): void;
+  // 열린 실행 주석 안에서 일반 블록 주석('/* … */' — '/*!'·'/*+' 는 아니다)을 열었다: at 은 그 '/*' 의 원문 자리 (리뷰 14회차 F1)
+  nested(at: number): void;
   // ASCII 가 아닌 공백(NBSP U+00A0·U+3000·U+FEFF … — JS 의 \s)을 토큰 사이 공백으로 건너뛰었다 (MySQL 은 이름의 글자로 읽는다). at 은 그 글자의 원문 자리
   space(at: number): void;
 }
@@ -59,6 +61,7 @@ export function* lexTokens(src: string, mode: LexMode = {}, start = 0): Generato
     if (versioned > 0 && src.startsWith('*/', i)) { mode.watch?.closed(i); i += 2; versioned--; continue; }
     const comment = commentEnd(src, i);
     if (comment >= 0) {
+      if (versioned > 0 && isPlainBlockComment(src, i)) mode.watch?.nested(i);
       i = comment;
       continue;
     }
@@ -101,6 +104,9 @@ function versionMarkEnd(src: string, i: number, mode: LexMode): number {
   mode.watch?.versioned(i, src.slice(i + 3, end));
   return end;
 }
+
+// i 자리의 일반 블록 주석: '/*' 이고 실행 주석('/*!')·힌트('/*+')가 아니다 — mysql 클라이언트는 이것만 주석으로 지우고(8.0 기본) 나머지 둘은 그대로 보낸다
+const isPlainBlockComment = (src: string, i: number): boolean => src.startsWith('/*', i) && src[i + 2] !== '!' && src[i + 2] !== '+';
 
 // i 자리에서 시작하는 주석(블록 '/* … */', '-- …', '# …')의 끝 바로 뒤 자리. 주석이 아니면 -1
 function commentEnd(src: string, i: number): number {

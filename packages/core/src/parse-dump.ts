@@ -56,12 +56,19 @@ export interface VersionMark {
   readonly digits: string;
 }
 
+// 실행 주석 안에서 연 일반 블록 주석 (ALTER 적용, 리뷰 14회차 F1): at 은 그 '/*' 의 원문 자리, mark 는 렉서가 그때 열려 있다고 본 가장 안쪽 실행 주석의 표지
+export interface NestedComment {
+  readonly at: number;
+  readonly mark: VersionMark;
+}
+
 // 원문의 한 구간에서 렉서가 알린 것: marks 는 렉서가 연 실행 주석 표지, spaces 는 렉서가 공백으로 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 R11-2·Claude F5),
-// closes 는 렉서가 실행 주석을 닫은 '*/' 의 원문 자리 (따옴표·주석 안의 것은 빠진다, 리뷰 13회차)
+// closes 는 렉서가 실행 주석을 닫은 '*/' 의 원문 자리 (따옴표·주석 안의 것은 빠진다, 리뷰 13회차), nested 는 실행 주석 안에서 연 일반 주석 (리뷰 14회차 F1)
 export interface LexNotes {
   readonly marks: readonly VersionMark[];
   readonly spaces: readonly number[];
   readonly closes: readonly number[];
+  readonly nested: readonly NestedComment[];
 }
 
 // 문장 앞(앞 문장 뒤부터)의 것: ends 는 그 안의 문장 없이 끝난 덩어리를 끝낸 구분자의 원문 자리 — 실행 주석이 덩어리 안에서 닫혔는지 본다 (리뷰 13회차)
@@ -119,19 +126,32 @@ interface ChunkWatch extends LexWatch {
 }
 
 // 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것을 넘긴다. 그 앞의 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 덩어리의 것과 가르고(leading — 문장 없는
-// 덩어리의 표지를 뒤 문장의 것으로 읽으면 '/*!80400 */;' 뒤의 문장을 거부한다), 마지막 문장 뒤의 것은 rest 가 넘긴다
+// 덩어리의 표지를 뒤 문장의 것으로 읽으면 '/*!80400 */;' 뒤의 문장을 거부한다), 마지막 문장 뒤의 것은 rest 가 넘긴다. 실행 주석 안의 일반 주석에는 렉서가 그때 열려 있다고 본
+// 가장 안쪽 표지를 붙인다 — 렉서처럼 표지마다 열고 '*/' 마다 가장 안쪽 것을 닫는다 (리뷰 14회차 F1)
 class ChunkLog implements ChunkWatch {
   private marks: VersionMark[] = [];
   private spaces: number[] = [];
   private closes: number[] = [];
+  private inner: NestedComment[] = [];
   private ends: number[] = [];
+  // 렉서가 열려 있다고 보는 표지 (가장 안쪽이 끝). DELIMITER 줄 뒤에서 렉서를 새로 읽혀도(afterCommand) 그 앞의 것은 남지만, 렉서는 새로 연 것만 닫고 그 안에서만 nested 를
+  // 알리므로 끝의 것은 늘 렉서의 가장 안쪽 것이다
+  private readonly open: VersionMark[] = [];
 
   versioned(at: number, digits: string): void {
-    this.marks.push({ at, digits });
+    const mark = { at, digits };
+    this.marks.push(mark);
+    this.open.push(mark);
   }
 
   closed(at: number): void {
     this.closes.push(at);
+    this.open.pop();
+  }
+
+  nested(at: number): void {
+    const mark = this.open[this.open.length - 1];
+    if (mark) this.inner.push({ at, mark });
   }
 
   space(at: number): void {
@@ -142,20 +162,28 @@ class ChunkLog implements ChunkWatch {
     this.ends.push(at);
   }
 
-  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'leading'> {
-    const before = (at: number): boolean => at < from;
-    const leading = { marks: this.marks.filter((m) => before(m.at)), spaces: this.spaces.filter(before), closes: this.closes.filter(before), ends: this.ends };
-    const taken = { marks: this.marks.filter((m) => !before(m.at)), spaces: this.spaces.filter((at) => !before(at)), closes: this.closes.filter((at) => !before(at)), leading };
+  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'nested' | 'leading'> {
+    const [leadMarks, marks] = splitAt(this.marks, (m) => m.at, from);
+    const [leadSpaces, spaces] = splitAt(this.spaces, (at) => at, from);
+    const [leadCloses, closes] = splitAt(this.closes, (at) => at, from);
+    const [leadNested, nested] = splitAt(this.inner, (n) => n.at, from);
+    const leading = { marks: leadMarks, spaces: leadSpaces, closes: leadCloses, nested: leadNested, ends: this.ends };
     this.marks = [];
     this.spaces = [];
     this.closes = [];
+    this.inner = [];
     this.ends = [];
-    return taken;
+    return { marks, spaces, closes, nested, leading };
   }
 
   rest(): LexNotes {
-    return { marks: this.marks, spaces: this.spaces, closes: this.closes };
+    return { marks: this.marks, spaces: this.spaces, closes: this.closes, nested: this.inner };
   }
+}
+
+// items(원문 자리 순서)를 from 앞의 것과 그 뒤의 것으로 가른다
+function splitAt<T>(items: readonly T[], at: (item: T) => number, from: number): [T[], T[]] {
+  return [items.filter((item) => at(item) < from), items.filter((item) => at(item) >= from)];
 }
 
 function scan<S extends DumpStatement>(text: string, lenient: boolean, make: MakeStatement<S>, watch?: ChunkWatch): DumpScan<S> {
