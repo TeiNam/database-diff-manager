@@ -15,6 +15,7 @@ import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, norma
 import { assertColumnCount, assertForeignKeyCount, assertKeyCount } from './limits';
 import { assertInnoDbTable, innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
 import { childTables, findColumn, isReferencedColumn, needTable, objectName, renameRefColumns, replaceTable, sameName, type State } from './state';
+import { assertZoneFreeDefault } from './session';
 import { renameTable } from './table-stmt';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type DefaultSpec, type Position } from './types';
 
@@ -97,7 +98,7 @@ function parseClause(c: Cursor, st: State): Clause[] {
   }
   if (c.acceptWord('DROP')) return [end(c, parseDrop(c))];
   if (c.acceptWord('RENAME')) return [end(c, parseRename(c, st))];
-  if (c.acceptWord('ALTER')) return [end(c, parseAlter(c))];
+  if (c.acceptWord('ALTER')) return [end(c, parseAlter(c, st))];
   return parseOptions(c);
 }
 
@@ -152,7 +153,7 @@ function parseRename(c: Cursor, st: State): Clause {
   return { k: 'renameTable', to: objectName(c, st) };
 }
 
-function parseAlter(c: Cursor): Clause {
+function parseAlter(c: Cursor, st: State): Clause {
   if (c.acceptWord('INDEX')) {
     const name = c.ident();
     if (c.acceptWord('INVISIBLE')) return { k: 'indexVisibility', name, invisible: true };
@@ -165,7 +166,7 @@ function parseAlter(c: Cursor): Clause {
   if (c.acceptWord('SET', 'DEFAULT')) {
     if (c.isOp('(')) return fail(`식 기본값 SET DEFAULT (…) 은 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
     const value = parseDefault(c);
-    return { k: 'alterColumn', old, set: (col, table) => setDefault(col, value, table) };
+    return { k: 'alterColumn', old, set: (col, table) => setDefault(st, col, value, table) };
   }
   if (c.acceptWord('DROP', 'DEFAULT')) return { k: 'alterColumn', old, set: dropDefault };
   if (c.acceptWord('SET', 'VISIBLE')) return { k: 'alterColumn', old, set: (col) => ({ ...col, invisible: false }) };
@@ -182,11 +183,12 @@ function withDefault(col: Column, value: string | undefined): Column {
 
 // ALTER COLUMN … SET DEFAULT 값 (MySQL 8.0.46·8.4.11 실측). TEXT·BLOB·JSON·GEOMETRY 는 NULL 이든 리터럴이든 1101 이다 (NOT NULL 이어도, 생성 컬럼이어도 다른 오류보다 먼저 — 컬럼 정의의
 // `DEFAULT NULL` 은 받지만 SET DEFAULT 는 아니다). 생성 컬럼(VIRTUAL·STORED)은 1221. AUTO_INCREMENT 컬럼은 값을 검증한 뒤 받지만 SHOW CREATE 에 기본값이 찍히지 않아 저장하지 않는다
-function setDefault(col: Column, value: DefaultSpec, table: TableCharset): Column {
+function setDefault(st: State, col: Column, value: DefaultSpec, table: TableCharset): Column {
   const base = baseType(col.type);
   if (NO_LITERAL_DEFAULT.has(base)) fail(`${base.toUpperCase()} 컬럼 \`${col.name}\` 에는 기본값을 쓸 수 없습니다 (MySQL 1101)`);
   if (col.generated) fail(`생성 컬럼 \`${col.name}\` 에는 DEFAULT 를 쓸 수 없습니다 (MySQL 1221)`);
   const normalized = normalizeDefault(value, col, table);
+  assertZoneFreeDefault(st, col.name, col.type, value);
   return withDefault(col, col.autoIncrement ? undefined : normalized);
 }
 
@@ -291,7 +293,7 @@ function arrangeColumns(st: State, before: Table, clauses: readonly Clause[], ch
   const list: Entry[] = before.columns.filter((col) => !dropped.has(col.name.toLowerCase())).map((col) => ({ from: col.name, col }));
   const moved = changeColumns(st, before, list, clauses, charset);
   for (const ch of clauses) {
-    if (ch.k === 'add') insertEntry(list, { col: finalizeColumn(ch.spec, charset) }, ch.pos);
+    if (ch.k === 'add') insertEntry(list, { col: finalizeIn(st, ch.spec, charset) }, ch.pos);
     else if (ch.k === 'modify' && moved.has(ch)) {
       const e = moved.get(ch)!;
       list.splice(list.indexOf(e), 1);
@@ -316,13 +318,20 @@ function changeColumns(st: State, before: Table, entries: Entry[], clauses: read
       // MODIFY·CHANGE 정의에는 AS 를 쓸 수 없으므로(파서가 거부한다) 생성 컬럼이면 일반 컬럼으로 바꾸는 절이다. STORED 는 바뀌지만 VIRTUAL 은 MySQL 이 거부한다 (실측 3106)
       if (e.col.generated && !e.col.generated.stored) fail(`VIRTUAL 생성 컬럼 \`${e.col.name}\` 은 일반 컬럼으로 바꿀 수 없습니다 — 생성 컬럼의 STORED 여부는 바꿀 수 없습니다 (MySQL 3106)`);
       if (!ch.rename && ch.spec.name !== e.col.name) fail(`MODIFY 에 쓴 이름 \`${ch.spec.name}\` 이 컬럼 \`${e.col.name}\` 과 대소문자가 다릅니다 — 이름을 바꾸려면 CHANGE 를 쓰세요`);
-      const next = finalizeColumn(ch.spec, charset);
+      const next = finalizeIn(st, ch.spec, charset);
       assertRetypeAllowed(st, before, e.col, next, charset);
       e.col = next;
       if (ch.pos) moved.set(ch, e);
     }
   }
   return moved;
+}
+
+// 컬럼 정의 → Column. 세션 time_zone 을 바꾼 뒤의 TIMESTAMP 리터럴 기본값은 받지 않는다 (assertZoneFreeDefault — 값 검사(1067)가 먼저다)
+function finalizeIn(st: State, spec: ColumnSpec, charset: TableCharset): Column {
+  const col = finalizeColumn(spec, charset);
+  assertZoneFreeDefault(st, spec.name, spec.type, spec.default);
+  return col;
 }
 
 function insertEntry(list: Entry[], e: Entry, pos: Position): void {
