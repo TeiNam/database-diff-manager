@@ -63,7 +63,7 @@ export function createTable(st: State, c: Cursor): void {
   const name = objectName(c, st);
   if (!c.isOp('(')) fail(`CREATE TABLE … LIKE·SELECT 는 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
   if (nameTaken(st, name)) {
-    if (ifNotExists) return; // MySQL 은 경고만 남기고 아무것도 하지 않는다
+    if (ifNotExists) return; // MySQL 은 경고만 남기고 아무것도 하지 않는다 (같은 덩어리에 뒤 문장이 있으면 applyStatement 가 먼저 거부했다)
     fail(`테이블 \`${name}\` 이 이미 있습니다 (MySQL 1050)`);
   }
   const items = splitList(c.parenTokens(), '테이블 정의').map((toks) => parseTableItem(new Cursor(toks, c.src)));

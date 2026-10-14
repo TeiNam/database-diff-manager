@@ -6,6 +6,8 @@ import { tdExport } from '../helpers';
 
 const base = parseSqlDump(tdExport('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\n')).model;
 const run = (script: string) => applyScript(base, script, { schemaName: 'shop' });
+// 구분자를 ';;' 로 바꾼 뒤 되돌리지 않은 스크립트의 머리: 뒤에 쓴 ';' 는 문장을 끝내지 않아 다음 ';;' 나 파일 끝까지가 한 덩어리다
+const NO_DELIMITER_RESET = 'DELIMITER ;;\nCREATE FUNCTION f1() RETURNS INT DETERMINISTIC RETURN 1;;\n';
 
 describe('applyScript — 문장 처리', () => {
   it('SET·USE·주석만 있으면 적용할 문장이 없다', () => {
@@ -68,7 +70,6 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
   });
 
   // 구분자를 바꾼 뒤(DELIMITER ;; 뒤 되돌리지 않음)나 클라이언트 명령 '\g' 로 문장 여럿이 한 덩어리가 되면, 첫 단어만 보고 무시하면 뒤 DDL 이 조용히 사라진다
-  const NO_DELIMITER_RESET = 'DELIMITER ;;\nCREATE FUNCTION f1() RETURNS INT DETERMINISTIC RETURN 1;;\n';
   it.each([
     'INSERT INTO t VALUES (1); ALTER TABLE t ADD COLUMN x INT;', 'START TRANSACTION; ALTER TABLE t ADD COLUMN x INT;', "GRANT SELECT ON shop.* TO 'app'@'%'; ALTER TABLE t ADD COLUMN x INT;",
     'TRUNCATE TABLE t; ALTER TABLE t ADD COLUMN x INT;', 'SET GLOBAL max_connections = 10; ALTER TABLE t ADD COLUMN x INT;', 'SET NAMES utf8mb4; ALTER TABLE t ADD COLUMN x INT;',
@@ -96,6 +97,56 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
   it('스키마에 영향을 주는 세션 변수와 식으로 쓴 세션 SQL_MODE 는 여전히 거부한다', () => {
     expect(run('SET default_storage_engine = MyISAM;\nALTER TABLE t ADD x INT;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining(RE_EXPORT) } });
     expect(run("SET sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_DATE', '');\nALTER TABLE t ADD x INT;")).toMatchObject({ ok: false, error: { index: 1 } });
+  });
+});
+
+// 루틴이 아닌 DDL 덩어리도 문장 하나만 받는다 (리뷰 2회차 I-1·M-6). mysql 클라이언트는 덩어리의 문장을 모두 실행한다 — 8.0.46·8.4.11 실측: DELIMITER $$ 를 되돌리지 않은 파일 끝의
+// 'CREATE TABLE IF NOT EXISTS member (…); ALTER TABLE member ADD COLUMN nick …; DROP TABLE orders;' 는 이미 있는 member 에 nick 을 더하고 orders 를 지우고, '… \g ALTER …' 도 둘 다 실행한다.
+// 첫 문장만 읽고 돌아가면 뒤 DDL 이 조용히 사라지고, 덩어리 안의 ';' 를 처리기마다 모르는 토큰으로 거부하면 'MySQL 1064' 처럼 읽혀 고칠 곳을 알 수 없다
+describe('applyScript — 구분자 덩어리 하나에 문장 하나', () => {
+  const MULTI = /^한 문장 뒤에 다른 문장이 이어져 있습니다 .*DELIMITER/;
+  const rejected = (r: ReturnType<typeof run>, index: number) => {
+    expect(r).toMatchObject({ ok: false, error: { index, reason: expect.stringMatching(MULTI) } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  };
+
+  it.each([
+    ['이미 있는 테이블의 CREATE TABLE IF NOT EXISTS', 'CREATE TABLE IF NOT EXISTS t (id INT); ALTER TABLE t ADD COLUMN x INT;'],
+    ['없는 테이블의 DROP TABLE IF EXISTS', 'DROP TABLE IF EXISTS zz; ALTER TABLE t ADD COLUMN x INT;'],
+    ['없는 뷰의 DROP VIEW IF EXISTS', 'DROP VIEW IF EXISTS v; ALTER TABLE t ADD COLUMN x INT;'],
+    ['없는 프로시저의 DROP PROCEDURE IF EXISTS', 'DROP PROCEDURE IF EXISTS p; ALTER TABLE t ADD COLUMN x INT;'],
+    ['없는 함수의 DROP FUNCTION IF EXISTS', 'DROP FUNCTION IF EXISTS nope; ALTER TABLE t ADD COLUMN x INT;'],
+    ['ALTER TABLE 둘', 'ALTER TABLE t ADD COLUMN x INT; ALTER TABLE t ADD COLUMN y INT;'],
+    ['테이블 옵션만 바꾸는 ALTER TABLE', "ALTER TABLE t COMMENT 'x'; DROP TABLE t;"],
+    ['CREATE INDEX', 'CREATE INDEX ix ON t (id); DROP TABLE t;'],
+    ['DROP INDEX', 'DROP INDEX `PRIMARY` ON t; DROP TABLE t;'],
+    ['RENAME TABLE', 'RENAME TABLE t TO u; DROP TABLE u;'],
+    ['CREATE TABLE', 'CREATE TABLE u (id INT); DROP TABLE t;'],
+  ])('%s 뒤에 문장이 이어지면 DELIMITER 안내와 RE_EXPORT 로 거부한다', (_name, chunk) => {
+    rejected(run(`${NO_DELIMITER_RESET}${chunk}`), 2);
+  });
+
+  it('바꾼 구분자 대신 ; 로 끝낸 문장이 다음 루틴과 한 덩어리가 되어도 같은 안내로 거부한다', () => {
+    rejected(run('DELIMITER $$\nDROP PROCEDURE IF EXISTS p;\nCREATE PROCEDURE p() BEGIN SELECT 1; END $$\nDELIMITER ;'), 1);
+  });
+
+  it.each([
+    'CREATE TABLE IF NOT EXISTS t (id INT) \\g ALTER TABLE t ADD COLUMN x INT;', 'ALTER TABLE t ADD COLUMN x INT \\g ALTER TABLE t ADD COLUMN y INT;',
+    'DROP TABLE IF EXISTS zz \\G', 'CREATE TABLE u (id INT)\\g',
+  ])('클라이언트 명령(\\g)이 든 DDL 덩어리도 거부한다: %s', (chunk) => {
+    rejected(run(chunk), 1);
+  });
+
+  it('끝에 ; 만 붙은 덩어리는 그 ; 를 떼고 적용한다 (구분자를 되돌리지 않은 파일 끝의 문장도 mysql 클라이언트가 실행한다, ;; 도 같다)', () => {
+    const r = run('DELIMITER $$\nCREATE PROCEDURE p0() BEGIN SELECT 1; END $$\nALTER TABLE t ADD COLUMN x INT;$$\nCREATE TABLE IF NOT EXISTS t (id INT);;$$\nUSE shop;$$\nCREATE INDEX ix ON t (x) ALGORITHM=INPLACE;$$\nALTER TABLE t ADD COLUMN y INT;\n');
+    expect(r).toMatchObject({ ok: true, applied: 5 });
+    if (r.ok) expect(r.model.tables[0].columns.map((c) => c.name)).toEqual(['id', 'x', 'y']);
+    if (r.ok) expect(r.model.tables[0].indexes.map((i) => i.name)).toEqual(['PRIMARY', 'ix']);
+  });
+
+  it('지원하지 않는 문장은 본문의 ; 와 상관없이 지원 범위 안내로 거부한다', () => {
+    const r = run('DELIMITER $$\nCREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW BEGIN SET NEW.id = 1; END $$\nDELIMITER ;');
+    expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('지원하지 않는 문장입니다') } });
   });
 });
 
