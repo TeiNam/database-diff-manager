@@ -303,6 +303,41 @@ describe('ALTER TABLE — 컬럼 정의 안의 PRIMARY KEY·UNIQUE', () => {
 
 // MySQL 8.0.46·8.4.11 실측: ALTER COLUMN … DROP DEFAULT 는 컬럼 종류와 상관없이 DEFAULT 절을 없앤다 (NULL 허용 컬럼도 `DEFAULT NULL` 이 사라진다).
 // 그 뒤 SET DEFAULT NULL 이면 `DEFAULT NULL` 이 다시 보인다
+// 함수 식 UNIQUE 키의 NULL 허용은 식에 따라 다르다 (IFNULL(a,0) 은 NOT NULL, NULLIF(a,0) 은 NULL 허용) — 짐작하지 않는다 (리뷰 1회차 F6).
+// 문장 앞부터 있던 키는 순서를 정하는 속성이 그대로면 원래 순서를 지키고, 새 키·바뀐 키의 자리가 그 NULL 허용에 달리면 RE_EXPORT 로 거부한다
+const fnBase = (keys: string, cols = '`a` int DEFAULT NULL') => parseSqlDump(tdExport(
+  `CREATE TABLE \`member\` (\n  \`id\` int NOT NULL,\n  ${cols},\n  PRIMARY KEY (\`id\`),\n  ${keys}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`)).model;
+const IFNULL_BASE = fnBase('UNIQUE KEY `uf` ((ifnull(`a`,0))),\n  UNIQUE KEY `ua` (`a`)');
+const NULLIF_BASE = fnBase('UNIQUE KEY `ub` (`b`),\n  UNIQUE KEY `uf` ((nullif(`a`,0)))', '`a` int NOT NULL,\n  `b` int DEFAULT NULL');
+const keyOrder = (base: SchemaModel, script: string) => {
+  const r = applyScript(base, script, { schemaName: 'shop' });
+  return r.ok ? r.model.tables[0].indexes.map((i) => i.name).join(' ') : r.error.reason;
+};
+
+describe('ALTER TABLE — 함수 식 UNIQUE 키의 순서', () => {
+  it('상관없는 ALTER 는 함수 식 UNIQUE 키를 다시 정렬하지 않는다 (IFNULL·NULLIF)', () => {
+    expect(keyOrder(IFNULL_BASE, 'ALTER TABLE member ADD c INT;')).toBe('PRIMARY uf ua');
+    expect(keyOrder(NULLIF_BASE, 'ALTER TABLE member ADD c INT;')).toBe('PRIMARY ub uf');
+    expect(keyOrder(IFNULL_BASE, "ALTER TABLE member COMMENT 'x', ADD INDEX ic (id);")).toBe('PRIMARY uf ua ic');
+  });
+
+  it('새 키의 자리가 함수 식의 NULL 허용과 상관없으면 받는다', () => {
+    expect(keyOrder(IFNULL_BASE, 'ALTER TABLE member ADD d INT NOT NULL, ADD UNIQUE KEY ud (d);')).toBe('PRIMARY ud uf ua');
+    // 바뀐 키라도 어느 쪽이든 순서가 같으면 받는다: a 가 NOT NULL 이 된 ua 는 VIRTUAL 인 uf 보다 늘 앞
+    expect(keyOrder(IFNULL_BASE, 'ALTER TABLE member MODIFY a INT NOT NULL;')).toBe('PRIMARY ua uf');
+  });
+
+  it.each([
+    ['NULL 허용 UNIQUE 를 새로 더함', IFNULL_BASE, 'ALTER TABLE member ADD c INT, ADD UNIQUE KEY uc (c);'],
+    ['식이 쓰는 컬럼의 정의가 바뀜', IFNULL_BASE, 'ALTER TABLE member MODIFY a BIGINT;'],
+    ['다른 키가 NULL 허용이 됨', fnBase('UNIQUE KEY `ub` (`b`),\n  UNIQUE KEY `uf` ((ifnull(`a`,0)))', '`a` int DEFAULT NULL,\n  `b` int NOT NULL'), 'ALTER TABLE member MODIFY b INT NULL;'],
+  ])('새 키·바뀐 키의 자리가 함수 식의 NULL 허용에 달리면 RE_EXPORT 로 거부한다: %s', (_name, base, script) => {
+    const reason = keyOrder(base, script);
+    expect(reason).toContain('NULL 허용');
+    expect(reason.endsWith(RE_EXPORT), reason).toBe(true);
+  });
+});
+
 // 부모 → 자식 참조 색인 (State.refTables, 리뷰 1회차 M-1): 부모를 바꾸는 문장이 모든 테이블을 훑지 않고 색인으로 자식 FK 를 찾는다.
 // 컬럼·테이블 이름을 바꾸거나 자식을 다시 만든 뒤에도 색인이 맞아야 MySQL 처럼 거부한다 (색인이 낡으면 참조되는 컬럼을 조용히 지운다)
 const REF_BASE = parseSqlDump(tdExport([

@@ -559,7 +559,7 @@ describe('ensureFkIndexes·addKeys — FK 자동 인덱스 이름 충돌과 지�
 
 // MySQL 8.0.46·8.4.11 실측: VIRTUAL 생성 컬럼이나 함수 식이 든 키(HA_VIRTUAL_GEN_KEY)는 같은 무리 안에서 뒤로 간다. 비교 순서는
 // UNIQUE(PRIMARY 포함): NULL 허용 컬럼이 없는 것 → PRIMARY → 길이(prefix) 없는 것 → VIRTUAL 이 없는 것 → 선언 순서 / 일반 인덱스: FULLTEXT 가 마지막 → VIRTUAL 이 없는 것 → 선언 순서.
-// STORED 생성 컬럼은 일반 컬럼과 같다. 함수 인덱스 식의 NULL 허용은 식이 쓰는 컬럼이 하나라도 NULL 허용이면 NULL 허용
+// STORED 생성 컬럼은 일반 컬럼과 같다. 함수 인덱스 식의 NULL 허용은 식에 따라 달라(IFNULL·NULLIF) 짐작하지 않는다 — 그 값에 따라 순서가 갈리는 새 키는 거부한다 (리뷰 1회차 F6)
 describe('sortIndexes — VIRTUAL 생성 컬럼·함수 인덱스', () => {
   // 키를 선언한 순서(키 줄 순서)대로 모델을 읽고 sortIndexes 가 MySQL 이 찍은 순서를 내는지 본다
   const modelOf = (keys: string[]): Table => {
@@ -598,13 +598,21 @@ describe('sortIndexes — VIRTUAL 생성 컬럼·함수 인덱스', () => {
     [['KEY `ka` (`a`)', 'KEY `kv` (`v`)', 'KEY `kf` (((`a` + 1)))'], 'PRIMARY ka kv kf'],
     [['KEY `kfa` (((`a` + 1)),`a`)', 'KEY `kaf` (`a`,((`a` + 1)))', 'KEY `ka` (`a`)'], 'PRIMARY ka kfa kaf'],
     [['FULLTEXT KEY `ft` (`b`)', 'KEY `kf` (((`a` + 1)))', 'KEY `ka` (`a`)'], 'PRIMARY ka kf ft'],
-    [['UNIQUE KEY `uf` (((`a` + 1)))', 'UNIQUE KEY `ua` (`a`)', 'UNIQUE KEY `uan` (`a_nn`)'], 'PRIMARY uan ua uf'], // 식이 NULL 허용 컬럼을 쓰면 NULL 허용
-    [['UNIQUE KEY `ufn` (((`a_nn` + 1)))', 'UNIQUE KEY `uvn` (`vn`)', 'UNIQUE KEY `uan` (`a_nn`)'], 'PRIMARY uan ufn uvn'], // NOT NULL 컬럼만 쓰는 식은 NOT NULL
-    [['UNIQUE KEY `ufn` (((`a_nn` + 1)))', 'UNIQUE KEY `uv` (`v`)', 'UNIQUE KEY `ua` (`a`)'], 'PRIMARY ufn ua uv'],
-    [['UNIQUE KEY `uvn` (`vn`)', 'UNIQUE KEY `ufn` (((`a_nn` + 1)))'], 'PRIMARY uvn ufn'], // VIRTUAL·함수 UNIQUE 끼리는 선언 순서
-    [['UNIQUE KEY `ufn` (((`a_nn` + 1)))', 'UNIQUE KEY `uvn` (`vn`)'], 'PRIMARY ufn uvn'],
+    // 함수 UNIQUE 의 NULL 허용을 몰라도 순서가 하나로 정해지는 경우 (VIRTUAL 인 NOT NULL UNIQUE 는 늘 앞, 컬럼 파트가 NULL 허용이면 키도 NULL 허용)
+    [['UNIQUE KEY `uvn` (`vn`)', 'UNIQUE KEY `ufn` (((`a_nn` + 1)))'], 'PRIMARY uvn ufn'],
+    [['UNIQUE KEY `ufa` (((`a_nn` + 1)),`a`)', 'UNIQUE KEY `uan` (`a_nn`)', 'UNIQUE KEY `uv` (`v`)'], 'PRIMARY uan ufa uv'], // 8.0.46·8.4.11 실측
   ])('선언 %j → %s', (keys, expected) => {
     expect(orderOf(keys)).toBe(expected);
+  });
+
+  // 새 키(문장 앞에 없던 키)끼리는 함수 UNIQUE 의 NULL 허용에 따라 순서가 갈리면 거부한다 (MySQL 실측: (a + 1) 은 NULL 허용이라 'uan ua uf', (a_nn + 1) 은 NOT NULL 이라 'uan ufn uvn')
+  it.each([
+    [['UNIQUE KEY `uf` (((`a` + 1)))', 'UNIQUE KEY `ua` (`a`)', 'UNIQUE KEY `uan` (`a_nn`)']],
+    [['UNIQUE KEY `ufn` (((`a_nn` + 1)))', 'UNIQUE KEY `uvn` (`vn`)', 'UNIQUE KEY `uan` (`a_nn`)']],
+    [['UNIQUE KEY `ufn` (((`a_nn` + 1)))', 'UNIQUE KEY `uv` (`v`)', 'UNIQUE KEY `ua` (`a`)']],
+    [['UNIQUE KEY `ufn` (((`a_nn` + 1)))', 'UNIQUE KEY `uvn` (`vn`)']],
+  ])('선언 %j: 함수 식의 NULL 허용을 짐작하지 않으므로 RE_EXPORT 로 거부한다', (keys) => {
+    expect(() => orderOf(keys)).toThrow(new RegExp(`NULL 허용.*${RE_EXPORT}$`));
   });
 
   it('이미 MySQL 순서인 목록은 그대로 두고, 입력 테이블은 바꾸지 않는다', () => {

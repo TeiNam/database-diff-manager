@@ -236,12 +236,13 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   const items = pick('key').map((x) => x.item);
   assertKeyCount(t.indexes.filter((i) => !isFlagged(flagged, i.name)).length + items.filter((i) => i.kind === 'index').length); // 버려지지 않는 키만 세어도 64개를 넘으면 1069
   const plan = planAutoKeys(t, items, flagged, shrunkIndexes(before, t, renames)); // 이 문장의 키(더한 키·DROP COLUMN 으로 줄어든 키)가 FK 자동 인덱스를 대신하는가
+  const existing = new Set(t.indexes); // 문장 앞부터 있던 키 (키 순서 — sortIndexes)
   t = addConstraints(st, before, t, items, plan); // 6) 키 추가와 FK 자동 인덱스
   assertTargetsKept(t, pick('indexVisibility').map((v) => v.name)); // 버려진 자동 인덱스에 ALTER INDEX 를 썼으면 1176
   t = enforcePrimaryKeyNotNull(t, explicitNullColumns(clauses)); // 7) PRIMARY KEY 컬럼 NOT NULL·검사·키 순서 8) 테이블 옵션
   checkNowNotNull(before, t, renamed);
   checkTable(st, t, renamed);
-  t = { ...t, indexes: sortIndexes(t) };
+  t = { ...t, indexes: sortIndexes(t, { before, existing, renames }) };
   syncIndexOrigins(st, before.name, t);
   syncProvenance(st, before.name, t, flagged);
   for (const o of pick('option')) t = { ...t, options: setOption(t.options, o.key, o.value) };

@@ -488,17 +488,65 @@ function keyLookup(t: Table): (columns: readonly string[]) => boolean {
 
 // MySQL 이 키를 저장하는 순서 (sql_table.cc sort_keys, 8.0.46·8.4.11 실측): UNIQUE(PRIMARY 포함) 먼저 — 그 안에서 NULL 허용 파트가 없는 것, PRIMARY,
 // 길이 있는 파트가 없는 것, VIRTUAL 이 아닌 것 순 — 그다음 일반 인덱스: FULLTEXT 가 아닌 것, VIRTUAL 이 아닌 것 순. 같은 무리 안은 원래 순서.
-// VIRTUAL 키: VIRTUAL 생성 컬럼이나 함수 식 파트가 하나라도 든 키 (STORED 생성 컬럼은 일반 컬럼과 같다). 함수 식 파트가 NULL 허용인지는 쓰는 컬럼 중
-// NULL 허용이 있는지로 본다 (IFNULL 처럼 NULL 을 없애는 식은 구분하지 못하는 한계)
-export function sortIndexes(t: Table): Index[] {
-  const nullable = (p: IndexPart) =>
-    (p.column === undefined ? quotedIdentifiers(p.expr ?? '') ?? [] : [p.column]).some((n) => findColumn(t, n)?.nullable === true);
-  const virtual = (p: IndexPart) => p.column === undefined || findColumn(t, p.column)?.generated?.stored === false;
-  const rank = (i: Index): number[] => {
-    const isVirtual = i.parts.some(virtual) ? 1 : 0;
-    if (i.kind !== 'PRIMARY' && i.kind !== 'UNIQUE') return [1, i.kind === 'FULLTEXT' ? 1 : 0, isVirtual, 0, 0];
-    return [0, i.parts.some(nullable) ? 1 : 0, i.kind === 'PRIMARY' ? 0 : 1, i.parts.some((p) => p.length !== undefined) ? 1 : 0, isVirtual];
+// VIRTUAL 키: VIRTUAL 생성 컬럼이나 함수 식 파트가 하나라도 든 키 (STORED 생성 컬럼은 일반 컬럼과 같다).
+// 함수 식 파트의 NULL 허용은 식에 따라 다르므로 짐작하지 않는다 (IFNULL(a,0) 은 NOT NULL, NULLIF(a,0) 은 NULL 허용 — 리뷰 1회차 F6): 컬럼 파트에 NULL 허용이 있으면
+// NULL 허용이고, 아니면 모른다. 모르는 값에 따라 순서가 갈리는 두 키는 둘 다 문장 앞부터 있던 키이고 순서를 정하는 속성이 그대로면 원래 순서를 지킨다 (MySQL 이 정렬한
+// 목록이다). 그 밖에는 MySQL 과 같은 순서를 정할 수 없어 RE_EXPORT 로 거부한다. ctx 가 없으면(CREATE TABLE) 모든 키가 새 키다
+export interface KeyOrderContext {
+  readonly before: Table; // 문장 앞 테이블
+  readonly existing: ReadonlySet<Index>; // t.indexes 가운데 문장 앞부터 있던 키 (객체 그대로)
+  readonly renames: readonly { old: string; to: string }[]; // 이 문장의 RENAME INDEX (쓴 차례)
+}
+
+const UNKNOWN_NULL = -1;
+type KeyRank = number[];
+
+export function sortIndexes(t: Table, ctx?: KeyOrderContext): Index[] {
+  const keys = t.indexes.map((i, n) => ({ i, n, r: keyRank(t, i) }));
+  const stable = memo((i: Index) => ctx !== undefined && ctx.existing.has(i) && orderShape(ctx.before, indexBefore(ctx, i)) === orderShape(t, i));
+  const order = (a: (typeof keys)[number], b: (typeof keys)[number]): number => {
+    const outcomes = rankOptions(a.r).flatMap((ra) => rankOptions(b.r).map((rb) => Math.sign(compareRanks(ra, rb) || a.n - b.n)));
+    if (outcomes.every((o) => o === outcomes[0])) return outcomes[0];
+    if (stable(a.i) && stable(b.i)) return Math.sign(a.n - b.n);
+    return fail(`UNIQUE 키 \`${a.i.name}\`·\`${b.i.name}\` 의 순서가 함수 식의 NULL 허용 여부에 달려 MySQL 과 같은 키 순서를 정할 수 없습니다 (식의 NULL 허용은 짐작하지 않습니다) — ${RE_EXPORT}`);
   };
-  const cmp = (a: number[], b: number[]) => a.reduce((r, x, k) => r || x - b[k], 0);
-  return t.indexes.map((i, n) => ({ i, n, r: rank(i) })).sort((a, b) => cmp(a.r, b.r) || a.n - b.n).map((x) => x.i);
+  // 모르는 값이 든 키는 모든 키와 먼저 견준다 — 거부 여부가 정렬이 어떤 쌍을 견주는지에 달리지 않게
+  for (const a of keys) if (a.r[1] === UNKNOWN_NULL) for (const b of keys) if (b !== a) order(a, b);
+  return keys.sort(order).map((x) => x.i);
+}
+
+function keyRank(t: Table, i: Index): KeyRank {
+  const isVirtual = i.parts.some((p) => p.column === undefined || findColumn(t, p.column)?.generated?.stored === false) ? 1 : 0;
+  if (i.kind !== 'PRIMARY' && i.kind !== 'UNIQUE') return [1, i.kind === 'FULLTEXT' ? 1 : 0, isVirtual, 0, 0];
+  const nullable = i.parts.some((p) => p.column !== undefined && findColumn(t, p.column)?.nullable === true) ? 1 : i.parts.some((p) => p.column === undefined) ? UNKNOWN_NULL : 0;
+  return [0, nullable, i.kind === 'PRIMARY' ? 0 : 1, i.parts.some((p) => p.length !== undefined) ? 1 : 0, isVirtual];
+}
+
+const rankOptions = (r: KeyRank): KeyRank[] => (r[1] === UNKNOWN_NULL ? [0, 1].map((n) => r.map((x, k) => (k === 1 ? n : x))) : [r]);
+const compareRanks = (a: KeyRank, b: KeyRank): number => a.reduce((d, x, k) => d || x - b[k], 0);
+
+// 순서를 정하는 키 속성: 파트마다 컬럼의 타입·NULL 허용·생성 컬럼 여부·길이, 식 파트는 식과 식이 쓰는 컬럼의 정의 (식의 NULL 허용은 그 컬럼에 달렸다).
+// 함수 인덱스가 쓰는 컬럼은 지우거나 이름을 바꿀 수 없어 (3837) 같은 이름으로 찾는다
+function orderShape(t: Table, i: Index | undefined): string {
+  if (!i) return '';
+  const column = (name: string) => {
+    const c = findColumn(t, name);
+    return c && [c.type, c.nullable, c.generated?.stored ?? null];
+  };
+  return JSON.stringify([i.kind, i.parts.map((p) => (p.column === undefined ? [p.expr, [...exprColumns(p.expr ?? '')].map(column)] : [column(p.column), p.length !== undefined]))]);
+}
+
+// 지금 키의 문장 앞 정의: RENAME INDEX 를 거꾸로 따라가 문장 앞 이름으로 찾는다
+function indexBefore(ctx: KeyOrderContext, i: Index): Index | undefined {
+  let name = i.name;
+  for (const r of [...ctx.renames].reverse()) if (sameName(r.to, name)) name = r.old;
+  return ctx.before.indexes.find((b) => sameName(b.name, name));
+}
+
+function memo<K, V>(fn: (key: K) => V): (key: K) => V {
+  const cache = new Map<K, V>();
+  return (key) => {
+    if (!cache.has(key)) cache.set(key, fn(key));
+    return cache.get(key)!;
+  };
 }
