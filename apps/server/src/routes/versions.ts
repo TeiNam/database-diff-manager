@@ -35,6 +35,7 @@ const AlterBody = z.object({
   dryRun: z.boolean().optional(),
   defaults: z.object({ charset: CharsetName.optional(), collation: CharsetName.optional() }).optional(),
   expectedBase: PreviewBaseBody.optional(), // 저장(dryRun 아님)에는 꼭 있어야 한다 — 서비스(applyAlter)가 확인한다
+  allowHistoricalBase: z.boolean().optional(), // 최신 SQL 버전이 아닌 기준 버전에 저장한다 (사용자가 옛 버전을 직접 고른 저장만)
 });
 
 export function versionRoutes(app: FastifyInstance, ctx: AppContext): void {
