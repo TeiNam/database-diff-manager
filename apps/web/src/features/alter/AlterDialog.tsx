@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState, type DragEvent } from 'react';
 import { ApiError } from '../../api/client';
-import { useApplyAlter, useIsVersionMissing } from '../../api/hooks';
-import type { AlterChange, AlterRequest, AlterResponse, VersionSummary } from '../../api/types';
+import { useApplyAlter, useIsVersionMissing, useRefreshVersions } from '../../api/hooks';
+import type { AlterChange, AlterRequest, AlterResponse, VersionFingerprint, VersionSummary } from '../../api/types';
 import { Icon } from '../../components/Icon';
 import { trapTab, useDialogFocus } from '../../hooks/useDialog';
 import s from '../upload/UploadDialog.module.css';
@@ -10,6 +10,9 @@ import { useSchemaDefaults } from './useSchemaDefaults';
 
 const OP_TEXT: Record<AlterChange['op'], string> = { add: '추가', drop: '삭제', modify: '변경', rename: '이름 변경' };
 const KIND_TEXT: Record<AlterChange['kind'], string> = { table: '테이블', view: '뷰', function: '함수', procedure: '프로시저' };
+const HTTP_CONFLICT = 409; // 서버가 알려 주는 '미리보기 뒤에 기준 버전이 바뀌었다'
+// 서버의 409 메시지와 같은 문구다 — 어느 쪽이 먼저 알아채도 같은 안내가 나온다
+const BASE_CHANGED_TEXT = '기준 버전이 바뀌었습니다 — 미리보기 뒤에 다른 곳에서 지우고 다시 올렸을 수 있습니다. 미리보기를 다시 실행하세요';
 
 // 응답을 좌우하는 입력 (메모는 결과에 영향이 없어 뺀다). 미리보기는 이 입력으로 낸 것이어야 저장할 수 있다
 interface RequestInputs {
@@ -33,6 +36,12 @@ interface AwaitedBase {
 const isSameInputs = (a: RequestInputs, b: RequestInputs | undefined) =>
   b !== undefined && a.baseId === b.baseId && a.script === b.script && a.charset === b.charset && a.collation === b.collation;
 
+// 미리보기를 낸 기준 버전(서버가 돌려준 지문)이 목록의 이 버전인지. ID 만으로는 알 수 없다 — 가장 큰 ID 의 버전을 지우면 다른 업로드가 그 ID 를 다시 쓴다.
+// 스키마와 버전 번호(지워도 다시 쓰지 않는다)를 본다. 모델 해시는 목록에 없어 서버가 저장할 때 확인한다 (어긋나면 409).
+// 지문이 없는 응답은 어느 버전인지 알 수 없으니 같다고 보지 않는다
+const isSameBase = (fingerprint: VersionFingerprint | undefined, version: VersionSummary) =>
+  fingerprint?.schemaId === version.schemaId && fingerprint.versionNo === version.versionNo;
+
 // 스키마의 SQL 버전에 ALTER 스크립트를 적용해 새 버전을 만든다 (미리보기 → 저장). versions: 최신 버전이 앞
 export function AlterDialog({ versions, onClose }: { versions: VersionSummary[]; onClose: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -43,14 +52,15 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
   // 새 버전은 목록을 다시 받아야 보이는데, 그 전에 옛 기준 버전으로 미리보기를 내면 새 버전의 변경을 건너뛰므로 그동안은 미리보기·저장을 막는다.
   // 내용이 같은 기존 버전도 같다 — 다른 사용자·탭이 방금 만든 버전이면 이 대화상자가 받아 둔 목록에는 아직 없다
   const [awaitedBase, setAwaitedBase] = useState<AwaitedBase>();
-  const nextBase = candidates.find((v) => v.id === awaitedBase?.id);
+  // ID 만으로 찾지 않는다: 저장한 버전이 지워진 뒤 같은 ID 로 올라온 다른 버전(버전 번호가 다르다)으로 기준 버전을 옮기면 안 된다
+  const nextBase = candidates.find((v) => awaitedBase !== undefined && v.id === awaitedBase.id && v.versionNo === awaitedBase.versionNo);
   if (nextBase) {
     setBaseId(nextBase.id);
     setAwaitedBase(undefined);
   }
   // 목록을 다시 받아 마쳤는데도 기다리던 버전이 없다 (목록을 받지 못해 옛 목록이 남았거나, 그 사이 지워졌다). 기다려도 오지 않으니 알리고,
   // 옛 기준 버전으로 이어 쓰게 하지는 않는다 — 방금 저장한 변경이 빠진 결과가 나온다
-  const missingBase = useIsVersionMissing(versions[0]?.schemaId, awaitedBase?.id) ? awaitedBase : undefined;
+  const missingBase = useIsVersionMissing(versions[0]?.schemaId, awaitedBase?.id, awaitedBase?.versionNo) ? awaitedBase : undefined;
   // 고른 기준 버전이 지금 목록에 아직 있는지. 다른 곳에서 지워졌거나 목록이 다른 스키마의 것으로 바뀌었다면 없다 —
   // 그때는 미리보기·저장을 막아, 화면에 보이는 버전과 요청을 보내는 버전이 어긋나지 않게 한다
   const base = candidates.find((v) => v.id === baseId);
@@ -60,8 +70,11 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
   const [filename, setFilename] = useState<string>();
   const [note, setNote] = useState('');
   const [outcome, setOutcome] = useState<Outcome>();
+  // 미리보기를 낸 기준 버전이 지금 고른 기준 버전과 달라 미리보기를 지웠다 (다른 곳에서 지우고 같은 ID 로 다시 올린 경우)
+  const [isBaseChanged, setIsBaseChanged] = useState(false);
   const [fileError, setFileError] = useState<string>();
   const alter = useApplyAlter();
+  const refreshVersions = useRefreshVersions();
   // 요청(미리보기·저장)이 가는 동안은 입력을 잠근다
   const isLocked = alter.isPending;
   // 파일 읽기처럼 비동기로 끝나는 변경이 도착했을 때의 잠금 상태 (그 변경이 든 클로저는 읽기를 시작한 렌더의 것이다)
@@ -73,12 +86,20 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
   // 미리보기는 그것을 낸 입력과 지금 입력이 같을 때만 남긴다. 직접 고칠 때만 지우면 안 된다 — 기본값은 목록을 다시 받을 때도 저절로 바뀌고
   // (다른 곳에서 ALTER 를 저장·삭제하면 제안 값이 달라진다), 그러면 미리보기를 낸 값과 다른 값으로 저장된다. 한 번 지운 미리보기는 입력이 되돌아와도 되살리지 않는다
   if (outcome?.response.status === 'preview' && !isSameInputs(outcome.inputs, inputs)) setOutcome(undefined);
+  const preview = outcome?.response.status === 'preview' ? outcome.response : undefined;
+  // 입력이 같아도 미리보기를 낸 기준 버전(서버 지문)이 지금 고른 버전과 다르면 버린다. 입력은 ID 로만 기준 버전을 가리키는데, 목록을 다시 받았을 때
+  // 같은 ID 가 다른 버전을 가리킬 수 있다. 이 버전에 그대로 저장하면 미리보기와 다른 모델에 적용된다
+  if (preview && base && !isSameBase(preview.base, base)) {
+    setOutcome(undefined);
+    setIsBaseChanged(true);
+  }
   // 입력을 바꾸는 변경은 모두 여기를 거친다. 이전 미리보기·결과·오류는 새 입력과 맞지 않으므로 함께 지운다.
   // 요청이 가는 동안에는 바꾸지 않고 false 를 돌려준다: reset 은 진행 중인 요청의 완료 처리를 떼어 내, 요청은 가는데 결과가 화면에 오지 않고 잠금이 풀린다 (저장을 한 번 더 할 수 있다)
   const edit = (apply: () => void): boolean => {
     if (isLockedNow.current) return false;
     apply();
     setOutcome(undefined);
+    setIsBaseChanged(false);
     setFileError(undefined);
     alter.reset();
     return true;
@@ -98,18 +119,36 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
   };
   const finish = (response: AlterResponse, requested: RequestInputs) => {
     setOutcome({ response, inputs: requested });
-    if (response.status === 'preview') return;
+    if (response.status === 'preview') {
+      // 서버가 본 기준 버전이 화면 목록의 것과 다르면 목록이 낡은 것이다. 이 미리보기는 위에서 버려지니, 목록을 다시 받아 기준 버전을 맞춘다
+      if (base && !isSameBase(response.base, base)) refreshVersions();
+      return;
+    }
     // 새 버전('ok')도 내용이 같은 기존 버전('duplicate')도 목록에 나타나기를 기다린다. 목록에 이미 있는지는 여기서 가리지 않는다 —
     // 이 함수는 저장을 보낸 렌더의 것이라 그때 받아 둔 목록만 보인다. 이미 있다면 위에서 바로 기준 버전을 옮긴다
     setAwaitedBase({ id: response.versionId, versionNo: response.versionNo });
   };
   const submit = (dryRun: boolean) => {
     if (!inputs) return;
-    const body: AlterRequest = { script, dryRun, defaults: { charset: inputs.charset, collation: inputs.collation }, ...(filename ? { filename } : {}), ...(note.trim() ? { note: note.trim() } : {}) };
-    alter.mutate({ baseId: inputs.baseId, body }, { onSuccess: (response) => finish(response, inputs) });
+    // 저장은 미리보기가 돌려준 기준 버전 지문을 함께 보낸다 — 서버가 그 버전이 지금도 그대로인지 확인한다
+    const expectedBase = dryRun ? undefined : preview?.base;
+    if (!dryRun && !expectedBase) return;
+    const body: AlterRequest = {
+      script, dryRun, defaults: { charset: inputs.charset, collation: inputs.collation },
+      ...(expectedBase ? { expectedBase } : {}), ...(filename ? { filename } : {}), ...(note.trim() ? { note: note.trim() } : {}),
+    };
+    setIsBaseChanged(false);
+    alter.mutate({ baseId: inputs.baseId, body }, {
+      onSuccess: (response) => finish(response, inputs),
+      onError: (error) => {
+        // 미리보기 뒤에 기준 버전이 바뀌었다. 그 미리보기는 지우고 (메시지는 아래 오류 줄에 나온다) 목록을 다시 받아 화면의 기준 버전을 서버의 것에 맞춘다
+        if (!(error instanceof ApiError && error.status === HTTP_CONFLICT)) return;
+        setOutcome(undefined);
+        refreshVersions();
+      },
+    });
   };
   const ready = base !== undefined && script.trim().length > 0 && !isLocked && !defaults.isWaiting && awaitedBase === undefined;
-  const preview = outcome?.response.status === 'preview' ? outcome.response : undefined;
   const saved = outcome && outcome.response.status !== 'preview' ? outcome.response : undefined;
   return (
     <div className={s.backdrop} role="presentation" onClick={onClose}>
@@ -136,6 +175,7 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
           <label>메모<input value={note} maxLength={500} aria-label="메모" onChange={(e) => { if (!isLockedNow.current) setNote(e.target.value); }} /></label>
         </fieldset>
         {isBaseGone && <p role="alert" className={s.warn}>선택한 기준 버전이 목록에 없습니다 — 다른 곳에서 지웠을 수 있습니다. 기준 버전을 다시 고르세요</p>}
+        {isBaseChanged && <p role="alert" className={s.warn}>{BASE_CHANGED_TEXT}</p>}
         {missingBase && (
           <p role="alert" className={s.warn}>
             v{missingBase.versionNo} 버전을 새로 받은 목록에서 찾지 못했습니다 — 목록을 다시 받지 못했거나 다른 곳에서 지웠을 수 있습니다.

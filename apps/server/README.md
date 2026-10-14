@@ -54,7 +54,7 @@ All paths are under `/api`. Requests that change state must include the `X-Reque
 | POST | `/uploads` (multipart: `meta` JSON + `files`) | admin, dba |
 | GET | `/versions/:id`, `/versions/:id/source` | logged in |
 | DELETE | `/versions/:id` | admin, dba |
-| POST | `/versions/:id/alter` (JSON: `script`, `filename?`, `note?`, `dryRun?`, `defaults?: { charset?, collation? }` — applies an ALTER script to a SQL-sourced version and saves the result as a new version; `dryRun` returns the change list without saving) | admin, dba |
+| POST | `/versions/:id/alter` (JSON: `script`, `filename?`, `note?`, `dryRun?`, `defaults?: { charset?, collation? }`, `expectedBase?: { schemaId, versionNo, modelHash }` — applies an ALTER script to a SQL-sourced version and saves the result as a new version. `dryRun` returns the change list and the base version's fingerprint (`base`, same shape as `expectedBase`) without saving. Saving requires `expectedBase` (400 otherwise): send back the preview's `base`; if the base version was deleted and replaced since the preview (row IDs can be reused), it returns 409 and nothing is saved. A given `expectedBase` is also checked on `dryRun`) | admin, dba |
 | GET | `/versions/:id/derivation` (base version and script of a version created by an ALTER script) | logged in |
 | GET | `/diff?base=&target=` | logged in |
 | PUT | `/diff/renames` | admin, dba |

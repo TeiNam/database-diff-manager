@@ -6,14 +6,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VersionSummary } from '../src/api/types';
 import { AlterDialog } from '../src/features/alter/AlterDialog';
 import { HistoryPage } from '../src/pages/HistoryPage';
-import { alterBodies, DERIVED, mockAlterApi, NO_SUGGESTION, PREVIEW, SAVED, version } from './alter-fixtures';
+import { alterBodies, DERIVED, fingerprint, mockAlterApi, NO_SUGGESTION, PREVIEW, previewOf, SAVED, version } from './alter-fixtures';
 import { json, mockApi, renderWithProviders } from './render';
 
 describe('AlterDialog', () => {
   it('SQL 버전만 기준으로 고르고(기본: 최신), 미리보기 뒤에만 저장한다 — 스키마 기본값은 마지막 ALTER 적용 값', async () => {
     const calls = mockApi({
       'POST /api/versions/3/alter': (init: RequestInit) => (JSON.parse(String(init.body)).dryRun
-        ? { status: 'preview', applied: 1, changes: [{ kind: 'table', name: 'member', op: 'modify' }], renames: [] }
+        ? { ...previewOf(3), changes: [{ kind: 'table', name: 'member', op: 'modify' }] }
         : { status: 'ok', versionId: 4, versionNo: 4, applied: 1, changes: [{ kind: 'table', name: 'member', op: 'modify' }] }),
     });
     renderWithProviders(<AlterDialog versions={[version(9, 4, 'md'), version(3, 3, 'sql', { derivedFrom: DERIVED }), version(1, 1, 'sql')]} onClose={() => undefined} />);
@@ -32,7 +32,8 @@ describe('AlterDialog', () => {
     const bodies = calls.filter((c) => c.url === '/api/versions/3/alter').map((c) => JSON.parse(String(c.init.body)));
     expect(bodies).toEqual([
       { script: 'ALTER TABLE member ADD COLUMN nick VARCHAR(20);', dryRun: true, defaults: { charset: 'utf8mb4', collation: 'utf8mb4_general_ci' } },
-      { script: 'ALTER TABLE member ADD COLUMN nick VARCHAR(20);', dryRun: false, defaults: { charset: 'utf8mb4', collation: 'utf8mb4_general_ci' } },
+      // 저장은 미리보기가 돌려준 기준 버전 지문을 함께 보낸다
+      { script: 'ALTER TABLE member ADD COLUMN nick VARCHAR(20);', dryRun: false, defaults: { charset: 'utf8mb4', collation: 'utf8mb4_general_ci' }, expectedBase: fingerprint(3) },
     ]);
   });
 
@@ -102,7 +103,7 @@ describe('AlterDialog — 입력과 결과 처리', () => {
   });
 
   it('기준 버전을 바꾸면 이전 미리보기를 지우고(저장 잠금), 고른 버전으로 보낸다', async () => {
-    const calls = mockAlterApi({ 'POST /api/versions/3/alter': PREVIEW, 'POST /api/versions/1/alter': PREVIEW });
+    const calls = mockAlterApi({ 'POST /api/versions/3/alter': previewOf(3), 'POST /api/versions/1/alter': PREVIEW });
     renderWithProviders(<AlterDialog versions={[version(3, 3, 'sql'), version(1, 1, 'sql')]} onClose={() => undefined} />);
     const user = userEvent.setup();
     await user.type(screen.getByLabelText('ALTER 스크립트'), 'ALTER TABLE a ADD b INT;');
@@ -358,7 +359,7 @@ describe('AlterDialog — 스키마가 바뀌거나 기준 버전이 사라질 �
       '/api/schemas/8/versions': [version(2, 1, 'sql', { schemaId: 8, schemaName: 'other', sourceFilename: 'other-v1.sql' })],
       'GET /api/versions/2/alter-defaults': NO_SUGGESTION,
       'POST /api/versions/1/alter': PREVIEW,
-      'POST /api/versions/2/alter': PREVIEW,
+      'POST /api/versions/2/alter': previewOf(1, { schemaId: 8 }),
     });
     renderWithProviders(<><HistoryPage /><GoTo to="/db/1/schema/8/history" /></>, route);
     const user = userEvent.setup();
@@ -379,7 +380,7 @@ describe('AlterDialog — 스키마가 바뀌거나 기준 버전이 사라질 �
   });
 
   it('고른 기준 버전이 목록에서 사라지면 미리보기를 지우고 미리보기·저장을 막는다 — 화면의 버전과 요청 대상이 어긋나지 않는다', async () => {
-    const calls = mockAlterApi({ 'POST /api/versions/3/alter': PREVIEW, 'POST /api/versions/1/alter': PREVIEW });
+    const calls = mockAlterApi({ 'POST /api/versions/3/alter': previewOf(3), 'POST /api/versions/1/alter': PREVIEW });
     function Harness() {
       const [versions, setVersions] = useState([version(3, 3, 'sql'), version(1, 1, 'sql')]);
       return (
@@ -487,7 +488,7 @@ describe('AlterDialog — 스키마 기본값 제안', () => {
   });
 
   it('ALTER 로 만든 버전이 있으면 그 값을 쓰고 기준 버전에 묻지 않는다', async () => {
-    const calls = mockApi({ 'POST /api/versions/3/alter': PREVIEW });
+    const calls = mockApi({ 'POST /api/versions/3/alter': previewOf(3) });
     renderDialog([version(3, 3, 'sql', { derivedFrom: DERIVED }), version(1, 1, 'sql')]);
     expect(collationField()).toHaveValue('utf8mb4_general_ci');
     await userEvent.setup().type(screen.getByLabelText('ALTER 스크립트'), 'ALTER TABLE a ADD b INT;');

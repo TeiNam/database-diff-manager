@@ -2,7 +2,7 @@ import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-
 import { renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DIFF_REFETCH_MS, DIFF_STALE_MS, queryKeys, useDeleteDatabase, useDeleteMigration, useDeleteSchema, useDeleteVersion, useDiff, useIsVersionMissing, useMigrationFlow, useUpload, useUploadMigration } from '../src/api/hooks';
+import { DIFF_REFETCH_MS, DIFF_STALE_MS, queryKeys, useDeleteDatabase, useDeleteMigration, useDeleteSchema, useDeleteVersion, useDiff, useIsVersionMissing, useMigrationFlow, useRefreshVersions, useUpload, useUploadMigration } from '../src/api/hooks';
 import { version } from './alter-fixtures';
 import { mockApi } from './render';
 
@@ -154,6 +154,14 @@ describe('useIsVersionMissing', () => {
     expect(renderHook(() => useIsVersionMissing(8, 12), { wrapper }).result.current).toBe(false);
   });
 
+  it('버전 번호까지 주면 ID 만 같은 다른 버전은 그 버전이 아니다 — 지운 버전의 ID 를 다른 업로드가 다시 쓴 경우. 번호를 주지 않으면 ID 만 본다', () => {
+    const { client, wrapper } = setup();
+    client.setQueryData(queryKeys.versions(7), [version(12, 3, 'sql')]);
+    expect(renderHook(() => useIsVersionMissing(7, 12, 2), { wrapper }).result.current).toBe(true);
+    expect(renderHook(() => useIsVersionMissing(7, 12, 3), { wrapper }).result.current).toBe(false);
+    expect(renderHook(() => useIsVersionMissing(7, 12), { wrapper }).result.current).toBe(false);
+  });
+
   it('목록을 다시 받는 동안은 false 이고, 다 받은 뒤에도 없으면 true 로 바뀐다 (내용이 같은 목록이어도)', async () => {
     const { client, wrapper } = setup();
     client.setQueryData(queryKeys.versions(7), [sql(11)]);
@@ -166,5 +174,20 @@ describe('useIsVersionMissing', () => {
     release();
     await refetch;
     await waitFor(() => expect(result.current).toBe(true));
+  });
+});
+
+// ALTER 적용이 서버와 화면의 기준 버전이 어긋났다고 알릴 때(지문 불일치) 화면의 버전 목록을 맞춘다
+describe('useRefreshVersions', () => {
+  it('모든 스키마의 버전 목록을 다시 받게 하고, 다른 쿼리는 건드리지 않는다', () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    client.setQueryData(queryKeys.versions(7), [version(11, 1, 'sql')]);
+    client.setQueryData(queryKeys.versions(8), []);
+    client.setQueryData(queryKeys.tree, []);
+    renderHook(() => useRefreshVersions(), { wrapper }).result.current();
+    expect(client.getQueryState(queryKeys.versions(7))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.versions(8))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.tree)?.isInvalidated).toBe(false);
   });
 });
