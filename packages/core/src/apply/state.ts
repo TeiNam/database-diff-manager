@@ -33,6 +33,8 @@ export interface State {
   readonly defaults: ApplyDefaults;
   fkChecks: boolean;
   sqlMode: string;
+  // 처음 세션 SQL_MODE (ApplyOptions.sqlMode, 주지 않았으면 MySQL 기본 모드) — 스크립트를 실행한 서버의 sql_mode 다. SET sql_mode = DEFAULT 가 이 값으로 되돌린다 (session.ts)
+  readonly initialSqlMode: string;
   timeZoneUtc: boolean; // 스크립트가 세션 time_zone 을 UTC 로 정했는가 — 아니면 서버 시간대라 TIMESTAMP 리터럴 기본값을 받지 않는다 (session.ts assertUtcTimestampDefault)
   readonly saved: Map<string, string>; // SET @v = … 로 저장한 사용자 변수 (소문자, '@' 포함)
   readonly origins: Origins;
@@ -60,7 +62,7 @@ export function initialState(base: SchemaModel, schemaName: string, defaults: Ap
   model.tables.forEach((t, k) => {
     if (!tableAt.has(t.name)) tableAt.set(t.name, k); // 같은 이름이 둘이면 앞의 것 (find 와 같다)
   });
-  const st: State = { model, schemaName, defaults, fkChecks: true, sqlMode, timeZoneUtc: false, saved: new Map(), origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
+  const st: State = { model, schemaName, defaults, fkChecks: true, sqlMode, initialSqlMode: sqlMode, timeZoneUtc: false, saved: new Map(), origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
   for (const t of model.tables) countForeignKeys(st, t, 1);
   return st;
 }

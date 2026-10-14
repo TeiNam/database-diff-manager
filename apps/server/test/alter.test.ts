@@ -517,9 +517,11 @@ describe('POST /versions/:id/alter — 기준 버전 지문', () => {
 });
 
 // 2way 리뷰 5회차 (M-2): 대화상자를 연 동안 다른 사용자가 같은 기준에서 더 새 버전을 저장해도, 지문은 기준 버전만 보므로 옛 미리보기가 그대로 저장돼
-// 최신 버전에서 그 변경이 조용히 빠졌다. 미리보기가 그때 스키마의 최신 SQL 버전 번호(latestVersionNo)를 함께 돌려주고, 저장할 때 기준 버전이 그때 최신이었는데
-// 더 새 SQL 버전이 생겼으면 409 로 막는다. 미리보기 때 이미 더 새 버전이 있던 옛 기준 버전을 고른 것은 일부러 고른 것이라 막지 않는다
-describe('POST /versions/:id/alter — 미리보기 뒤에 저장된 더 새 버전', () => {
+// 최신 버전에서 그 변경이 조용히 빠졌다. 저장할 때 더 새 SQL 버전이 있으면 409 로 막는다.
+// 2way 리뷰 6회차: 5회차는 미리보기 때 이미 더 새 버전이 있던 기준을 '일부러 고른 옛 기준'으로 짐작해 막지 않았는데, 화면이 저절로 고른 기준도 그렇게 보였다
+// (409 뒤에 또 저장된 버전 — Codex #1, 대화상자를 연 뒤·미리보기 전에 저장된 버전 — Claude M-1). 이제 저장은 기준 버전이 저장할 때의 최신 SQL 버전이어야 하고,
+// 옛 버전을 기준으로 저장하는 것은 요청이 allowHistoricalBase: true 로 밝힐 때만 받는다
+describe('POST /versions/:id/alter — 최신이 아닌 기준 버전', () => {
   const SCRIPT = 'ALTER TABLE member ADD x INT;';
   const REPLACEMENT = dump('shop', TABLE.replace('`name`', '`title`'));
   const preview = async (ctx: Ctx, id: number, script = SCRIPT, headers: Record<string, string> = ctx.admin) => {
@@ -527,27 +529,62 @@ describe('POST /versions/:id/alter — 미리보기 뒤에 저장된 더 새 버
     expect(res.statusCode, res.body).toBe(200);
     return res.json().base as ReturnType<typeof previewBaseOf>;
   };
-  const expectNewer = (res: Awaited<ReturnType<Ctx['alter']>>, latest: { id: number; versionNo: number }) => {
+  // 다른 사용자가 id 에서 script 를 미리보기·저장한다
+  const saveAs = async (ctx: Ctx, id: number, script: string) =>
+    (await ctx.alter(id, { script, expectedBase: await preview(ctx, id, script, ctx.dba) }, ctx.dba)).json() as { status: string; versionId: number; versionNo: number };
+  const expectNewer = (res: Awaited<ReturnType<Ctx['alter']>>, baseNo: number, latest: { id: number; versionNo: number }) => {
     expect(res.statusCode, res.body).toBe(409);
-    expect(res.json().error).toContain(`다른 사용자가 더 새 버전(v${latest.versionNo})을 저장했습니다`);
+    expect(res.json().error).toContain(`기준 버전(v${baseNo})보다 더 새 버전(v${latest.versionNo})이 있습니다`);
     expect(res.json().error).toContain('최신 버전에서 미리보기를 다시 실행하세요');
-    expect(res.json().details).toEqual({ latestVersion: latest }); // 화면이 그 버전으로 기준 버전을 옮긴다
+    expect(res.json().details).toEqual({ latestVersion: latest }); // 화면이 목록을 다시 받아 최신 버전으로 기준 버전을 옮긴다
   };
 
-  it('미리보기 때 최신이던 기준 버전 뒤에 다른 사용자가 더 새 버전을 저장했으면 409 — 옛 미리보기로 저장해 최신 버전에서 그 변경이 빠지지 않게 한다', async () => {
+  it('미리보기 뒤에 다른 사용자가 더 새 버전을 저장했으면 409 — 옛 미리보기로 저장해 최신 버전에서 그 변경이 빠지지 않게 한다', async () => {
     const ctx = await setup();
     const mine = await preview(ctx, ctx.baseId, 'ALTER TABLE member ADD a INT;');
     expect(mine).toMatchObject({ versionNo: 1, latestVersionNo: 1 });
-    const theirs = await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD b INT;', expectedBase: await preview(ctx, ctx.baseId, 'ALTER TABLE member ADD b INT;', ctx.dba) }, ctx.dba);
-    expect(theirs.json()).toMatchObject({ status: 'ok', versionNo: 2 });
-    expectNewer(await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD a INT;', expectedBase: mine }), { id: theirs.json().versionId, versionNo: 2 });
+    const theirs = await saveAs(ctx, ctx.baseId, 'ALTER TABLE member ADD b INT;');
+    expect(theirs).toMatchObject({ status: 'ok', versionNo: 2 });
+    expectNewer(await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD a INT;', expectedBase: mine }), 1, { id: theirs.versionId, versionNo: 2 });
     expect(versionCount(ctx.db)).toBe(2);
     expect(derivationCount(ctx.db)).toBe(1);
     // 최신 버전에서 다시 낸 미리보기로는 저장되고, 앞 사람의 변경이 남는다
-    const again = await preview(ctx, theirs.json().versionId, 'ALTER TABLE member ADD a INT;');
-    const saved = await ctx.alter(theirs.json().versionId, { script: 'ALTER TABLE member ADD a INT;', expectedBase: again });
+    const again = await preview(ctx, theirs.versionId, 'ALTER TABLE member ADD a INT;');
+    const saved = await ctx.alter(theirs.versionId, { script: 'ALTER TABLE member ADD a INT;', expectedBase: again });
     expect(saved.json()).toMatchObject({ status: 'ok', versionNo: 3 });
     expect(await columnsOf(ctx, saved.json().versionId)).toEqual(['id', 'name', 'b', 'a']);
+  });
+
+  // Claude M-1: 미리보기의 latestVersionNo 가 기준 버전 번호보다 커도 사용자가 옛 버전을 고른 것이 아니다 — 대화상자가 연 때 받은 목록의 최신 버전을 골라 두었다
+  it('대화상자를 연 뒤·미리보기 전에 다른 사용자가 더 새 버전을 저장했어도 409 — allowHistoricalBase 없이는 옛 기준 버전으로 저장하지 않는다', async () => {
+    const ctx = await setup();
+    const theirs = await saveAs(ctx, ctx.baseId, 'ALTER TABLE member ADD b INT;');
+    const mine = await preview(ctx, ctx.baseId, 'ALTER TABLE member ADD a INT;');
+    expect(mine).toMatchObject({ versionNo: 1, latestVersionNo: 2 });
+    for (const extra of [{}, { allowHistoricalBase: false }]) {
+      expectNewer(await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD a INT;', expectedBase: mine, ...extra }), 1, { id: theirs.versionId, versionNo: 2 });
+    }
+    expect(versionCount(ctx.db)).toBe(2);
+    expect(derivationCount(ctx.db)).toBe(1);
+  });
+
+  // Codex #1: 409 를 받은 화면이 목록을 다시 받는 사이 또 다른 버전이 저장되면 409 가 알려 준 버전도 이미 옛 버전이다. 그 버전에서 다시 낸 미리보기를
+  // 5회차는 일부러 고른 옛 기준으로 보고 저장해, 그 사이 저장된 변경(c)이 최신 버전에서 빠졌다
+  it('편집자 셋: 409 가 알려 준 버전에서 다시 낸 미리보기도 그 뒤에 저장된 버전이 있으면 409 이고, 최신 버전에서 다시 내면 b·c·a 가 모두 남는다', async () => {
+    const ctx = await setup();
+    const [addA, addB, addC] = ['a', 'b', 'c'].map((column) => `ALTER TABLE member ADD ${column} INT;`);
+    const aOnV1 = await preview(ctx, ctx.baseId, addA);
+    const v2 = await saveAs(ctx, ctx.baseId, addB);
+    expectNewer(await ctx.alter(ctx.baseId, { script: addA, expectedBase: aOnV1 }), 1, { id: v2.versionId, versionNo: 2 });
+    const v3 = await saveAs(ctx, v2.versionId, addC); // A 가 목록을 다시 받기 전에 C 가 저장한다
+    expect(v3).toMatchObject({ status: 'ok', versionNo: 3 });
+    const aOnV2 = await preview(ctx, v2.versionId, addA);
+    expect(aOnV2).toMatchObject({ versionNo: 2, latestVersionNo: 3 });
+    expectNewer(await ctx.alter(v2.versionId, { script: addA, expectedBase: aOnV2 }), 2, { id: v3.versionId, versionNo: 3 });
+    expect(versionCount(ctx.db)).toBe(3);
+    const saved = await ctx.alter(v3.versionId, { script: addA, expectedBase: await preview(ctx, v3.versionId, addA) });
+    expect(saved.json()).toMatchObject({ status: 'ok', versionNo: 4 });
+    expect(await columnsOf(ctx, saved.json().versionId)).toEqual(['id', 'name', 'b', 'c', 'a']);
   });
 
   it('업로드로 올라온 SQL 버전도 더 새 버전이다 — MD 버전은 ALTER 의 기준이 될 수 없어 세지 않는다', async () => {
@@ -559,24 +596,51 @@ describe('POST /versions/:id/alter — 미리보기 뒤에 저장된 더 새 버
     const next = await preview(ctx, saved.json().versionId, 'ALTER TABLE member ADD y INT;');
     expect(next).toMatchObject({ versionNo: 3, latestVersionNo: 3 });
     const uploaded = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: REPLACEMENT, userId: 1 }); // v4 (SQL)
-    expectNewer(await ctx.alter(saved.json().versionId, { script: 'ALTER TABLE member ADD y INT;', expectedBase: next }), { id: uploaded.versionId, versionNo: 4 });
+    expectNewer(await ctx.alter(saved.json().versionId, { script: 'ALTER TABLE member ADD y INT;', expectedBase: next }), 3, { id: uploaded.versionId, versionNo: 4 });
     expect(versionCount(ctx.db)).toBe(4);
   });
 
-  it('미리보기 때 이미 더 새 버전이 있던 옛 기준 버전을 고른 것은 일부러 고른 것이라, 그 뒤에 새 버전이 더 생겨도 저장된다', async () => {
+  it('사용자가 옛 버전을 기준으로 직접 고른 저장(allowHistoricalBase: true)은 더 새 버전이 있어도, 미리보기 뒤에 새 버전이 더 생겨도 저장된다', async () => {
     const ctx = await setup();
     ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: REPLACEMENT, userId: 1 }); // v2
     const mine = await preview(ctx, ctx.baseId);
     expect(mine).toMatchObject({ versionNo: 1, latestVersionNo: 2 });
     ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: dump('shop', TABLE.replace('`name`', '`label`')), userId: 1 }); // v3
-    const res = await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: mine });
+    const res = await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: mine, allowHistoricalBase: true });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json()).toMatchObject({ status: 'ok', versionNo: 4 });
     expect(await columnsOf(ctx, res.json().versionId)).toEqual(['id', 'name', 'x']);
+    // 최신 기준 버전에 보내도 그대로 저장된다
+    const next = await preview(ctx, res.json().versionId, 'ALTER TABLE member ADD y INT;');
+    const latest = await ctx.alter(res.json().versionId, { script: 'ALTER TABLE member ADD y INT;', expectedBase: next, allowHistoricalBase: true });
+    expect(latest.json()).toMatchObject({ status: 'ok', versionNo: 5 });
+  });
+
+  it('allowHistoricalBase 도 기준 버전 지문 대조는 건너뛰지 않는다 — 지운 기준 버전의 ID 를 다른 버전이 물려받으면 409', async () => {
+    const ctx = await setup();
+    const stale = await preview(ctx, ctx.baseId);
+    expect((await ctx.app.inject({ method: 'DELETE', url: `/api/versions/${ctx.baseId}`, headers: ctx.admin })).statusCode).toBe(200);
+    expect(ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: REPLACEMENT, userId: 1 }).versionId).toBe(ctx.baseId);
+    const res = await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: stale, allowHistoricalBase: true });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toContain('기준 버전이 바뀌었습니다');
+    expect(versionCount(ctx.db)).toBe(1);
+  });
+
+  it('allowHistoricalBase 는 참·거짓만 받는다 (미리보기도 같다)', async () => {
+    const ctx = await setup();
+    for (const allowHistoricalBase of ['true', 1, null]) {
+      for (const dryRun of [true, false]) {
+        const res = await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun, expectedBase: ctx.fingerprint(ctx.baseId), allowHistoricalBase });
+        expect(res.statusCode, `${JSON.stringify(allowHistoricalBase)} dryRun ${dryRun}: ${res.body}`).toBe(400);
+        expect(res.json().details[0].path).toBe('allowHistoricalBase');
+      }
+    }
+    expect(versionCount(ctx.db)).toBe(1);
   });
 
   // 같은 저장을 다시 보내면(응답을 받지 못해 다시 누름, 같은 미리보기를 연 다른 탭) 결과가 처음 저장한 버전과 같아 빠지는 변경이 없다.
-  // 409 를 주면 저장에 실패한 줄 알게 되므로, 중복 판정이 먼저고 새 버전을 만들 때만 더 새 버전을 본다
+  // 409 를 주면 저장에 실패한 줄 알게 되므로, 중복 판정이 먼저고 새 버전을 만들 때만 기준 버전이 최신인지 본다
   it('같은 expectedBase 로 다시 저장하면 지금처럼 duplicate 로 처음 저장한 버전을 돌려준다', async () => {
     const ctx = await setup();
     const mine = await preview(ctx, ctx.baseId);
@@ -590,18 +654,18 @@ describe('POST /versions/:id/alter — 미리보기 뒤에 저장된 더 새 버
     }
     expect(versionCount(ctx.db)).toBe(2);
     expect(derivationCount(ctx.db)).toBe(1);
-    // 결과가 다르면(다른 스크립트) 중복이 아니라 더 새 버전 검사로 막는다
-    expectNewer(await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD y INT;', expectedBase: mine }), { id: first.json().versionId, versionNo: 2 });
+    // 결과가 다르면(다른 스크립트) 중복이 아니라, 기준 버전이 최신이 아니어서 막는다
+    expectNewer(await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD y INT;', expectedBase: mine }), 1, { id: first.json().versionId, versionNo: 2 });
   });
 
-  it('미리보기는 expectedBase 의 지문만 대조한다 — 더 새 버전은 저장이 새 버전을 만들 때 본다. 새 미리보기는 지금의 최신 SQL 버전 번호를 돌려준다', async () => {
+  it('미리보기는 expectedBase 의 지문만 대조한다 — 기준 버전이 최신인지는 저장이 새 버전을 만들 때 본다. 새 미리보기는 지금의 최신 SQL 버전 번호를 돌려준다', async () => {
     const ctx = await setup();
     const mine = await preview(ctx, ctx.baseId);
     const uploaded = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: REPLACEMENT, userId: 1 }); // v2
     const dry = await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: mine });
     expect(dry.statusCode, dry.body).toBe(200);
     expect(dry.json().base).toEqual({ ...mine, latestVersionNo: 2 });
-    expectNewer(await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: mine }), { id: uploaded.versionId, versionNo: 2 });
+    expectNewer(await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: mine }), 1, { id: uploaded.versionId, versionNo: 2 });
     expect(versionCount(ctx.db)).toBe(2);
   });
 });
@@ -648,6 +712,14 @@ describe('POST /versions/:id/alter — SET SQL_MODE 없이 만든 루틴의 SQL_
     const baseId = baseWith(ctx, [routine('sp_a', RELAXED)]);
     const id = await saveNew(ctx, baseId, `SET SQL_MODE = 'NO_ENGINE_SUBSTITUTION';\n${NEW_PROC}`);
     expect(await modeOf(ctx, id, 'sp_new')).toBe('NO_ENGINE_SUBSTITUTION');
+  });
+
+  // 리뷰 6회차 M-2: MySQL 은 세션 sql_mode 의 DEFAULT 를 전역 값(서버 sql_mode)으로 푼다 — 짐작한 서버 sql_mode 다
+  it('SET [SESSION] sql_mode = DEFAULT 뒤에 만든 루틴도 짐작한 서버 sql_mode 를 쓴다 — MySQL 기본 모드가 아니다', async () => {
+    const ctx = await setup();
+    const baseId = baseWith(ctx, [routine('sp_a', RELAXED), routine('sp_b', RELAXED)]);
+    const id = await saveNew(ctx, baseId, `SET sql_mode = 'NO_ENGINE_SUBSTITUTION';\nSET SESSION sql_mode = DEFAULT;\n${NEW_PROC}`);
+    expect(await modeOf(ctx, id, 'sp_new')).toBe(RELAXED);
   });
 
   it('루틴이 없거나 루틴에 SQL_MODE 기록이 없으면(td-export 0.1.52 전) 지금처럼 MySQL 기본 모드다', async () => {

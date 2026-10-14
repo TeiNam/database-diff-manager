@@ -312,15 +312,26 @@ describe('처음 세션 SQL_MODE (ApplyOptions.sqlMode)', () => {
     expect(routineIn(r, 'p1').sqlMode).toBe(RELAXED);
   });
 
-  it('스크립트의 SET SQL_MODE 가 앞서고, @@SQL_MODE 로 저장했다 되돌리면 처음 값으로 돌아온다. DEFAULT 는 MySQL 기본 모드다', () => {
+  // DEFAULT: MySQL 은 세션 값을 전역 값(서버 sql_mode)으로 되돌린다 — 처음 세션 SQL_MODE 다 (리뷰 6회차 M-2)
+  it('스크립트의 SET SQL_MODE 가 앞서고, @@SQL_MODE 로 저장했다 되돌리거나 DEFAULT 로 되돌리면 처음 값으로 돌아온다', () => {
     const script = [
       "SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'STRICT_TRANS_TABLES';", 'CREATE PROCEDURE p1() SELECT 1;',
-      'SET SQL_MODE = @OLD_SQL_MODE;', 'CREATE PROCEDURE p2() SELECT 2;', 'SET SQL_MODE = DEFAULT;', 'CREATE PROCEDURE p3() SELECT 3;',
+      'SET SQL_MODE = @OLD_SQL_MODE;', 'CREATE PROCEDURE p2() SELECT 2;', "SET SQL_MODE = 'NO_ENGINE_SUBSTITUTION';", 'SET SQL_MODE = DEFAULT;', 'CREATE PROCEDURE p3() SELECT 3;',
     ].join('\n');
     const r = withMode(script, RELAXED);
     expect(routineIn(r, 'p1').sqlMode).toBe('STRICT_TRANS_TABLES');
     expect(routineIn(r, 'p2').sqlMode).toBe(RELAXED);
-    expect(routineIn(r, 'p3').sqlMode).toBe(DEFAULT_SQL_MODE);
+    expect(routineIn(r, 'p3').sqlMode).toBe(RELAXED);
+  });
+
+  // 리뷰 6회차 M-2 재현 (p08-set-default): 짐작한 서버 sql_mode 와 같아야 한다 — SET 없이 만든 루틴과 DEFAULT 로 되돌린 뒤 만든 루틴이 같은 값이다
+  it.each([
+    ['다른 값을 쓴 뒤 SET sql_mode = DEFAULT', "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';\nSET sql_mode = DEFAULT;"],
+    ['SET SESSION sql_mode = DEFAULT', 'SET SESSION sql_mode = DEFAULT;'], ['SET @@SESSION.sql_mode = DEFAULT', 'SET @@SESSION.sql_mode = DEFAULT;'],
+  ])('%s 뒤에 만든 루틴은 MySQL 기본 모드가 아니라 처음 세션 SQL_MODE 를 쓴다', (_label, head) => {
+    const proc = 'DELIMITER $$\nCREATE PROCEDURE p_new()\nBEGIN\n  SELECT 1;\nEND$$\nDELIMITER ;\n';
+    expect(routineIn(withMode(`${head}\n${proc}`, RELAXED), 'p_new').sqlMode).toBe(RELAXED);
+    expect(routineOf(`${head}\n${proc}`, 'p_new').sqlMode).toBe(DEFAULT_SQL_MODE); // 처음 값을 주지 않으면 지금처럼 MySQL 기본 모드다
   });
 
   it("빈 모드('')도 받고, 주지 않으면 지금처럼 MySQL 8.0/8.4 기본 모드다", () => {

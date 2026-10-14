@@ -23,15 +23,13 @@ const MAINTENANCE_OPTIONS: ReadonlyMap<string, readonly string[]> = new Map([
   ['ANALYZE', []], ['OPTIMIZE', []], ['CHECK', ['FOR', 'UPGRADE', 'QUICK', 'FAST', 'MEDIUM', 'EXTENDED', 'CHANGED']], ['CHECKSUM', ['QUICK', 'EXTENDED']],
 ]);
 
-const ignore: NoOp = () => {};
-
 // 무시하는 문장의 처리기 (아니면 undefined). 처리기는 MySQL 이 거부하거나 1차에서 받지 않는 꼴만 거부한다
 export function noOpHandler(c: Cursor): NoOp | undefined {
   const first = c.peek();
   if (first?.t !== 'word') return undefined;
   const word = first.v.toUpperCase();
   if (QUERY_WORDS.has(word)) return assertNoVariableAssignment;
-  if (NO_OP_WORDS.has(word) || NO_OP_PAIRS.some((pair) => c.isWord(...pair)) || isFlush(c)) return ignore;
+  if (NO_OP_WORDS.has(word) || NO_OP_PAIRS.some((pair) => c.isWord(...pair)) || isFlush(c)) return assertNoAssignment;
   if (isMaintenance(c)) return checkMaintainedTables;
   if (isKeysToggle(c)) return checkKeysToggle;
   return c.isWord('CREATE', 'SCHEMA', 'IF', 'NOT', 'EXISTS') || c.isWord('CREATE', 'DATABASE', 'IF', 'NOT', 'EXISTS') ? checkCurrentSchema : undefined;
@@ -39,11 +37,19 @@ export function noOpHandler(c: Cursor): NoOp | undefined {
 
 const isOp = (t: Token | undefined, v: string): boolean => t?.t === 'op' && t.v === v;
 const isWordToken = (t: Token | undefined, ...words: string[]): boolean => t?.t === 'word' && words.includes(t.v.toUpperCase());
+// k 자리에서 사용자 변수 대입 ':=' 가 시작하는가 (문자열·주석 속 ':=' 는 토큰이 아니다)
+const isAssignmentAt = (toks: readonly Token[], k: number): boolean => isOp(toks[k], ':') && isOp(toks[k + 1], '=');
 
 // 조회 문장의 사용자 변수 대입(@v := …, … INTO @v)은 뒤 SET 이 읽는 저장 값(SET @OLD_X = @@X 의 @OLD_X 등)과 어긋날 수 있어 받지 않는다
 function assertNoVariableAssignment(_st: State, c: Cursor): void {
-  const assigns = c.toks.some((t, k) => isWordToken(t, 'INTO') || (isOp(t, ':') && isOp(c.toks[k + 1], '=')));
+  const assigns = c.toks.some((t, k) => isWordToken(t, 'INTO') || isAssignmentAt(c.toks, k));
   if (assigns) fail(`사용자 변수에 대입하는 조회 문장(:=·INTO)은 뒤 SET 이 읽는 값을 바꿀 수 있어 받지 않습니다 — ${RE_EXPORT}`);
+}
+
+// 그 밖의 무시하는 문장도 같다 (리뷰 6회차 Codex #2): 데이터 문장은 INSERT … VALUES ((@v := 'x')) 처럼 사용자 변수에 대입할 수 있는데, 문장을 실행하지 않으니
+// 대입한 값을 몰라 뒤 SET 이 그 변수를 읽으면(SET SQL_MODE = @v) 옛 값을 쓴다. INSERT·REPLACE 의 INTO 는 테이블을 가리켜 대입이 아니므로 ':=' 만 본다
+function assertNoAssignment(_st: State, c: Cursor): void {
+  if (c.toks.some((_t, k) => isAssignmentAt(c.toks, k))) fail(`사용자 변수에 대입하는 데이터 문장(:=)은 뒤 SET 이 읽는 값을 바꿀 수 있어 받지 않습니다 — ${RE_EXPORT}`);
 }
 
 // FLUSH PRIVILEGES·FLUSH TABLES (리뷰 4회차 M-3): 권한 표를 다시 읽거나 열린 테이블을 닫을 뿐이다. 뒤에 더 쓴 꼴(FLUSH TABLES WITH READ LOCK, 테이블 이름)과

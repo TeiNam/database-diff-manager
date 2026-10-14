@@ -71,7 +71,7 @@ function assignSession(st: State, a: Cursor, target: string): void {
   if (!a.done) fail(`SET 값은 리터럴·@변수·@@변수만 받습니다: ${a.src.slice(a.peek()!.s).trim()}`);
   if (target.startsWith('@')) st.saved.set(target, value);
   else if (target === 'foreign_key_checks') st.fkChecks = foreignKeyChecksOf(value);
-  else if (target === 'sql_mode') st.sqlMode = resolveSqlMode(value);
+  else if (target === 'sql_mode') st.sqlMode = sessionSqlMode(st, value);
   else if (target === 'time_zone') st.timeZoneUtc = isUtcZone(written);
 }
 
@@ -135,9 +135,14 @@ function foreignKeyChecksOf(value: string): boolean {
   return fail(`FOREIGN_KEY_CHECKS 에 쓸 수 없는 값입니다: ${value} (MySQL 1231)`);
 }
 
+// 세션 sql_mode 에 쓴 값. DEFAULT 는 MySQL 이 세션 값을 전역 값, 곧 스크립트를 실행한 서버의 sql_mode 로 되돌린다 — 이 도구에서는 처음 세션 SQL_MODE 다
+// (서버가 기준 버전 루틴에서 짐작한 값. 주지 않았으면 MySQL 기본 모드 — 리뷰 6회차 M-2). 컴파일 기본값(DEFAULT_SQL_MODE)으로 두면 SET 없이 만든 루틴과 어긋난다
+const sessionSqlMode = (st: State, value: string): string => (value === 'DEFAULT' ? st.initialSqlMode : resolveSqlMode(value));
+
 // 쓴 모드를 MySQL 순서로 줄 세워 대문자로 돌려준다 (루틴이 기억하는 sql_mode 가 SHOW CREATE 와 같아야 한다). 같은 이름은 한 번만 쓰고,
 // 빈 항목('A,' · ',A')은 MySQL 처럼 건너뛴다. ANSI·TRADITIONAL 같은 묶음 이름과 REAL_AS_FLOAT·ANSI_QUOTES 는 받지 않는다 (ApplyFailure).
-// SET SQL_MODE 의 값과 처음 세션 SQL_MODE(ApplyOptions.sqlMode)가 함께 쓴다 — 서버도 기준 버전 루틴의 SQL_MODE 를 이것으로 가린다
+// SET SQL_MODE 의 값과 처음 세션 SQL_MODE(ApplyOptions.sqlMode)가 함께 쓴다 — 서버도 기준 버전 루틴의 SQL_MODE 를 이것으로 가린다.
+// 여기서 DEFAULT 는 MySQL 기본 모드다 (SET 문의 DEFAULT 는 sessionSqlMode 가 처음 세션 SQL_MODE 로 푼다)
 export function resolveSqlMode(value: string): string {
   if (value === 'DEFAULT') return DEFAULT_SQL_MODE;
   const written = new Set(value.toUpperCase().split(',').filter((mode) => mode !== ''));

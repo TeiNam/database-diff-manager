@@ -54,8 +54,21 @@ export const useTree = () => useQuery({ queryKey: queryKeys.tree, queryFn: () =>
 export const useSchemaInfo = (id?: number) =>
   useQuery({ queryKey: queryKeys.schema(id), queryFn: () => api<SchemaInfo>(`/schemas/${id}`), enabled: id !== undefined });
 
+const fetchVersions = (schemaId?: number) => api<VersionSummary[]>(`/schemas/${schemaId}/versions`);
+
 export const useVersions = (schemaId?: number) =>
-  useQuery({ queryKey: queryKeys.versions(schemaId), queryFn: () => api<VersionSummary[]>(`/schemas/${schemaId}/versions`), enabled: schemaId !== undefined });
+  useQuery({ queryKey: queryKeys.versions(schemaId), queryFn: () => fetchVersions(schemaId), enabled: schemaId !== undefined });
+
+// 버전 목록을 서버에서 다시 받아 돌려준다 (캐시가 신선해도 다시 묻는다). 결과는 캐시에도 들어가 목록 화면도 함께 바뀐다.
+// ALTER 적용이 기준 버전보다 더 새 버전이 있다고 알았을 때 옮길 최신 버전을 찾는 데 쓴다. useVersions 와 같은 함수로 받아, 같은 키의 목록을 받는 함수가 뒤섞이지 않는다.
+// 스키마를 모르면 묻지 않고 빈 목록이다
+export function useFreshVersions(schemaId?: number): () => Promise<VersionSummary[]> {
+  const client = useQueryClient();
+  return useCallback(
+    () => (schemaId === undefined ? Promise.resolve([]) : client.query({ queryKey: queryKeys.versions(schemaId), queryFn: () => fetchVersions(schemaId), staleTime: 0 })),
+    [client, schemaId],
+  );
+}
 
 export const useVersion = (id?: number) =>
   useQuery({ queryKey: queryKeys.version(id), queryFn: () => api<VersionDetail>(`/versions/${id}`), enabled: id !== undefined, staleTime: Infinity });

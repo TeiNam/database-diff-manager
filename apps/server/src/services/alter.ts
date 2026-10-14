@@ -19,13 +19,15 @@ export interface AlterInput {
   defaults?: Partial<ApplyDefaults>;
   dryRun?: boolean;
   expectedBase?: PreviewBase; // 미리보기가 돌려준 base. 저장(dryRun 아님)에는 꼭 있어야 하고, 있으면 미리보기에서도 대조한다
+  // 기준 버전이 스키마의 최신 SQL 버전이 아니어도 저장한다 — 사용자가 옛 버전을 기준으로 직접 고른 저장만 보낸다 (리뷰 6회차). 지문 대조는 그대로 한다
+  allowHistoricalBase?: boolean;
   userId: number;
   requestId?: string; // 안전망이 막을 때 메시지와 서버 로그에 남긴다
   log?: { warn(details: object, message: string): void };
 }
 
-// 미리보기가 돌려주고 저장이 expectedBase 로 되돌려 보내는 기준 버전: 지문과, 미리보기 때 그 스키마의 최신 SQL 버전 번호
-// (저장할 때 기준 버전이 그때 최신이었는지 가린다 — 리뷰 5회차 M-2)
+// 미리보기가 돌려주고 저장이 expectedBase 로 되돌려 보내는 기준 버전: 지문과, 미리보기 때 그 스키마의 최신 SQL 버전 번호.
+// 최신 버전 번호는 화면이 미리보기 때 이미 더 새 버전이 있었는지 알리는 데 쓴다. 저장은 이 값으로 짐작하지 않고 저장할 때의 최신 SQL 버전을 본다 (리뷰 6회차)
 export interface PreviewBase extends VersionFingerprint {
   latestVersionNo: number;
 }
@@ -44,8 +46,8 @@ const NO_EVIDENCE: SchemaEvidence = { level: 'unknown', reason: '기준 버전�
 const MAX_LISTED_OBJECTS = 5;
 const MISSING_EXPECTED_BASE = '저장하려면 미리보기가 돌려준 기준 버전 지문(expectedBase)이 필요합니다 — 먼저 미리보기를 실행하세요';
 const STALE_BASE = '기준 버전이 바뀌었습니다 — 미리보기 뒤에 다른 곳에서 지우고 다시 올렸을 수 있습니다. 미리보기를 다시 실행하세요';
-const newerVersionSaved = (versionNo: number) =>
-  `미리보기 뒤에 다른 사용자가 더 새 버전(v${versionNo})을 저장했습니다 — 이대로 저장하면 최신 버전에서 그 변경이 빠지므로, 최신 버전에서 미리보기를 다시 실행하세요`;
+const newerVersionExists = (baseNo: number, latestNo: number) =>
+  `기준 버전(v${baseNo})보다 더 새 버전(v${latestNo})이 있습니다 — 다른 사용자가 저장했을 수 있습니다. 이대로 저장하면 최신 버전에서 그 변경이 빠지므로, 최신 버전에서 미리보기를 다시 실행하세요`;
 
 export function applyAlter(db: Db, input: AlterInput): AlterResult {
   // 기준 버전은 행 ID 로 가리키는데, 가장 큰 ID 의 버전을 지우면 다른 업로드가 그 ID 를 다시 쓴다.
@@ -81,9 +83,9 @@ export function applyAlter(db: Db, input: AlterInput): AlterResult {
     databaseName: base.version.databaseName, schemaName: base.version.schemaName, filename, text, note: input.note, userId: input.userId,
     evidence: loadEvidence(db, input.baseId) ?? NO_EVIDENCE,
     // 중복 판정이 먼저다: 결과가 최신 버전과 같으면(같은 저장을 다시 보냄 — 응답을 받지 못해 다시 누름, 같은 미리보기를 연 다른 탭) 빠지는 변경이 없으므로
-    // 지금처럼 duplicate 로 그 버전을 돌려준다. 새 버전을 만들 때만 미리보기 뒤에 더 새 버전이 저장됐는지 본다 (M-2)
+    // 지금처럼 duplicate 로 그 버전을 돌려준다. 새 버전을 만들 때만 기준 버전이 최신 SQL 버전인지 본다 (리뷰 5회차 M-2·6회차)
     beforeCreate: () => {
-      if (expectedBase) assertNoNewerVersion(expectedBase, latest);
+      if (!input.allowHistoricalBase) assertLatestBase(base.version.versionNo, latest);
     },
     onCreated: (versionId) => {
       saveDerivation(db, versionId, { baseVersionId: input.baseId, baseVersionNo: base.version.versionNo, script: input.script, statementCount: result.applied, defaults: result.defaults });
@@ -101,11 +103,12 @@ function currentBase(db: Db, baseId: number): { current: PreviewBase; latest: Ve
   return { current: { ...fingerprint, latestVersionNo: latest.versionNo }, latest };
 }
 
-// 미리보기 때 최신 SQL 버전이던 기준 버전 뒤에 더 새 SQL 버전이 저장됐으면, 이대로 저장한 결과가 그 버전의 변경이 빠진 채 최신 버전이 된다 (M-2).
-// 409 와 함께 그 버전을 알려 화면이 기준 버전을 옮기게 한다. 미리보기 때 이미 더 새 버전이 있던 옛 기준 버전을 고른 것은 일부러 고른 것이라 막지 않는다
-function assertNoNewerVersion(expected: PreviewBase, latest: VersionRef): void {
-  const wasLatest = expected.latestVersionNo <= expected.versionNo;
-  if (wasLatest && latest.versionNo > expected.versionNo) throw new AppError(409, newerVersionSaved(latest.versionNo), { latestVersion: latest });
+// 새 버전을 만드는 저장은 기준 버전이 지금 스키마의 최신 SQL 버전이어야 한다. 더 새 SQL 버전이 있으면(다른 사용자의 ALTER 적용·업로드 — 미리보기 앞이든 뒤든)
+// 이대로 저장한 결과가 그 버전의 변경이 빠진 채 최신 버전이 되므로, 409 와 함께 그 버전을 알린다 (화면은 목록을 다시 받아 최신 버전으로 기준 버전을 옮긴다).
+// 옛 기준 버전을 일부러 고른 것인지는 버전 번호로 짐작하지 않는다 — 화면이 저절로 고른 기준도 미리보기 때 이미 옛 버전이면 일부러 고른 것처럼 보여,
+// 그 사이 저장된 다른 사용자의 변경이 빠졌다 (리뷰 6회차 Codex #1·Claude M-1). 요청이 allowHistoricalBase 로 밝힐 때만 이 검사를 건너뛴다
+function assertLatestBase(baseNo: number, latest: VersionRef): void {
+  if (latest.versionNo > baseNo) throw new AppError(409, newerVersionExists(baseNo, latest.versionNo), { latestVersion: latest });
 }
 
 // 결과 모델을 td-export 형식 덤프로 출력한다. core 가 출력할 수 없다고 알린 경우(ApplyFailure — 스키마 이름·루틴 본문에 쓸 수 없는 문자열)만

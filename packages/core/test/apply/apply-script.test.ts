@@ -125,6 +125,24 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
     if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
   });
 
+  // 리뷰 6회차 Codex #2: 무시하는 데이터 문장도 사용자 변수에 대입할 수 있다(@v := …). 실행하지 않으니 대입한 값을 몰라, 뒤 SET 이 그 변수를 읽으면 옛 값을 쓴다 —
+  // 조회 문장처럼 받지 않는다. INSERT·REPLACE 의 INTO 는 테이블을 가리켜 대입이 아니다 (NO_OPS 의 INSERT INTO … 는 그대로 무시한다)
+  it.each([
+    'INSERT INTO t(id) VALUES ((@m := 1));', 'INSERT INTO t (id) SELECT @n := 3;', 'UPDATE t SET id = (@m := id + 1);', 'DELETE FROM t WHERE (@m := id) > 0;',
+    'REPLACE INTO t VALUES ((@m:=5));', '/*!40000 INSERT INTO t VALUES ((@m := 1)) */;',
+  ])('사용자 변수에 대입하는 데이터 문장 %s 는 무시하지 않고 RE_EXPORT 로 거부한다', (sql) => {
+    const r = run(`${sql}\nALTER TABLE t ADD COLUMN y INT;`);
+    expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining(':=') } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  });
+
+  it('데이터 문장의 대입 뒤 SET SQL_MODE = @변수 가 옛 값을 읽어 루틴에 틀린 SQL_MODE 를 붙이지 않는다 (Codex #2 재현)', () => {
+    const script = "SET @m='STRICT_TRANS_TABLES';\nINSERT INTO t(id,v) VALUES(1,(@m:='NO_ENGINE_SUBSTITUTION'));\nSET SQL_MODE=@m;\nCREATE PROCEDURE p() SELECT 1;";
+    const r = run(script);
+    expect(r).toMatchObject({ ok: false, error: { index: 2, line: 2 } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  });
+
   it('없는 테이블의 DISABLE KEYS 는 1146, 다른 스키마의 테이블은 거부한다', () => {
     expect(run('ALTER TABLE nope DISABLE KEYS;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1146)') } });
     expect(run('ALTER TABLE other.t DISABLE KEYS;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('other') } });

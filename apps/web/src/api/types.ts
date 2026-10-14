@@ -170,8 +170,9 @@ export interface VersionFingerprint {
   schemaName: string;
 }
 
-// 미리보기가 돌려주는 기준 버전 (서버 PreviewBase): 지문과, 미리보기 때 이 스키마의 최신 SQL 버전 번호. 저장할 때 그대로 되돌려 보낸다 —
-// 기준 버전이 그때 최신이었는데 더 새 SQL 버전이 저장됐으면 서버가 409 와 함께 그 버전(details.latestVersion)을 알려 준다
+// 미리보기가 돌려주는 기준 버전 (서버 PreviewBase): 지문과, 미리보기 때 이 스키마의 최신 SQL 버전 번호. 저장할 때 그대로 되돌려 보낸다.
+// 최신 버전 번호가 기준 버전 번호보다 크면 미리보기 때 이미 더 새 버전이 있었다. 저장할 때 기준 버전이 최신 SQL 버전이 아니면 서버가 409 와 함께
+// 그 버전(details.latestVersion)을 알려 준다 (allowHistoricalBase 를 보낸 저장은 빼고)
 export interface PreviewBase extends VersionFingerprint {
   latestVersionNo: number;
 }
@@ -183,6 +184,9 @@ export interface AlterRequest {
   dryRun?: boolean;
   defaults?: { charset?: string; collation?: string };
   expectedBase?: PreviewBase; // 저장에는 꼭 있어야 한다 — 미리보기가 돌려준 base 를 그대로 보낸다
+  // 기준 버전이 스키마의 최신 SQL 버전이 아니어도 저장한다. 사용자가 기준 버전 선택에서 최신이 아닌 버전을 직접 고른 저장만 보낸다 —
+  // 없으면 서버가 최신이 아닌 기준 버전의 저장을 409 로 거절한다 (리뷰 6회차)
+  allowHistoricalBase?: boolean;
 }
 
 export type AlterResponse =
