@@ -10,7 +10,7 @@ import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import { splitList } from './lists';
 import { baseType } from './normalize-mysql';
-import { isUnknown, type SessionValue, type State } from './state';
+import { cappedReason, isUnknown, type SessionValue, type State } from './state';
 import { forgetStateChangedBy, storedFunctionCall } from './stored-call';
 import { DEFAULT_SQL_MODE, fail, RE_EXPORT, type DefaultSpec } from './types';
 
@@ -125,7 +125,7 @@ function sessionWrite(st: State, a: Cursor, target: string): Write | undefined {
 // 계산해 둔 값을 대입한다 (2단계). 세션 sql_mode 의 DEFAULT 는 이때 전역 값을 읽는다 (sqlModeDefault)
 function assignValue(st: State, target: string, value: SessionValue, written: Token | undefined, assignment: string): void {
   if (target.startsWith('@')) {
-    st.saved.set(target, isUnknown(value) ? { unknown: `사용자 변수 ${target} 에 앞의 \`${assignment}\` 문장이 알 수 없는 값을 넣었습니다 — ${value.unknown}` } : value);
+    st.saved.set(target, isUnknown(value) ? { unknown: cappedReason(`사용자 변수 ${target} 에 앞의 \`${assignment}\` 문장이 알 수 없는 값을 넣었습니다 — ${value.unknown}`) } : value);
     return;
   }
   const tracked = target === 'sql_mode' && value === 'DEFAULT' ? sqlModeDefault(st) : value;
@@ -153,10 +153,10 @@ function setKnown(st: State, target: string, value: string, written: Token | und
 function setUnknown(st: State, target: string, assignment: string, why: string): void {
   if (target === 'time_zone') {
     st.timeZoneUtc = false;
-    st.timeZoneUnknown = `앞의 \`${assignment}\` 문장이 세션 시간대를 알 수 없는 값으로 정해(${why})`;
+    st.timeZoneUnknown = `앞의 \`${assignment}\` 문장이 세션 시간대를 알 수 없는 값으로 정해(${cappedReason(why)})`;
     return;
   }
-  const reason = `앞의 \`${assignment}\` 문장이 세션 ${target.toUpperCase()} 를 알 수 없는 값으로 정했습니다 — ${why}`;
+  const reason = cappedReason(`앞의 \`${assignment}\` 문장이 세션 ${target.toUpperCase()} 를 알 수 없는 값으로 정했습니다 — ${why}`);
   if (target === 'sql_mode') {
     st.sqlModeUnknown = reason;
     st.sqlModeLiteral = false;

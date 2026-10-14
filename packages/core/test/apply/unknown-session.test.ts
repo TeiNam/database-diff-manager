@@ -222,3 +222,36 @@ describe('처음 세션 SQL_MODE 의 IGNORE_SPACE', () => {
     expectRejected(runIgnoreSpace("SET sql_mode='IGNORE_SPACE';", 'SET sql_mode = DEFAULT;', ...TAIL), TAIL.length + 3, '무시한 문장의 저장 함수 호출(`NOW`)');
   });
 });
+
+// 리뷰 11회차 Claude F7: 모르는 값을 다른 변수로 옮길 때마다 앞 까닭을 감싸, 옮기는 SET 이 이어진 스크립트(495,000자 — 서버 한도 안)의 안내가 220만 자가 됐다.
+// 까닭이 500자를 넘으면 가운데를 줄여 앞(가장 가까운 대입)과 끝(값을 처음 모르게 만든 까닭)을 남긴다
+describe('모르는 값의 까닭 글 길이', () => {
+  it('옮기는 SET 이 45,000번 이어져도 안내는 짧고, 가장 가까운 대입과 처음 까닭을 밝힌다', () => {
+    const lines = ['SET @a = @@global.sql_mode;'];
+    for (let k = 0; k < 45000; k++) lines.push(k % 2 ? 'SET @a=@b;' : 'SET @b=@a;');
+    lines.push('SET sql_mode=@a;', 'CREATE PROCEDURE p() SELECT 1;');
+    const r = run(lines.join('\n'));
+    expectRejected(r, lines.length, 'PROCEDURE `p` 은(는) 만들 때의 세션 SQL_MODE 를 기억하는데', '앞의 `SET sql_mode=@a` 문장이 세션 SQL_MODE 를 알 수 없는 값으로 정했습니다',
+      '서버 변수 값(@@global·@@persist 의 sql_mode)은 알 수 없습니다', ' … ');
+    expect(!r.ok && r.error.reason.length).toBeLessThan(700);
+  });
+
+  it('세션 값과 사용자 변수를 번갈아 옮겨도 같고, TIME_ZONE·FOREIGN_KEY_CHECKS 도 같다', () => {
+    const chain = (target: string, source: string, dependent: string): ApplyResult => {
+      const lines = [`SET ${target} = ${source};`];
+      for (let k = 0; k < 2000; k++) lines.push(`SET @v${k} = @@${target};`, `SET ${target} = @v${k};`);
+      return run([...lines, dependent].join('\n'));
+    };
+    for (const [r, root] of [
+      [chain('sql_mode', '@@global.sql_mode', 'CREATE PROCEDURE p() SELECT 1;'), '서버 변수 값(@@global·@@persist 의 sql_mode)은 알 수 없습니다'],
+      [chain('foreign_key_checks', '@never_saved', 'ALTER TABLE t ADD FOREIGN KEY (v) REFERENCES missing (id);'), '값을 저장하지 않은 변수입니다: @never_saved'],
+    ] as const) {
+      expectRejected(r, 4002, root);
+      expect(!r.ok && r.error.reason.length).toBeLessThan(700);
+    }
+    const copies = Array.from({ length: 2000 }, (_, k) => (k % 2 ? 'SET @a = @b;' : 'SET @b = @a;'));
+    const tz = run(['SET @a = @never_saved;', ...copies, 'SET time_zone = @a;', "ALTER TABLE t ADD ts TIMESTAMP NULL DEFAULT '2020-01-01 00:00:00';"].join('\n'));
+    expectRejected(tz, 2003, '앞의 `SET time_zone = @a` 문장이 세션 시간대를 알 수 없는 값으로 정해', '값을 저장하지 않은 변수입니다: @never_saved');
+    expect(!tz.ok && tz.error.reason.length).toBeLessThan(700);
+  });
+});

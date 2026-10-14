@@ -35,6 +35,22 @@ export interface Unknown {
 export type SessionValue = string | Unknown;
 export const isUnknown = (v: SessionValue): v is Unknown => typeof v !== 'string';
 
+// 모르는 값의 까닭 글 상한 (리뷰 11회차 Claude F7): 모르는 값을 다른 변수·세션 값으로 옮길 때마다 앞 까닭을 감싸므로, 옮기는 SET 이 이어진 스크립트(서버 한도 안의 495,000자)의
+// 안내가 수백만 자가 됐다. 감싼 까닭이 넘으면 가운데를 줄여 앞(가장 가까운 대입)과 끝(값을 처음 모르게 만든 까닭)을 남긴다 — 단계마다 줄이므로 늘 이 길이 안이다
+const MAX_REASON = 500;
+const REASON_HEAD = 200;
+const ELIDED = ' … ';
+const LOW_SURROGATE = /[\udc00-\udfff]/;
+
+// 대리 쌍(UTF-16 의 4바이트 글자)을 가르지 않는 자리: at 이 쌍의 뒤쪽이면 쌍 밖으로 옮긴다 (forward 면 뒤로, 아니면 앞으로 — 어느 쪽이든 줄인 글이 길어지지 않는다)
+const outsidePair = (text: string, at: number, forward: boolean): number => (LOW_SURROGATE.test(text[at] ?? '') ? at + (forward ? 1 : -1) : at);
+
+export function cappedReason(reason: string): string {
+  if (reason.length <= MAX_REASON) return reason;
+  const tail = outsidePair(reason, reason.length - (MAX_REASON - REASON_HEAD - ELIDED.length), true);
+  return `${reason.slice(0, outsidePair(reason, REASON_HEAD, false))}${ELIDED}${reason.slice(tail)}`;
+}
+
 export interface State {
   model: SchemaModel; // ponytail: 작업용 사본 하나를 고쳐 쓴다 (입력 모델은 그대로, 실패하면 통째로 버린다)
   readonly schemaName: string;
