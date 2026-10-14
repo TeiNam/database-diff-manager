@@ -6,22 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VersionSummary } from '../src/api/types';
 import { AlterDialog } from '../src/features/alter/AlterDialog';
 import { HistoryPage } from '../src/pages/HistoryPage';
+import { alterBodies, DERIVED, mockAlterApi, NO_SUGGESTION, PREVIEW, SAVED, version } from './alter-fixtures';
 import { json, mockApi, renderWithProviders } from './render';
-
-const version = (id: number, versionNo: number, sourceFormat: 'sql' | 'md', extra: Partial<VersionSummary> = {}): VersionSummary => ({
-  id, schemaId: 7, databaseId: 1, databaseName: 'db', schemaName: 'shop', versionNo, sourceFormat, sourceFilename: `shop-v${versionNo}.${sourceFormat}`,
-  note: null, uploadedBy: 'admin', uploadedAt: '2026-10-13T00:00:00.000Z', changedObjects: 1, ...extra,
-});
-const DERIVED = { baseVersionNo: 1, statementCount: 1, defaults: { charset: 'utf8mb4', collation: 'utf8mb4_general_ci' } };
-
-// ALTER 로 만든 버전이 없는 스키마에서는 대화상자가 기준 버전 테이블의 기본 문자셋을 한 번 묻는다.
-// 그 답을 따로 정하지 않은 테스트는 '알 수 없음' 으로 답해, 기본값은 MySQL 8 기본값 그대로다
-const NO_SUGGESTION = { defaults: null };
-const mockAlterApi = (routes: Record<string, unknown>) => mockApi({
-  'GET /api/versions/1/alter-defaults': NO_SUGGESTION,
-  'GET /api/versions/3/alter-defaults': NO_SUGGESTION,
-  ...routes,
-});
 
 describe('AlterDialog', () => {
   it('SQL 버전만 기준으로 고르고(기본: 최신), 미리보기 뒤에만 저장한다 — 스키마 기본값은 마지막 ALTER 적용 값', async () => {
@@ -94,9 +80,6 @@ describe('HistoryPage — ALTER 적용', () => {
 });
 
 // 아래는 브리프의 필수 테스트 외에 더한 보강 테스트
-const PREVIEW = { status: 'preview', applied: 1, changes: [{ kind: 'table', name: 'member', op: 'add' }], renames: [] };
-const alterBodies = (calls: ReturnType<typeof mockApi>, id: number) =>
-  calls.filter((c) => c.url === `/api/versions/${id}/alter`).map((c) => JSON.parse(String(c.init.body)));
 
 describe('AlterDialog — 입력과 결과 처리', () => {
   it('.sql 파일을 고르면 스크립트·파일명·메모를 함께 보내고, 스크립트를 직접 고치면 파일명은 뺀다', async () => {
@@ -292,7 +275,6 @@ describe('HistoryPage — viewer 와 열린 스크립트 패널', () => {
 });
 
 // 2way 리뷰 1회차 (web)
-const SAVED = { status: 'ok', versionId: 10, versionNo: 2, applied: 1, changes: [{ kind: 'table', name: 'member', op: 'add' }] };
 const asBytes = (text: string) => [...new TextEncoder().encode(text)];
 const scriptFile = (name: string, bytes: number[]) => new File([new Uint8Array(bytes)], name, { type: 'text/plain' });
 
