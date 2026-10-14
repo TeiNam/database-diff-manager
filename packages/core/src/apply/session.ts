@@ -139,7 +139,7 @@ function setKnown(st: State, target: string, value: string, written: Token | und
     st.fkChecks = foreignKeyChecksOf(value);
     st.fkChecksUnknown = undefined;
   } else if (target === 'sql_mode') {
-    st.sqlMode = resolveSqlMode(value);
+    st.sqlMode = sqlModeOf(value, written);
     st.sqlModeUnknown = undefined;
   } else {
     st.timeZoneUtc = isUtcZone(written);
@@ -158,6 +158,17 @@ function setUnknown(st: State, target: string, assignment: string, why: string):
   const reason = `앞의 \`${assignment}\` 문장이 세션 ${target.toUpperCase()} 를 알 수 없는 값으로 정했습니다 — ${why}`;
   if (target === 'sql_mode') st.sqlModeUnknown = reason;
   else st.fkChecksUnknown = reason;
+}
+
+// 대입한 SQL_MODE 값 (written: 쓴 값의 첫 토큰). 숫자 (리뷰 11회차 Claude F8, 8.0.46·8.4.11 실측): MySQL 은 정수를 모드 비트로 읽어 0·00 은 빈 모드, 1 은 REAL_AS_FLOAT 이고,
+// 0.0 은 1232, 0x00 은 1231 이다. 0 은 빈 모드로 받고 그 밖의 숫자는 비트를 재현하지 않아 거부한다. 변수(@m·@@foreign_key_checks)의 숫자는 정수(비트)인지
+// 문자열('0' 은 1231)인지 따라가지 않아 함께 거부한다. 따옴표 친 '0' 은 모드 이름이 아니라 1231 이다 (resolveSqlMode)
+function sqlModeOf(value: string, written: Token | undefined): string {
+  if (written?.t === 'number') return /^0+$/.test(value) ? '' : fail(`SQL_MODE 를 숫자 ${value} 로 쓰면 MySQL 이 모드 비트로 읽습니다 — 0(빈 모드) 밖의 숫자는 받지 않습니다 — ${RE_EXPORT}`);
+  if (written?.t !== 'string' && /^\d+$/.test(value)) {
+    fail(`SQL_MODE 에 넣은 변수 값 ${value} 가 숫자입니다 — MySQL 은 정수면 모드 비트로 읽고 문자열이면 1231 로 거부하는데, 이 도구는 변수 값이 정수인지 따라가지 않습니다 — ${RE_EXPORT}`);
+  }
+  return resolveSqlMode(value);
 }
 
 // UTC 를 쓴 리터럴인가. 변수에서 되돌리는 대입(SET time_zone = @OLD_TIME_ZONE)·@@time_zone·DEFAULT 는 서버 시간대일 수 있어 UTC 로 보지 않는다

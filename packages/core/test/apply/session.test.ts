@@ -526,3 +526,29 @@ describe('한 SET 문은 값을 모두 계산한 뒤 차례로 대입한다', ()
     expect(before).toMatchObject({ ok: false, error: { index: 6, reason: expect.stringContaining('사용자 변수 @a 의 값을 알 수 없습니다') } });
   });
 });
+
+// 리뷰 11회차 Claude F8 (8.0.46·8.4.11 실측): MySQL 은 정수로 쓴 sql_mode 를 모드 비트로 읽는다 — 0·00 은 빈 모드, 1 은 REAL_AS_FLOAT. 문자열 '0' 은 1231, 0.0 은 1232,
+// 0x00 은 1231 이다. 0 은 빈 모드로 받고, 그 밖의 숫자는 비트를 재현하지 않아 RE_EXPORT 로 거부한다. 변수의 숫자는 정수인지 문자열인지 따라가지 않아 함께 거부한다
+describe('숫자로 쓴 SQL_MODE', () => {
+  it.each(['SET sql_mode = 0', 'SET SESSION sql_mode = 00', 'SET @@sql_mode = 0'])('%s 는 빈 모드다', (sql) => {
+    const st = freshState();
+    setIn(st, sql);
+    expect(st).toMatchObject({ sqlMode: '', sqlModeUnknown: undefined });
+  });
+
+  it.each(['SET sql_mode = 1', 'SET sql_mode = 4', 'SET sql_mode = 0.0', 'SET sql_mode = 0x00', "SET @m = 0, @n = '5'\nSET sql_mode = @m", "SET @n = '5'\nSET sql_mode = @n"])(
+    '%s 는 MySQL 오류 번호 없이 RE_EXPORT 로 거부한다', (sql) => {
+      const st = freshState();
+      const message = messageOf(() => sql.split('\n').forEach((one) => setIn(st, one)));
+      expect(message).toContain('숫자');
+      expect(message).not.toMatch(/\(MySQL \d+\)/);
+      expect(message.endsWith(RE_EXPORT), message).toBe(true);
+      expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
+    });
+
+  it("따옴표 친 '0' 은 MySQL 처럼 1231 이고, 0 으로 정한 뒤 만든 루틴은 빈 SQL_MODE 를 기억한다", () => {
+    expect(messageOf(() => setIn(freshState(), "SET sql_mode = '0'"))).toContain('(MySQL 1231)');
+    const r = applyScript(empty, 'CREATE TABLE t (id INT PRIMARY KEY);\nSET sql_mode = 0;\nCREATE PROCEDURE p() SELECT 1;', { schemaName: 'shop' });
+    expect(r.ok && r.model.routines.map((x) => x.sqlMode)).toEqual(['']);
+  });
+});
