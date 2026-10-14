@@ -189,6 +189,13 @@ describe('문장 나누기와 렉서 (덤프 파서와 함께 쓴다)', () => {
     expect([s.closes, s.leading.closes, s.leading.ends]).toEqual([[quoted.lastIndexOf('*/')], [quoted.indexOf('*/')], [quoted.indexOf(';'), quoted.indexOf(';', quoted.indexOf(';') + 1)]]);
   });
 
+  // 리뷰 14회차 F3: mysql 클라이언트가 인자 뒤를 버리는 DELIMITER 줄의 표지·닫힘은 뺀다 (마지막 문장 뒤의 것도)
+  it('splitForApply 는 DELIMITER 줄의 인자 뒤 실행 주석을 mysql 클라이언트처럼 버린다', () => {
+    const text = 'DELIMITER ;; /*!40101 /* z */ */ /*!99999 w\nSELECT 1 /* v */;;\nDELIMITER ; /*!40101 */';
+    const { statements: [s], trailing } = splitForApply(text);
+    expect([s.leading.marks, s.leading.closes, s.marks, s.closes, trailing.marks, trailing.closes]).toEqual([[], [], [], [], [], []]);
+  });
+
   it('렉서는 버전 번호와 상관없이 실행 주석의 내용을 토큰으로 읽는다 (덤프의 /*!80023 INVISIBLE */)', () => {
     expect(tokenize('KEY `k` (`c`) /*!99999 INVISIBLE */').map((t) => t.v)).toEqual(['KEY', 'k', '(', 'c', ')', 'INVISIBLE']);
     const dump = parseSqlDump(tdExport('CREATE TABLE `v` (\n  `id` int NOT NULL,\n  `c` int DEFAULT NULL /*!80023 INVISIBLE */,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;'));
@@ -243,5 +250,29 @@ describe('문장 없이 끝난 덩어리의 실행 주석', () => {
     const r = run(script);
     expect(r).toMatchObject({ ok: false, error: { index: 2, line } });
     expect(!r.ok && r.error.reason).toContain(reason);
+  });
+
+  // 리뷰 14회차 F3 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측 — 넷 모두 a·b 와 루틴 p): mysql 클라이언트는 DELIMITER 줄의 인자 뒤를 버린다 (com_delimiter·get_arg). 그 줄의 실행
+  // 주석은 덩어리 검사에서 뺀다 (13회차는 닫히지 않은 '/*!40101 x' 를 MySQL 1064 로, 12회차부터 '/*!99999 x' 도 1064 로 거부했다). 문장 나누기가 그 줄 끝에서 렉서를 새로
+  // 읽혀 뒤 글을 닫히지 않은 그 주석 안의 것으로 보지 않는다 — 뒤의 일반 주석('/* 메모 */')을 실행 주석 안의 주석으로 거부하지 않는다
+  it.each([
+    ['닫히지 않은 실행하는 주석 (Claude 재현)', 'DELIMITER ;; /*!40101 x'],
+    ['닫히지 않은 건너뛰는 주석', 'DELIMITER ;; /*!99999 x'],
+    ['판에 따라 갈리는 번호와 다섯 자리가 아닌 번호', 'DELIMITER ;; /*!80400 x /*!1 y'],
+    ['안의 주석', 'DELIMITER ;; /*!40101 /* x */ y'],
+  ])('DELIMITER 줄의 인자 뒤 실행 주석은 mysql 클라이언트처럼 버린다 — %s', (_name, command) => {
+    const r = run(`ALTER TABLE t ADD a INT;\n${command}\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;\nALTER TABLE t ADD b INT /* 메모 */;`);
+    expect(columnsOf(r)).toEqual(['id', 'a', 'b']);
+    expect(r.ok && r.model.routines.map((x) => x.name)).toEqual(['p']);
+  });
+
+  it('마지막 문장 뒤의 DELIMITER 줄도 같다 (넷 모두 a)', () => {
+    expect(columnsOf(run('ALTER TABLE t ADD a INT;\nDELIMITER ;; /*!99999 -- x */ ALTER TABLE t ADD c INT;'))).toEqual(['id', 'a']);
+  });
+
+  // 그 주석이 닫히지 않은 것으로 읽지 않으므로 뒤의 짝 없는 '*/' 는 MySQL 처럼 글로 남는다 (넷 모두 a·c 뒤 4번째 줄에서 1064 — 그 주석의 닫힘으로 읽으면 d 를 더한다)
+  it('DELIMITER 줄의 닫히지 않은 실행 주석 뒤의 짝 없는 */ 는 문장의 글이다', () => {
+    const r = run('ALTER TABLE t ADD a INT;\nDELIMITER ;; /*!99999\nALTER TABLE t ADD c INT;;\n*/ ALTER TABLE t ADD d INT;;\nDELIMITER ;');
+    expect(r).toMatchObject({ ok: false, error: { index: 3, line: 4 } });
   });
 });

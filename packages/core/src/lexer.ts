@@ -42,9 +42,10 @@ export function tokenize(src: string, mode: LexMode = {}): Token[] {
   return [...lexTokens(src, mode)];
 }
 
-// 토큰을 하나씩 만든다. mode 는 매 문자열마다 읽으므로 호출자가 도중에 바꿀 수 있다 (덤프 안의 SET SQL_MODE)
-export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
-  let i = 0;
+// 토큰을 하나씩 만든다. mode 는 매 문자열마다 읽으므로 호출자가 도중에 바꿀 수 있다 (덤프 안의 SET SQL_MODE). start: 읽기 시작할 원문 자리 — 그 앞에서 연 주석·따옴표는
+// 없는 것으로 본다 (문장 나누기가 DELIMITER 줄 끝에서 새로 읽는다, 리뷰 14회차 F3)
+export function* lexTokens(src: string, mode: LexMode = {}, start = 0): Generator<Token> {
+  let i = start;
   let versioned = 0; // 열려 있는 /*!NNNNN 주석 수
   while (i < src.length) {
     const c = src[i];

@@ -6,8 +6,8 @@
 // - 80500 이상: 8.0·8.4 의 어느 판도 실행하지 않는 주석이다. 문장을 통째로 감쌌으면 주석뿐인 문장이라 MySQL 도 오류 없이 지나간다
 // 번호가 다섯 자리가 아니면 거부한다: 다섯 자리보다 짧은 숫자는 MySQL 이 실행할 글로 읽고(/*!1 …), 여섯 자리는 8.0 이 앞 다섯 자리만 번호로 읽는데 8.4 는 뒤에 공백이
 // 오면 여섯 자리를 번호로 읽는다(/*!100000 … 은 8.0 1064, 8.4 는 건너뛴다). 렉서는 '/*!' 뒤의 숫자를 모두 표지로 떼고 내용은 번호와 상관없이 토큰으로 읽는다 —
-// 덤프 파서와 함께 쓰므로 그대로 두고, 문장 나누기가 알려 준 표지(ApplyStatement.marks)로 이 문장에서 MySQL 이 실행하는 글을 만든다. 문장 앞의 문장 없는 덩어리·DELIMITER 줄
-// (ApplyStatement.leading)과 마지막 문장 뒤(ApplySplit.trailing)의 표지도 본다 (리뷰 12·13회차)
+// 덤프 파서와 함께 쓰므로 그대로 두고, 문장 나누기가 알려 준 표지(ApplyStatement.marks)로 이 문장에서 MySQL 이 실행하는 글을 만든다. 문장 앞의 문장 없는 덩어리
+// (ApplyStatement.leading)와 마지막 문장 뒤(ApplySplit.trailing)의 표지도 본다 (리뷰 12·13회차). DELIMITER 줄의 인자 뒤는 mysql 클라이언트처럼 읽지 않는다 (리뷰 14회차 F3)
 import { lineOf } from '../cursor';
 import type { ApplyStatement, LexNotes, VersionMark } from '../parse-dump';
 import { isCreateRoutine } from './object-stmt';
@@ -44,7 +44,8 @@ export function skippedComments(script: string, s: ApplyStatement): Region[] {
 // 문장 앞 덩어리(s.leading — 앞 문장 뒤의 문장 없이 끝난 덩어리·DELIMITER 줄)의 건너뛰는 실행 주석 자리 (리뷰 12회차 Claude F5). 그 덩어리에는 토큰이 없어 판에 따라 갈리는
 // 번호도 8.0·8.4 가 실행하든 건너뛰든 같아 받는다 ('/*!80400 */;' 뒤의 문장도 받는다 — 그 전제가 깨지는 것은 assertSameEitherWay 가 거부한다). 번호를 다르게 읽는 것과,
 // 건너뛰는 것 안의 주석·줄 주석은 문장 안의 것처럼 거부한다. 표지마다 그 덩어리를 끝낸 구분자 안에서 닫혀야 한다 — mysql 클라이언트는 그 구분자에서 끊어 보낸다 (리뷰 13회차:
-// 뒤 덩어리에서 닫힌 '/*!99999 ;' 줄바꿈 '*/;' 도 받았다). 마지막 덩어리(DELIMITER 줄과 그 앞)는 이 문장 앞까지 본다. 거부 안내는 표지가 있는 줄을 밝힌다 (Place)
+// 뒤 덩어리에서 닫힌 '/*!99999 ;' 줄바꿈 '*/;' 도 받았다). 마지막 덩어리(DELIMITER 줄 앞)는 이 문장 앞까지 본다 — DELIMITER 줄의 인자 뒤는 mysql 클라이언트처럼 문장 나누기가
+// 읽지 않아 표지가 없다 (리뷰 14회차 F3). 거부 안내는 표지가 있는 줄을 밝힌다 (Place)
 export function leadingSkippedComments(script: string, s: ApplyStatement): Region[] {
   const { marks, closes, ends } = s.leading;
   const closesOf = byChunk(closes, (at) => at, ends);

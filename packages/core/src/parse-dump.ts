@@ -89,7 +89,7 @@ type MakeStatement<S> = (statement: DumpStatement, offset: number, from: number)
 const plain: MakeStatement<DumpStatement> = (statement) => statement;
 
 // 문장 끝: 기본은 ';', 'DELIMITER x' 줄 뒤로는 x ('DELIMITER ;' 로 복귀, x 는 delimiterArg). 문자열·주석 안의 구분자는 토큰화에서 이미 빠진다.
-// DELIMITER 줄은 클라이언트 명령이라 문장으로 내보내지 않는다
+// DELIMITER 줄은 클라이언트 명령이라 문장으로 내보내지 않고, 인자 뒤는 mysql 클라이언트처럼 읽지 않는다 (afterCommand)
 export function splitStatements(text: string): { ddl: string; line: number }[] {
   return splitDump(text).map(({ ddl, line }) => ({ ddl, line }));
 }
@@ -174,12 +174,15 @@ function scan<S extends DumpStatement>(text: string, lenient: boolean, make: Mak
     mode.noBackslashEscapes = session.noBackslashEscapes;
   };
   try {
-    for (const t of lexTokens(text, mode)) {
+    let tokens = lexTokens(text, mode);
+    for (let next = tokens.next(); !next.done; next = tokens.next()) {
+      const t = next.value;
       if (t.e <= skipUntil) continue;
       if (!start) from = skipUntil;
       if (!start && isDelimiterCommand(text, t)) {
         const end = lineEnd(text, t.s);
         delimiter = delimiterArg(text.slice(t.e, end));
+        tokens = afterCommand(text, t.e, end, mode);
         skipUntil = end;
         continue;
       }
@@ -247,6 +250,15 @@ const lineEnd = (text: string, pos: number): number => {
   const end = text.indexOf('\n', pos);
   return end < 0 ? text.length : end;
 };
+
+// DELIMITER 줄 뒤의 토큰 (리뷰 14회차 F3, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 그 줄의 인자 뒤를 버리므로(com_delimiter·get_arg) 렉서는 줄 끝(end)에서
+// 새로 읽는다 — 13회차까지는 그 줄의 나머지도 읽어, 닫지 않은 실행 주석('DELIMITER ;; /*!40101 x')을 뒤 루틴·ALTER 까지 열린 것으로 보고 1064 라 거부했고, 뒤의 짝 없는 '*/' 는
+// 그 주석을 닫은 것으로 읽었다. DELIMITER 단어 뒤(from 부터)에서 렉서가 알렸을 ASCII 밖 공백은 따옴표·주석 안의 것까지 알린다 — unicode-space.ts 가 그 줄의 것도 거부한다
+// (리뷰 12회차 Claude F5, 보수적)
+function afterCommand(text: string, from: number, end: number, mode: LexMode): Generator<Token> {
+  for (let k = from; k < end; k++) if (text.charCodeAt(k) > 0x7f && /\s/.test(text[k])) mode.watch?.space(k);
+  return lexTokens(text, mode, end);
+}
 
 // DELIMITER 의 인자 (mysql 클라이언트 com_delimiter·get_arg, 8.4.11 실측): 앞 공백을 건너뛰고, 따옴표(' " `)로 시작하면 짝 따옴표 앞까지(짝이 없으면 줄 끝까지),
 // 아니면 첫 공백(' ') 앞까지다 — 탭은 인자를 끝내지 않는다. 줄의 나머지('-- …'·'# …' 주석)는 버리고, CRLF 의 '\r' 은 줄 끝으로 본다. 인자가 없으면 ';'
