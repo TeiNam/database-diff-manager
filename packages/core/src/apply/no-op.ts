@@ -5,7 +5,7 @@ import type { Token } from '../lexer';
 import { splitList } from './lists';
 import { canonicalCharset, canonicalCollation, charsetOfCollation } from './normalize-mysql';
 import { optionValue } from './options';
-import { findTable, objectName, routineKey, type State } from './state';
+import { assertNoStoredFunctionCall, findTable, objectName, type State } from './state';
 import { fail, RE_EXPORT } from './types';
 
 type NoOp = (st: State, c: Cursor) => void;
@@ -44,25 +44,14 @@ const isAssignmentAt = (toks: readonly Token[], k: number): boolean => isOp(toks
 function assertNoVariableAssignment(st: State, c: Cursor): void {
   const assigns = c.toks.some((t, k) => isWordToken(t, 'INTO') || isAssignmentAt(c.toks, k));
   if (assigns) fail(`사용자 변수에 대입하는 조회 문장(:=·INTO)은 뒤 SET 이 읽는 값을 바꿀 수 있어 받지 않습니다 — ${RE_EXPORT}`);
-  assertNoStoredFunctionCall(st, c);
+  assertNoStoredFunctionCall(st, c.toks);
 }
 
 // 그 밖의 무시하는 문장도 같다 (리뷰 6회차 Codex #2): 데이터 문장은 INSERT … VALUES ((@v := 'x')) 처럼 사용자 변수에 대입할 수 있는데, 문장을 실행하지 않으니
 // 대입한 값을 몰라 뒤 SET 이 그 변수를 읽으면(SET SQL_MODE = @v) 옛 값을 쓴다. INSERT·REPLACE 의 INTO 는 테이블을 가리켜 대입이 아니므로 ':=' 만 본다
 function assertNoAssignment(st: State, c: Cursor): void {
   if (c.toks.some((_t, k) => isAssignmentAt(c.toks, k))) fail(`사용자 변수에 대입하는 데이터 문장(:=)은 뒤 SET 이 읽는 값을 바꿀 수 있어 받지 않습니다 — ${RE_EXPORT}`);
-  assertNoStoredFunctionCall(st, c);
-}
-
-const isNameToken = (t: Token | undefined): boolean => t?.t === 'word' || t?.t === 'ident';
-
-// 무시하는 문장이 현재 모델의 저장 함수를 부르면 받지 않는다 (리뷰 7회차 R7-2): 저장 함수는 SET @m = … 으로 사용자 변수를 바꿀 수 있는데 문장을 실행하지 않으니 그 결과를
-// 평가할 수 없어, 뒤 SET 이 그 변수를 읽으면(SET SQL_MODE = @m) 옛 값을 쓴다. 호출은 식별자 바로 뒤에 '(' 가 오고 그 이름(대소문자 무시)이 모델의 함수 루틴인 꼴이다 —
-// 같은 스크립트에서 앞서 만든 함수도 모델에 있다. 내장 함수(NOW·CONCAT …)와 모델에 없는 이름, 이름이 같은 프로시저는 그대로 무시한다. 저장 함수와 이름이 같은
-// 테이블(INSERT INTO f (…))은 호출과 가르지 않고 거부한다 (보수적)
-function assertNoStoredFunctionCall(st: State, c: Cursor): void {
-  const call = c.toks.find((t, k) => isNameToken(t) && isOp(c.toks[k + 1], '(') && st.routineKeys.has(routineKey({ kind: 'function', name: t.v })));
-  if (call) fail(`무시하는 문장이 저장 함수 \`${call.v}\` 를 호출합니다 — 문장을 실행하지 않아 저장 함수의 결과(사용자 변수 변경 등)를 평가할 수 없고, 뒤 SET 이 읽는 값과 어긋날 수 있어 받지 않습니다 — ${RE_EXPORT}`);
+  assertNoStoredFunctionCall(st, c.toks);
 }
 
 // FLUSH PRIVILEGES·FLUSH TABLES (리뷰 4회차 M-3): 권한 표를 다시 읽거나 열린 테이블을 닫을 뿐이다. 뒤에 더 쓴 꼴(FLUSH TABLES WITH READ LOCK, 테이블 이름)과

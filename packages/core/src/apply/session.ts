@@ -1,12 +1,12 @@
 // SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
 // (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, unique_checks 등)는 스키마에 영향이 없어 무시한다.
-// 서버 변수(SET GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)는 이 스크립트의 세션을 바꾸지 않아 무시한다 (서버 sql_mode 를 바꾼 사실만 기억해 뒤의 SET sql_mode = DEFAULT 를 거부한다).
+// 서버 변수(SET GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)는 이 스크립트의 세션을 바꾸지 않아 무시한다 (서버 sql_mode 를 바꾼 사실만 기억해 뒤의 SET sql_mode = DEFAULT 를 거부하고, 값 안의 저장 함수 호출도 거부한다).
 // td-export·마이그레이션 스크립트의 'SET @OLD_X = @@X, X = 0' 저장과 'SET X = @OLD_X' 복원을 따른다
 import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import { splitList } from './lists';
 import { baseType } from './normalize-mysql';
-import type { State } from './state';
+import { assertNoStoredFunctionCall, type State } from './state';
 import { DEFAULT_SQL_MODE, fail, RE_EXPORT, type DefaultSpec } from './types';
 
 // 값에 따라 이후 CREATE TABLE 의 결과나 허용 여부가 달라지는 세션 변수 (소문자). 8.0 에 없는 이름(storage_engine, restrict_fk_on_non_standard_key)도 막는다
@@ -52,8 +52,10 @@ function assign(st: State, a: Cursor, inherited: Scope): Scope {
   const variable = target(a);
   if (!variable.name.startsWith('@') && (variable.scope ?? scope) === 'server') {
     // 서버 변수: 값이 식이어도, 스키마에 영향을 주는 변수여도 이 세션과 상관없다. 다만 서버 sql_mode 를 바꾼 사실은 기억한다 (sessionSqlMode).
-    // PERSIST_ONLY 는 실행 중인 값을 바꾸지 않지만 범위를 가르지 않고 함께 본다 (드물어 보수적으로 거부)
+    // PERSIST_ONLY 는 실행 중인 값을 바꾸지 않지만 범위를 가르지 않고 함께 본다 (드물어 보수적으로 거부).
+    // 값을 읽지 않고 버려도 그 안의 저장 함수 호출은 실행되어 사용자 변수를 바꿀 수 있으므로 다른 무시하는 문장과 같이 거부한다 (리뷰 7회차 R7-2)
     if (variable.name === 'sql_mode') st.serverSqlModeChanged = true;
+    assertNoStoredFunctionCall(st, a.toks);
     return scope;
   }
   assignSession(st, a, variable.name);

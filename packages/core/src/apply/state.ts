@@ -1,6 +1,7 @@
 // ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE·time_zone 이 UTC 인지), 기준 이름 추적
 import { Cursor } from '../cursor';
 import { routineNameKey } from '../diff';
+import type { Token } from '../lexer';
 import type { Column, ForeignKey, Routine, SchemaModel, Table } from '../model';
 import { splitList } from './lists';
 import { fail, RE_EXPORT, type ApplyDefaults } from './types';
@@ -55,6 +56,18 @@ export interface State {
 }
 
 export const routineKey = (r: Pick<Routine, 'kind' | 'name'>): string => `${r.kind}:${routineNameKey(r.name)}`;
+
+const isNameToken = (t: Token): boolean => t.t === 'word' || t.t === 'ident';
+const isOpenParen = (t: Token | undefined): boolean => t?.t === 'op' && t.v === '(';
+
+// 무시하는 문장(조회·데이터 문장, 값을 읽지 않고 버리는 서버 변수 대입 — no-op.ts·session.ts)이 현재 모델의 저장 함수를 부르면 받지 않는다 (리뷰 7회차 R7-2):
+// 저장 함수는 SET @m = … 으로 사용자 변수를 바꿀 수 있는데 문장을 실행하지 않으니 그 결과를 평가할 수 없어, 뒤 SET 이 그 변수를 읽으면(SET SQL_MODE = @m) 옛 값을 쓴다.
+// 호출은 식별자 바로 뒤에 '(' 가 오고 그 이름(대소문자 무시)이 모델의 함수 루틴인 꼴이다 — 같은 스크립트에서 앞서 만든 함수도 모델에 있다. 내장 함수(NOW·CONCAT …)와
+// 모델에 없는 이름, 이름이 같은 프로시저는 그대로 무시한다. 저장 함수와 이름이 같은 테이블(INSERT INTO f (…))은 호출과 가르지 않고 거부한다 (보수적)
+export function assertNoStoredFunctionCall(st: State, toks: readonly Token[]): void {
+  const call = toks.find((t, k) => isNameToken(t) && isOpenParen(toks[k + 1]) && st.routineKeys.has(routineKey({ kind: 'function', name: t.v })));
+  if (call) fail(`무시하는 문장이 저장 함수 \`${call.v}\` 를 호출합니다 — 문장을 실행하지 않아 저장 함수의 결과(사용자 변수 변경 등)를 평가할 수 없고, 뒤 SET 이 읽는 값과 어긋날 수 있어 받지 않습니다 — ${RE_EXPORT}`);
+}
 
 export function initialState(base: SchemaModel, schemaName: string, defaults: ApplyDefaults, sqlMode: string): State {
   const model = structuredClone(base);

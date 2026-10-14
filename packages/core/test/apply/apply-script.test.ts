@@ -170,14 +170,16 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
     }
   });
 
-  it('저장 함수가 SET @m 으로 바꾼 사용자 변수를 SET SQL_MODE = @m 이 읽기 전에 거부한다 (R7-2 재현)', () => {
-    const script = [
-      "SET @m = 'STRICT_TRANS_TABLES';", 'DELIMITER $$', 'CREATE FUNCTION set_m() RETURNS INT DETERMINISTIC NO SQL', 'BEGIN', " SET @m = 'NO_ENGINE_SUBSTITUTION';", ' RETURN 1;', 'END$$',
-      'DELIMITER ;', 'SELECT set_m();', 'SET SQL_MODE = @m;', 'CREATE PROCEDURE p() SELECT 1;',
-    ].join('\n');
-    const r = run(script);
+  // R7-2 재현: 저장 함수 set_m 이 사용자 변수 @m 을 바꾸고, 호출 문장(call) 뒤의 SET SQL_MODE = @m 이 그 값을 읽는다
+  const setMScript = (call: string): string => [
+    "SET @m = 'STRICT_TRANS_TABLES';", 'DELIMITER $$', 'CREATE FUNCTION set_m() RETURNS INT DETERMINISTIC NO SQL', 'BEGIN', " SET @m = 'NO_ENGINE_SUBSTITUTION';", ' RETURN 1;', 'END$$',
+    'DELIMITER ;', call, 'SET SQL_MODE = @m;', 'CREATE PROCEDURE p() SELECT 1;',
+  ].join('\n');
+
+  it.each(['SELECT set_m();', 'SET GLOBAL max_connections = set_m();'])('저장 함수가 SET @m 으로 바꾼 사용자 변수를 SET SQL_MODE = @m 이 읽기 전에 %s 에서 거부한다 (R7-2 재현)', (call) => {
+    const r = run(setMScript(call));
     expectStoredFunctionRejected(r, 3, 'set_m');
-    expect(r).toMatchObject({ ok: false, error: { line: 9, statement: 'SELECT set_m()' } });
+    expect(r).toMatchObject({ ok: false, error: { line: 9, statement: call.slice(0, -1) } });
   });
 
   it("내장 함수·저장 함수가 아닌 이름·프로시저·문자열과 주석 속 글자는 저장 함수가 있어도 그대로 무시한다 (INSERT … VALUES (NOW(), CONCAT('a','b')))", () => {
@@ -190,6 +192,26 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
     // 저장 함수가 아닌 프로시저는 이름이 테이블과 같아도 무시한다 (CREATE PROCEDURE t …; INSERT INTO t (id) …)
     expect(run('CREATE PROCEDURE t() SELECT 1;\nINSERT INTO t (id) VALUES (1);\nALTER TABLE t ADD COLUMN y INT;')).toMatchObject({ ok: true, applied: 2 });
     expect(applyScript(SHOP, "INSERT INTO orders (amount, status) VALUES (1, CONCAT('n', 'ew'));\nALTER TABLE orders ADD COLUMN y INT;", { schemaName: 'shop' })).toMatchObject({ ok: true, applied: 1 });
+  });
+
+  // 서버 변수의 SET(GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)도 무시하는 문장이다 (3.1): 값을 읽지 않고 버려도 그 안의 저장 함수는 실행되어 사용자 변수를 바꿀 수 있다 — 조회·데이터 문장과
+  // 같은 검사를 한다. 세션 변수의 SET 은 값이 리터럴·@변수일 때만 받아 함수 호출이 들어갈 수 없다
+  it.each([
+    'SET GLOBAL max_connections = fn_one();', 'SET PERSIST max_connections = fn_one() + 1;', 'SET PERSIST_ONLY max_connections = FN_ONE ();', 'SET @@global.max_connections = `fn_one`();',
+    'SET @@persist.max_connections = shop.fn_one();', 'SET GLOBAL sql_mode = CONCAT(@@sql_mode, fn_one());', 'SET GLOBAL max_connections = 10, wait_timeout = fn_one();',
+    'SET SESSION foreign_key_checks = 1, GLOBAL max_connections = fn_one();', '/*!40000 SET GLOBAL max_connections = fn_one() */;',
+  ])('서버 변수 대입 %s 가 부르는 저장 함수도 RE_EXPORT 로 거부한다', (sql) => {
+    expectStoredFunctionRejected(run(`${FN}\n${sql}\nALTER TABLE t ADD COLUMN y INT;`), 2, 'fn_one');
+  });
+
+  it('기준 버전에 있는 저장 함수를 서버 변수 대입에서 불러도 거부하고, 내장 함수·저장 함수가 아닌 이름·함수가 없는 값은 그대로 무시한다', () => {
+    expectStoredFunctionRejected(applyScript(SHOP, 'SET GLOBAL max_connections = TAX(1);\nALTER TABLE orders ADD COLUMN y INT;', { schemaName: 'shop' }), 1, 'tax');
+    for (const sql of [
+      'SET GLOBAL max_connections = 10;', 'SET GLOBAL max_connections = GREATEST(10, 20);', "SET GLOBAL sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_DATE', '');", 'SET PERSIST wait_timeout = unknown_fn(1);',
+      'SET GLOBAL default_storage_engine = InnoDB;',
+    ]) {
+      expect(run(`${FN}\n${sql}\nALTER TABLE t ADD COLUMN y INT;`), sql).toMatchObject({ ok: true, applied: 2 });
+    }
   });
 
   it('지운 저장 함수는 더 이상 저장 함수 호출이 아니다', () => {
