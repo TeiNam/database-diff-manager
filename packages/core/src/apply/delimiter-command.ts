@@ -89,3 +89,62 @@ const REASONS: Record<Kind, readonly [string, string, string]> = {
     + '버퍼에 남겨 DELIMITER 줄을 문장으로 보내 1064 입니다', '줄 주석 앞의 공백·블록 주석을 지우거나 주석을 DELIMITER 줄 뒤로 옮겨 주세요'],
   other: ['글', 'mysql 클라이언트는 그 글을 버퍼에 남겨 DELIMITER 줄을 문장으로 보냅니다', SEMICOLON],
 };
+
+// DELIMITER 의 인자 (리뷰 15회차 후속, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 클라이언트는 첫 낱말(공백·탭 앞까지)이 DELIMITER 인 줄만 명령으로 읽고 '\g' 가 든 줄은 문장의
+// 글로 보낸다 (find_command). 인자는 그 줄의 앞 255바이트에서 읽는다 (com_delimiter·get_arg): 앞 공백을 건너뛰고, 따옴표로 시작하면 짝 따옴표 앞까지, 아니면 첫 공백(' ') 앞까지다.
+// 따옴표 밖의 백슬래시는 지우고, 남은 백슬래시와 빈 인자는 오류로 거부해 구분자를 바꾸지 않으며, 구분자는 앞 15바이트만 쓴다 (delimiter[16]). 문장 나누기가 읽은 구분자와 다르면
+// RE_EXPORT 로 거부한다 — 클라이언트는 긴 구분자를 글자 가운데서도 자른다. 구분자가 ';' 일 때의 빈 DELIMITER 줄처럼 결과가 같으면 받는다
+export function assertClientDelimiters(script: string, commands: readonly CommandLine[]): void {
+  for (const c of commands) {
+    const line = script.slice(script.lastIndexOf('\n', c.at - 1) + 1, c.end);
+    const read = clientDelimiter(line, c.previous);
+    const problem = 'problem' in read ? read.problem : read.delimiter === c.delimiter ? undefined : read.kept ? 'missing' : 'differ';
+    if (problem) fail(`${afterPrevious(script, c.at)}DELIMITER 줄은 mysql 클라이언트가 다르게 읽습니다 — ${ARG_REASONS[problem]} — ${RE_EXPORT}`);
+  }
+}
+
+type ArgProblem = 'g' | 'word' | 'cut' | 'backslash' | 'long' | 'missing' | 'differ';
+type ClientRead = { readonly delimiter: string; readonly kept: boolean } | { readonly problem: ArgProblem };
+
+const LINE_BYTES = 255; // com_delimiter 가 읽는 줄의 앞부분 (char buff[256])
+const DELIMITER_BYTES = 15; // 클라이언트가 쓰는 구분자의 앞부분 (char delimiter[16])
+const CLIENT_SPACES = /^[\t\n\v\f\r ]*/; // my_isspace
+
+// mysql 클라이언트가 DELIMITER 줄(line — 줄바꿈은 빼고)에서 정하는 구분자. kept: 인자가 없어 오류를 내고 앞 구분자(previous)를 그대로 쓴다
+function clientDelimiter(line: string, previous: string): ClientRead {
+  if (line.includes('\\g')) return { problem: 'g' };
+  const start = CLIENT_SPACES.exec(line)![0].length;
+  const word = /^[^ \t]*/.exec(line.slice(start))![0];
+  if (!/^delimiter$/i.test(word)) return { problem: 'word' }; // ASCII 만 대소문자를 가린다 — 렉서의 toUpperCase 는 'ı' 를 'I' 로 읽는다
+  const from = start + word.length + CLIENT_SPACES.exec(line.slice(start + word.length))![0].length;
+  const quote = /^['"`]/.exec(line.slice(from))?.[0];
+  const begin = quote ? from + 1 : from;
+  const close = line.indexOf(quote ?? ' ', begin);
+  const end = close < 0 ? line.length : close;
+  if (utf8Bytes(line.slice(0, end)) > LINE_BYTES) return { problem: 'cut' };
+  const arg = line.slice(begin, end);
+  if (arg.includes('\\')) return { problem: 'backslash' };
+  if (arg === '') return { delimiter: previous, kept: true };
+  return utf8Bytes(arg) > DELIMITER_BYTES ? { problem: 'long' } : { delimiter: arg, kept: false };
+}
+
+// UTF-8 바이트 수 — 클라이언트는 바이트로 센다
+function utf8Bytes(text: string): number {
+  let bytes = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!;
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+}
+
+const ARG_REASONS: Record<ArgProblem, string> = {
+  g: "'\\g' 가 든 줄은 DELIMITER 명령으로 읽지 않고 문장의 글로 보냅니다",
+  word: "첫 낱말(공백·탭 앞까지)이 DELIMITER 인 줄만 명령으로 읽어, 'DELIMITER;;' 처럼 구분자를 붙여 쓰거나 공백·탭이 아닌 글자로 띄운 줄은 문장의 글로 보냅니다 "
+    + '(DELIMITER 와 구분자 사이에 공백을 두어 주세요)',
+  cut: '줄의 앞 255바이트만 읽어, 줄 처음부터 255바이트 뒤까지 이어지는 구분자를 자릅니다',
+  backslash: '구분자의 따옴표 밖 백슬래시는 지우고, 남은 백슬래시는 오류로 거부해 구분자를 바꾸지 않습니다',
+  long: '구분자의 앞 15바이트만 써, 15바이트를 넘는 구분자를 (글자 가운데서도) 자릅니다',
+  missing: '구분자가 없는 DELIMITER 줄은 오류를 내고 앞 구분자를 그대로 씁니다',
+  differ: '구분자를 문장 나누기와 다르게 읽습니다 (따옴표 밖 인자는 첫 공백 앞까지이고 줄 끝의 글자도 구분자에 듭니다)',
+};

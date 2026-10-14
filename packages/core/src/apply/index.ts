@@ -9,7 +9,7 @@ import { UnsafeValueError } from '../sql-safety';
 import { alterTable, createIndex, dropIndexOn } from './alter-table';
 import { assertUtf8Session } from './client-charset';
 import { LongComment, longCommentReason } from './comment-length';
-import { assertCommandsReadByBoth } from './delimiter-command';
+import { assertClientDelimiters, assertCommandsReadByBoth } from './delimiter-command';
 import { assertSingleLineHints } from './multiline-hint';
 import { assertBmpText, canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
 import { noOpHandler } from './no-op';
@@ -108,6 +108,7 @@ function applyStatement(st: State, s: ApplyStatement, script: string): boolean {
   const leading = leadingSkippedComments(script, s); // 앞 문장 뒤의 문장 없는 덩어리·DELIMITER 줄의 건너뛰는 실행 주석 (리뷰 12회차 Claude F5)
   assertCommandsReadByBoth(script, s.leading.commands); // DELIMITER 줄 앞의 클라이언트 버퍼 (리뷰 15회차 F1·F2)
   assertLeadingSpaces(script, s, leading);
+  assertClientDelimiters(script, s.leading.commands); // 클라이언트가 다르게 읽는 DELIMITER 인자 (리뷰 15회차 후속)
   assertSingleLineHints(script, s.leading.hints, (at) => afterPrevious(script, at)); // 여러 줄 힌트 (리뷰 15회차 F4)
   const skipped = skippedComments(script, s); // 실행 주석의 버전 번호 (리뷰 11회차 R11-2)
   assertSingleLineHints(script, s.hints, (at) => (at < s.offset ? afterPrevious(script, at) : '')); // 문장 앞의 것은 그 줄을 밝힌다

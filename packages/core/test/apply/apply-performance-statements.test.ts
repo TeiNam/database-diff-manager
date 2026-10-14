@@ -91,7 +91,8 @@ const COMMAND_CASES: Case[] = [
   ['DELIMITER 줄마다 앞에 블록 주석', () => fill(() => '/* 메모 */\nDELIMITER ;;', '\n', '', '\nALTER TABLE member ADD a INT;;'), { ok: true }],
   ['DELIMITER 줄 하나 앞에 블록 주석이 가득', () => fill(() => '/* 메모 */', ' ', 'ALTER TABLE member ADD a INT;\n', '\nDELIMITER ;;\nALTER TABLE member ADD b INT;;'), { ok: true }],
   ['여러 줄 힌트가 가득한 문장', () => fill(() => '/*+ x\n y */', ' ', 'ALTER TABLE member ADD a INT ', ';'), { ok: true }],
-  ['긴 구분자 뒤 여러 줄 힌트가 가득한 문장', () => fill(() => '/*+ x\n y */', ' ', `DELIMITER ${LONG_DELIMITER}\nALTER TABLE member ADD a INT `, LONG_DELIMITER), { ok: true }],
+  // 15바이트를 넘는 구분자는 mysql 클라이언트가 잘라 그 DELIMITER 줄에서 거부한다 (리뷰 15회차 후속) — 문장 나누기는 그대로 원문 길이에 비례해야 한다
+  ['긴 구분자 뒤 여러 줄 힌트가 가득한 문장', () => fill(() => '/*+ x\n y */', ' ', `DELIMITER ${LONG_DELIMITER}\nALTER TABLE member ADD a INT `, LONG_DELIMITER), { index: 1, errno: RE_EXPORT_ERRNO }],
 ];
 
 describe('applyScript — 1,000,000자 스크립트의 계산량: DELIMITER 줄 앞의 클라이언트 버퍼와 여러 줄 힌트', () => {

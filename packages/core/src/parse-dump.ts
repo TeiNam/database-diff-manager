@@ -81,11 +81,14 @@ export interface LexNotes {
 }
 
 // DELIMITER 줄 (리뷰 15회차 F1·F2): at 은 DELIMITER 단어의 원문 자리, from 은 그 앞 덩어리가 시작한 자리 (앞 구분자·DELIMITER 줄 바로 뒤, 스크립트 처음) — mysql 클라이언트는
-// 그 사이에서 버퍼에 남긴 것에 따라 그 줄을 명령으로 읽는다 (apply/delimiter-command.ts). 그 사이에는 토큰이 없다
+// 그 사이에서 버퍼에 남긴 것에 따라 그 줄을 명령으로 읽는다 (apply/delimiter-command.ts). 그 사이에는 토큰이 없다. end 는 그 줄의 끝(줄바꿈 자리), delimiter 는 문장 나누기가 읽은
+// 구분자, previous 는 그 앞의 구분자 — 클라이언트가 인자를 다르게 읽는지 본다
 export interface CommandLine {
   readonly from: number;
   readonly at: number;
-  readonly delimiter: string; // 그 줄이 바꾼 구분자
+  readonly end: number;
+  readonly delimiter: string;
+  readonly previous: string;
 }
 
 // 문장 앞(앞 문장 뒤부터)의 것: ends 는 그 안의 문장 없이 끝난 덩어리를 끝낸 구분자의 원문 자리 — 실행 주석이 덩어리 안에서 닫혔는지 본다 (리뷰 13회차). commands 는 그 안의
@@ -142,7 +145,7 @@ export function scanDump(text: string): DumpScan {
 // scan 이 렉서가 알린 것과 함께 문장 없이 끝난 덩어리의 구분자 자리(ended, 리뷰 13회차)와 DELIMITER 줄(commanded, 리뷰 15회차 F1)도 알린다
 interface ChunkWatch extends LexWatch {
   ended(at: number): void;
-  commanded(line: CommandLine): void;
+  commanded(line: Omit<CommandLine, 'previous'>): void;
 }
 
 // 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것을 넘긴다. 그 앞의 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 덩어리의 것과 가르고(leading — 문장 없는
@@ -189,8 +192,8 @@ class ChunkLog implements ChunkWatch {
     this.ends.push(at);
   }
 
-  commanded(line: CommandLine): void {
-    this.commands.push(line);
+  commanded(line: Omit<CommandLine, 'previous'>): void {
+    this.commands.push({ ...line, previous: this.delimiter });
     this.delimiter = line.delimiter;
   }
 
@@ -245,7 +248,7 @@ function scan<S extends DumpStatement>(text: string, lenient: boolean, make: Mak
       if (!start && isDelimiterCommand(text, t)) {
         const end = lineEnd(text, t.s);
         find = new DelimiterSearch(text, delimiterArg(text.slice(t.e, end)), end);
-        watch?.commanded({ from, at: t.s, delimiter: find.delimiter });
+        watch?.commanded({ from, at: t.s, end, delimiter: find.delimiter });
         tokens = afterCommand(text, t.e, end, mode);
         skipUntil = end;
         continue;
