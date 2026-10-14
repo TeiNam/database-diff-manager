@@ -1,7 +1,8 @@
 // SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
 // (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, unique_checks 등)는 스키마에 영향이 없어 값을 버린다 — 값을 모르는
 // 변수에서 되돌려도 받는다 (리뷰 9회차). 값을 쓰는 대상(사용자 변수, 세션 SQL_MODE·TIME_ZONE·FOREIGN_KEY_CHECKS)도 값을 모르는 변수에서 정하면 그 SET 에서 거부하지 않고
-// 모르는 값으로 둔다 — 그 값에 기대는 뒤 문장만 거부한다 (리뷰 10회차, unknown-session.ts). 트랜잭션 특성·역할의 SET(SET TRANSACTION·SET ROLE·SET DEFAULT ROLE)도 무시한다.
+// 모르는 값으로 둔다 — 그 값에 기대는 뒤 문장만 거부한다 (리뷰 10회차, unknown-session.ts). 트랜잭션 특성·역할·자원 그룹의 SET(SET TRANSACTION·SET ROLE·SET DEFAULT ROLE·
+// SET RESOURCE GROUP)도 무시한다.
 // 서버 변수(SET GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)는 이 스크립트의 세션을 바꾸지 않아 무시한다 (서버 sql_mode 를 바꾼 사실만 기억해 뒤의 SET sql_mode = DEFAULT 가 정한 세션 값을 모르는 값으로 두고,
 // 값 안의 저장 함수 호출은 함수가 바꿨을 수 있는 사용자 변수 등을 모르는 값으로 둔다 — stored-call.ts).
 // td-export·마이그레이션 스크립트의 'SET @OLD_X = @@X, X = 0' 저장과 'SET X = @OLD_X' 복원을 따른다
@@ -64,11 +65,18 @@ export function applySet(st: State, c: Cursor): void {
   });
 }
 
-// 스키마와 이 도구가 따라가는 세션 값에 상관없어 통째로 무시하는 SET (리뷰 9회차 Claude 참고 2): 트랜잭션 특성(SET [GLOBAL|SESSION|…] TRANSACTION ISOLATION LEVEL …·READ ONLY),
-// 활성 역할(SET ROLE …), 계정의 기본 역할(SET DEFAULT ROLE … TO …). MySQL 문법에 식이 들어갈 자리가 없어 저장 함수도 부르지 않는다. c 는 SET 바로 뒤다
+// 스키마와 이 도구가 따라가는 세션 값에 상관없어 통째로 무시하는 SET (리뷰 9회차 Claude 참고 2·10회차 참고 3·4): 트랜잭션 특성(SET [GLOBAL|SESSION|LOCAL|PERSIST|PERSIST_ONLY]
+// TRANSACTION ISOLATION LEVEL …·READ ONLY — PERSIST 꼴도 MySQL 이 받는다, 8.0.46·8.4.11 실측), 활성 역할(SET ROLE …), 계정의 기본 역할(SET DEFAULT ROLE … TO …), 스레드의 자원
+// 그룹(SET RESOURCE GROUP rg [FOR id …]). MySQL 문법에 식이 들어갈 자리가 없어 저장 함수도 부르지 않는다. 키워드 뒤에 아무것도 없으면 MySQL 처럼 1064 다. c 는 SET 바로 뒤다
 const SCOPE_WORDS: readonly string[] = ['GLOBAL', 'SESSION', 'LOCAL', 'PERSIST', 'PERSIST_ONLY'];
-const isNonSchemaSet = (c: Cursor): boolean =>
-  c.isWord('TRANSACTION') || SCOPE_WORDS.some((w) => c.isWord(w, 'TRANSACTION')) || c.isWord('ROLE') || c.isWord('DEFAULT', 'ROLE');
+const NON_SCHEMA_SETS: readonly (readonly string[])[] = [['TRANSACTION'], ...SCOPE_WORDS.map((w) => [w, 'TRANSACTION']), ['ROLE'], ['DEFAULT', 'ROLE'], ['RESOURCE', 'GROUP']];
+
+function isNonSchemaSet(c: Cursor): boolean {
+  const words = NON_SCHEMA_SETS.find((w) => c.isWord(...w));
+  if (words === undefined) return false;
+  if (c.peek(words.length) === undefined) fail(`SET ${words.join(' ')} 뒤에 정할 내용이 없습니다 (MySQL 1064)`);
+  return true;
+}
 
 // 대입 하나. call: 이 대입의 값이 부르는 저장 함수 (applySet 이 문장을 읽을 때 가렸다). 돌려주는 값은 다음 대입이 물려받는 범위다: 앞에 쓴 GLOBAL·PERSIST·PERSIST_ONLY·
 // SESSION·LOCAL 은 수식어 없는 뒤 대입에도 이어진다 (MySQL: 가장 최근 수식어를 따른다). '@@global.x' 처럼 이름에 붙인 범위는 그 대입에만 쓴다
@@ -205,7 +213,7 @@ function unknownVariable(st: State, name: string): string {
   return `사용자 변수 ${name} 의 값을 알 수 없습니다 — ${reason}, 이 도구는 문장을 실행하지 않아 바뀐 값을 모릅니다`;
 }
 
-// '변수 = 값' 꼴이 아닌 대입 (SET RESOURCE GROUP …): MySQL 의 다른 SET 문이다. 무엇을 바꾸는지 가르지 않고 받지 않는다 (리뷰 9회차 Claude 참고 2 — "':' 필요" 대신)
+// '변수 = 값' 꼴이 아닌 대입 (SET autocommit 1): 무엇을 바꾸는지 가르지 않고 받지 않는다 (리뷰 9회차 Claude 참고 2 — "':' 필요" 대신)
 function notAssignment(a: Cursor): string {
   const end = a.peek() ?? a.toks[a.toks.length - 1];
   return `'변수 = 값' 꼴이 아닌 SET 은 받지 않습니다: SET ${a.src.slice(a.toks[0].s, end.e)} … — ${RE_EXPORT}`;

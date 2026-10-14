@@ -437,13 +437,16 @@ describe('세션 time_zone 과 TIMESTAMP 리터럴 기본값', () => {
   });
 });
 
-// 리뷰 9회차 (Claude 참고 2): 트랜잭션 특성(SET [GLOBAL|SESSION] TRANSACTION …)·활성 역할(SET ROLE …)·계정의 기본 역할(SET DEFAULT ROLE … TO …)은 스키마와 이 도구가
-// 따라가는 세션 값을 바꾸지 않아 무시한다. 그 밖에 '변수 = 값' 꼴이 아닌 SET 은 ':' 필요 대신 알아보기 쉬운 안내로 거부한다
+// 리뷰 9회차 (Claude 참고 2)·10회차 (참고 3·4): 트랜잭션 특성(SET [GLOBAL|SESSION|LOCAL|PERSIST|PERSIST_ONLY] TRANSACTION … — PERSIST 꼴도 MySQL 이 받는다, 8.0.46·8.4.11 실측)·
+// 활성 역할(SET ROLE …)·계정의 기본 역할(SET DEFAULT ROLE … TO …)·스레드의 자원 그룹(SET RESOURCE GROUP rg [FOR id …])은 스키마와 이 도구가 따라가는 세션 값을 바꾸지 않아
+// 무시한다. 키워드 뒤에 아무것도 없으면 MySQL 처럼 1064 다. 그 밖에 '변수 = 값' 꼴이 아닌 SET 은 ':' 필요 대신 알아보기 쉬운 안내로 거부한다
 describe('스키마와 상관없는 SET', () => {
   it.each([
     'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', 'SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE', 'SET GLOBAL TRANSACTION READ ONLY',
-    'SET LOCAL TRANSACTION READ WRITE, ISOLATION LEVEL REPEATABLE READ', 'set transaction isolation level read uncommitted', 'SET ROLE ALL', 'SET ROLE NONE', 'SET ROLE DEFAULT',
+    'SET LOCAL TRANSACTION READ WRITE, ISOLATION LEVEL REPEATABLE READ', 'set transaction isolation level read uncommitted', 'SET PERSIST TRANSACTION ISOLATION LEVEL READ COMMITTED',
+    'SET PERSIST_ONLY TRANSACTION READ ONLY', 'SET ROLE ALL', 'SET ROLE NONE', 'SET ROLE DEFAULT',
     "SET ROLE 'r1', `r2`@'%'", "SET ROLE ALL EXCEPT 'r1'@'localhost'", "SET DEFAULT ROLE ALL TO 'u'@'%'", 'SET DEFAULT ROLE NONE TO u, v@localhost', 'SET DEFAULT ROLE r1, r2 TO CURRENT_USER()',
+    'SET RESOURCE GROUP rg', 'SET RESOURCE GROUP rg FOR 1, 2', 'set resource group USR_default',
   ])('%s 는 무시한다', (sql) => {
     const st = freshState();
     setIn(st, sql);
@@ -451,11 +454,21 @@ describe('스키마와 상관없는 SET', () => {
   });
 
   it('스크립트 안에서도 적용한 문장 수에 세지 않고 넘어간다', () => {
-    const r = applyScript(empty, "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;\nSET ROLE ALL;\nSET DEFAULT ROLE ALL TO 'u'@'%';\nCREATE TABLE t (id INT PRIMARY KEY);", { schemaName: 'shop' });
+    const r = applyScript(empty, "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;\nSET ROLE ALL;\nSET DEFAULT ROLE ALL TO 'u'@'%';\nSET RESOURCE GROUP rg;\nCREATE TABLE t (id INT PRIMARY KEY);", { schemaName: 'shop' });
     expect(r).toMatchObject({ ok: true, applied: 1 });
   });
 
-  it.each(['SET RESOURCE GROUP rg', 'SET RESOURCE GROUP rg FOR 1, 2', 'SET autocommit 1'])("'변수 = 값' 꼴이 아닌 %s 는 알아보기 쉬운 안내로 RE_EXPORT 와 함께 거부한다", (sql) => {
+  // PERSIST·PERSIST_ONLY 꼴도 트랜잭션 특성으로 가른다 — 서버 변수 대입(SET PERSIST x = …)으로 읽어 넘기지 않는다 (리뷰 10회차 Claude 참고 2)
+  it.each([
+    'SET TRANSACTION', 'SET GLOBAL TRANSACTION', 'SET SESSION TRANSACTION', 'set local transaction', 'SET PERSIST TRANSACTION', 'SET PERSIST_ONLY TRANSACTION',
+    'SET ROLE', 'SET DEFAULT ROLE', 'SET RESOURCE GROUP',
+  ])('키워드 뒤에 아무것도 없는 %s 는 MySQL 처럼 1064 로 거부한다 (8.0.46·8.4.11 실측)', (sql) => {
+    const message = messageOf(() => setIn(freshState(), sql));
+    expect(message).toContain('(MySQL 1064)');
+    expect(message).toContain(`${sql.toUpperCase()} 뒤에`);
+  });
+
+  it.each(['SET autocommit 1', 'SET @x 1'])("'변수 = 값' 꼴이 아닌 %s 는 알아보기 쉬운 안내로 RE_EXPORT 와 함께 거부한다", (sql) => {
     const message = messageOf(() => setIn(freshState(), sql));
     expect(message).toContain("'변수 = 값' 꼴이 아닌 SET 은 받지 않습니다");
     expect(message).not.toContain("':' 필요");
