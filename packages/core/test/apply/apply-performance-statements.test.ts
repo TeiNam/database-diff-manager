@@ -83,3 +83,13 @@ const TRAILING_CASES: Case[] = [
 describe('applyScript — 1,000,000자 스크립트의 계산량: 마지막 문장 뒤와 문장 없는 덩어리의 실행 주석', () => {
   it.each(TRAILING_CASES)('%s', (_name, make, expected) => checkCase(make, expected, undefined, SKIPPED_BOUND_MS), TEST_TIMEOUT_MS);
 });
+
+// DELIMITER 줄 앞의 클라이언트 버퍼 (리뷰 15회차 F1·F2): 줄마다 앞 경계 뒤부터 그 줄 앞까지만 훑어 원문 길이에 비례한다. 여기서는 3 초 안을 본다
+const COMMAND_CASES: Case[] = [
+  ['DELIMITER 줄마다 앞에 블록 주석', () => fill(() => '/* 메모 */\nDELIMITER ;;', '\n', '', '\nALTER TABLE member ADD a INT;;'), { ok: true }],
+  ['DELIMITER 줄 하나 앞에 블록 주석이 가득', () => fill(() => '/* 메모 */', ' ', 'ALTER TABLE member ADD a INT;\n', '\nDELIMITER ;;\nALTER TABLE member ADD b INT;;'), { ok: true }],
+];
+
+describe('applyScript — 1,000,000자 스크립트의 계산량: DELIMITER 줄 앞의 클라이언트 버퍼', () => {
+  it.each(COMMAND_CASES)('%s', (_name, make, expected) => checkCase(make, expected, undefined, SKIPPED_BOUND_MS), TEST_TIMEOUT_MS);
+});

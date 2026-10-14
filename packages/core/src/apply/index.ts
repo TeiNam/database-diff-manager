@@ -9,6 +9,7 @@ import { UnsafeValueError } from '../sql-safety';
 import { alterTable, createIndex, dropIndexOn } from './alter-table';
 import { assertUtf8Session } from './client-charset';
 import { LongComment, longCommentReason } from './comment-length';
+import { assertCommandsReadByBoth } from './delimiter-command';
 import { assertBmpText, canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
 import { noOpHandler } from './no-op';
 import { createRoutine, dropRoutine, dropView, isCreateRoutine } from './object-stmt';
@@ -101,7 +102,9 @@ type Handler = (st: State, c: Cursor) => void;
 // 모드 검사는 쓴 글 그대로 본다 — 건너뛰는 실행 주석 안의 글도 문장 나누기는 읽었다 (보수적)
 function applyStatement(st: State, s: ApplyStatement, script: string): boolean {
   const { noBackslashEscapes } = s;
-  assertLeadingSpaces(script, s, leadingSkippedComments(script, s)); // 앞 문장 뒤의 문장 없는 덩어리·DELIMITER 줄 (리뷰 12회차 Claude F5)
+  const leading = leadingSkippedComments(script, s); // 앞 문장 뒤의 문장 없는 덩어리·DELIMITER 줄의 건너뛰는 실행 주석 (리뷰 12회차 Claude F5)
+  assertCommandsReadByBoth(script, s.leading.commands); // DELIMITER 줄 앞의 클라이언트 버퍼 (리뷰 15회차 F1·F2)
+  assertLeadingSpaces(script, s, leading);
   const skipped = skippedComments(script, s); // 실행 주석의 버전 번호 (리뷰 11회차 R11-2)
   const statement = executedText(s, skipped);
   assertSameBackslashMode(st, s.ddl, noBackslashEscapes);

@@ -74,9 +74,18 @@ export interface LexNotes {
   readonly hints: readonly number[];
 }
 
-// 문장 앞(앞 문장 뒤부터)의 것: ends 는 그 안의 문장 없이 끝난 덩어리를 끝낸 구분자의 원문 자리 — 실행 주석이 덩어리 안에서 닫혔는지 본다 (리뷰 13회차)
+// DELIMITER 줄 (리뷰 15회차 F1·F2): at 은 DELIMITER 단어의 원문 자리, from 은 그 앞 덩어리가 시작한 자리 (앞 구분자·DELIMITER 줄 바로 뒤, 스크립트 처음) — mysql 클라이언트는
+// 그 사이에서 버퍼에 남긴 것에 따라 그 줄을 명령으로 읽는다 (apply/delimiter-command.ts). 그 사이에는 토큰이 없다
+export interface CommandLine {
+  readonly from: number;
+  readonly at: number;
+}
+
+// 문장 앞(앞 문장 뒤부터)의 것: ends 는 그 안의 문장 없이 끝난 덩어리를 끝낸 구분자의 원문 자리 — 실행 주석이 덩어리 안에서 닫혔는지 본다 (리뷰 13회차). commands 는 그 안의
+// DELIMITER 줄 (리뷰 15회차 F1)
 export interface LeadingNotes extends LexNotes {
   readonly ends: readonly number[];
+  readonly commands: readonly CommandLine[];
 }
 
 // ALTER 적용이 쓰는 문장 (splitForApply). offset: ddl 의 원문 자리. marks·spaces: 이 문장의 덩어리(앞 구분자·DELIMITER 줄 뒤부터 이 문장의 끝까지)에서 렉서가 알린 것 —
@@ -123,9 +132,10 @@ export function scanDump(text: string): DumpScan {
   return scan(text, true, plain);
 }
 
-// scan 이 렉서가 알린 것과 함께 문장 없이 끝난 덩어리의 구분자 자리(ended)도 알린다 (리뷰 13회차)
+// scan 이 렉서가 알린 것과 함께 문장 없이 끝난 덩어리의 구분자 자리(ended, 리뷰 13회차)와 DELIMITER 줄(commanded, 리뷰 15회차 F1)도 알린다
 interface ChunkWatch extends LexWatch {
   ended(at: number): void;
+  commanded(line: CommandLine): void;
 }
 
 // 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것을 넘긴다. 그 앞의 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 덩어리의 것과 가르고(leading — 문장 없는
@@ -138,6 +148,7 @@ class ChunkLog implements ChunkWatch {
   private inner: NestedComment[] = [];
   private hints: number[] = [];
   private ends: number[] = [];
+  private commands: CommandLine[] = [];
   // 렉서가 열려 있다고 보는 표지 (가장 안쪽이 끝). DELIMITER 줄 뒤에서 렉서를 새로 읽혀도(afterCommand) 그 앞의 것은 남지만, 렉서는 새로 연 것만 닫고 그 안에서만 nested 를
   // 알리므로 끝의 것은 늘 렉서의 가장 안쪽 것이다
   private readonly open: VersionMark[] = [];
@@ -170,19 +181,24 @@ class ChunkLog implements ChunkWatch {
     this.ends.push(at);
   }
 
+  commanded(line: CommandLine): void {
+    this.commands.push(line);
+  }
+
   take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'nested' | 'hints' | 'leading'> {
     const [leadMarks, marks] = splitAt(this.marks, (m) => m.at, from);
     const [leadSpaces, spaces] = splitAt(this.spaces, (at) => at, from);
     const [leadCloses, closes] = splitAt(this.closes, (at) => at, from);
     const [leadNested, nested] = splitAt(this.inner, (n) => n.at, from);
     const [leadHints, hints] = splitAt(this.hints, (at) => at, from);
-    const leading = { marks: leadMarks, spaces: leadSpaces, closes: leadCloses, nested: leadNested, hints: leadHints, ends: this.ends };
+    const leading = { marks: leadMarks, spaces: leadSpaces, closes: leadCloses, nested: leadNested, hints: leadHints, ends: this.ends, commands: this.commands };
     this.marks = [];
     this.spaces = [];
     this.closes = [];
     this.inner = [];
     this.hints = [];
     this.ends = [];
+    this.commands = [];
     return { marks, spaces, closes, nested, hints, leading };
   }
 
@@ -220,6 +236,7 @@ function scan<S extends DumpStatement>(text: string, lenient: boolean, make: Mak
       if (!start && isDelimiterCommand(text, t)) {
         const end = lineEnd(text, t.s);
         find = new DelimiterSearch(text, delimiterArg(text.slice(t.e, end)), end);
+        watch?.commanded({ from, at: t.s });
         tokens = afterCommand(text, t.e, end, mode);
         skipUntil = end;
         continue;

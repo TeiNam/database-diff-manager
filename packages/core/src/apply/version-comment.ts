@@ -32,7 +32,10 @@ interface Place {
 }
 
 const IN_STATEMENT: Place = { where: () => '', until: '문장 안에서' };
-const beforeStatement = (script: string, until: string): Place => ({ where: (at) => `앞 문장 뒤(줄 ${lineOf(script, at)})의 `, until });
+const beforeStatement = (script: string, until: string): Place => ({ where: (at) => afterPrevious(script, at), until });
+
+// 문장 앞 덩어리의 거부 안내 앞말: 그 자리의 줄을 밝힌다 (delimiter-command.ts·multiline-hint.ts 도 쓴다)
+export const afterPrevious = (script: string, at: number): string => `앞 문장 뒤(줄 ${lineOf(script, at)})의 `;
 
 // 이 문장의 덩어리에서 MySQL 이 건너뛰는 실행 주석의 자리. 실행 여부가 버전에 따라 갈리면 거부하고, 실행하는 주석이 문장 끝까지 닫히지 않았으면 1064 다 (assertRunsClosed).
 // 실행하는 주석 안의 일반 주석도 거부한다 (assertNoNestedComment). script: 문장을 나눈 원문
@@ -46,10 +49,10 @@ export function skippedComments(script: string, s: ApplyStatement): Region[] {
 // 문장 앞 덩어리(s.leading — 앞 문장 뒤의 문장 없이 끝난 덩어리·DELIMITER 줄)의 건너뛰는 실행 주석 자리 (리뷰 12회차 Claude F5). 그 덩어리에는 토큰이 없어 판에 따라 갈리는
 // 번호도 8.0·8.4 가 실행하든 건너뛰든 같아 받는다 ('/*!80400 */;' 뒤의 문장도 받는다 — 그 전제가 깨지는 것은 assertSameEitherWay 가 거부한다). 번호를 다르게 읽는 것과,
 // 건너뛰는 것 안의 주석·줄 주석은 문장 안의 것처럼 거부한다. 표지마다 그 덩어리를 끝낸 구분자 안에서 닫혀야 한다 — mysql 클라이언트는 그 구분자에서 끊어 보낸다 (리뷰 13회차:
-// 뒤 덩어리에서 닫힌 '/*!99999 ;' 줄바꿈 '*/;' 도 받았다). 마지막 덩어리(DELIMITER 줄 앞)는 이 문장 앞까지 보고, 거기 표지나 힌트가 있으면 거부한다 (assertNothingKeptBeforeCommand)
-// — DELIMITER 줄의 인자 뒤는 mysql 클라이언트처럼 문장 나누기가 읽지 않아 표지가 없다 (리뷰 14회차 F3). 거부 안내는 표지가 있는 줄을 밝힌다 (Place)
+// 뒤 덩어리에서 닫힌 '/*!99999 ;' 줄바꿈 '*/;' 도 받았다). 마지막 덩어리(DELIMITER 줄 앞)는 이 문장 앞까지 본다 — DELIMITER 줄의 인자 뒤는 mysql 클라이언트처럼 문장 나누기가
+// 읽지 않아 표지가 없다 (리뷰 14회차 F3). DELIMITER 줄 앞에 둔 실행 주석·힌트는 delimiter-command.ts 가 거부한다. 거부 안내는 표지가 있는 줄을 밝힌다 (Place)
 export function leadingSkippedComments(script: string, s: ApplyStatement): Region[] {
-  const { marks, closes, nested, hints, ends } = s.leading;
+  const { marks, closes, nested, ends } = s.leading;
   const closesOf = byChunk(closes, (at) => at, ends);
   const chunks = byChunk(marks, (m) => m.at, ends);
   const delimited = beforeStatement(script, '구분자까지');
@@ -66,25 +69,8 @@ export function leadingSkippedComments(script: string, s: ApplyStatement): Regio
     return found;
   });
   assertNoNestedComment(nested, delimited);
-  const lastEnd = ends[ends.length - 1] ?? -1;
-  assertNothingKeptBeforeCommand(chunks[ends.length], hints.filter((at) => at > lastEnd), beforeCommand);
   return regions;
 }
-
-// 구분자 없이 DELIMITER 줄 앞에 둔 실행 주석·힌트 (리뷰 14회차, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 마지막 덩어리(모든 끝 뒤)의 것은 DELIMITER 줄 앞의 토큰 없는 자리에
-// 있다. mysql 클라이언트는 버퍼가 비었을 때만(8.4 는 공백·블록 주석뿐일 때도 — 실행 주석·힌트도 블록 주석으로 보고 버린다) 그 줄을 명령으로 읽는데, 8.0 은 둘 다 지우지 않고 버퍼에
-// 남겨 DELIMITER 줄을 문장의 글로 보내 1064 다 ('/*!40101 */'·'/*+ x */' 줄바꿈 'DELIMITER ;;' — 8.4 는 뒤 루틴·ALTER 를 실행한다. 뒤에 줄 주석을 두면 8.4 도 1064). 13회차까지는
-// 받았다. marks·hints: 마지막 덩어리의 표지와 힌트 '/*+' 의 자리 (자리 순서)
-function assertNothingKeptBeforeCommand(marks: readonly VersionMark[], hints: readonly number[], place: Place): void {
-  const mark = marks[0];
-  const hint = hints[0];
-  if (mark && (hint === undefined || mark.at < hint)) fail(keptBeforeCommand(place.where(mark.at), `실행 주석 /*!${mark.digits}`));
-  if (hint !== undefined) fail(keptBeforeCommand(place.where(hint), '힌트 /*+'));
-}
-
-const keptBeforeCommand = (where: string, name: string): string => `${where}${name} 뒤에 구분자 없이 둔 DELIMITER 줄은 mysql 클라이언트의 판에 따라 명령으로 읽지 `
-  + `않습니다 — 8.0 클라이언트는 그 주석과 함께 DELIMITER 줄을 문장으로 보내 1064 이고, 8.4 클라이언트는 그 앞이 공백·블록 주석뿐이면 주석을 버리고 명령으로 읽습니다 `
-  + `(주석 뒤에 ';' 를 두어 주세요) — ${RE_EXPORT}`;
 
 // items(자리 순서)를 덩어리 끝(ends, 자리 순서)으로 나눈다: i 번째는 ends[i] 앞의 것, 마지막은 모든 끝 뒤의 것
 function byChunk<T>(items: readonly T[], at: (item: T) => number, ends: readonly number[]): T[][] {
