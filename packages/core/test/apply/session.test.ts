@@ -551,4 +551,25 @@ describe('숫자로 쓴 SQL_MODE', () => {
     const r = applyScript(empty, 'CREATE TABLE t (id INT PRIMARY KEY);\nSET sql_mode = 0;\nCREATE PROCEDURE p() SELECT 1;', { schemaName: 'shop' });
     expect(r.ok && r.model.routines.map((x) => x.sqlMode)).toEqual(['']);
   });
+
+  // 리뷰 12회차 Claude F4 (8.0.46·8.4.11 실측): 따옴표 없는 단어 FALSE·TRUE 는 정수 0·1 이다 — FALSE 는 빈 모드, TRUE 는 REAL_AS_FLOAT (11회차는 모드 이름으로 읽어 1231 로
+  // 거부했다). TRUE 는 1 처럼 RE_EXPORT 다. 변수에 담은 FALSE·TRUE 는 숫자가 든 변수처럼 정수인지 따라가지 않아 거부한다 (MySQL 은 SET @f = FALSE 뒤의 sql_mode = @f 를 받는다)
+  it.each(['SET sql_mode = FALSE', 'SET SESSION sql_mode = false', 'SET @@sql_mode = False'])('%s 는 0 처럼 빈 모드다', (sql) => {
+    const st = freshState();
+    setIn(st, sql);
+    expect(st).toMatchObject({ sqlMode: '', sqlModeUnknown: undefined });
+  });
+
+  it.each(['SET sql_mode = TRUE', 'SET sql_mode = true', 'SET @f = FALSE\nSET sql_mode = @f', 'SET @t = TRUE\nSET sql_mode = @t'])('%s 는 MySQL 오류 번호 없이 RE_EXPORT 로 거부한다', (sql) => {
+    const st = freshState();
+    const message = messageOf(() => sql.split('\n').forEach((one) => setIn(st, one)));
+    expect(message).toContain('숫자');
+    expect(message).not.toMatch(/\(MySQL \d+\)/);
+    expect(message.endsWith(RE_EXPORT), message).toBe(true);
+    expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
+  });
+
+  it("따옴표 친 'FALSE' 는 모드 이름이라 MySQL 처럼 1231 이다", () => {
+    expect(messageOf(() => setIn(freshState(), "SET sql_mode = 'false'"))).toContain('(MySQL 1231)');
+  });
 });

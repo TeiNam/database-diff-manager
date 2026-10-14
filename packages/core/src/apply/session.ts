@@ -171,15 +171,21 @@ function setUnknown(st: State, target: string, assignment: string, why: string):
   } else st.fkChecksUnknown = reason;
 }
 
-// 대입한 SQL_MODE 값 (written: 쓴 값의 첫 토큰). 숫자 (리뷰 11회차 Claude F8, 8.0.46·8.4.11 실측): MySQL 은 정수를 모드 비트로 읽어 0·00 은 빈 모드, 1 은 REAL_AS_FLOAT 이고,
-// 0.0 은 1232, 0x00 은 1231 이다. 0 은 빈 모드로 받고 그 밖의 숫자는 비트를 재현하지 않아 거부한다. 변수(@m·@@foreign_key_checks)의 숫자는 정수(비트)인지
-// 문자열('0' 은 1231)인지 따라가지 않아 함께 거부한다. 따옴표 친 '0' 은 모드 이름이 아니라 1231 이다 (resolveSqlMode)
+// 따옴표 없는 단어 FALSE·TRUE 는 MySQL 에서 정수 0·1 이다 (Item_func_false·Item_func_true — 리뷰 12회차 Claude F4, 8.0.46·8.4.11 실측: FALSE 는 빈 모드, TRUE 는 REAL_AS_FLOAT)
+const BOOLEAN_INTEGERS: ReadonlyMap<string, string> = new Map([['FALSE', '0'], ['TRUE', '1']]);
+
+// 대입한 SQL_MODE 값 (written: 쓴 값의 첫 토큰). 숫자 (리뷰 11회차 Claude F8, 8.0.46·8.4.11 실측): MySQL 은 정수를 모드 비트로 읽어 0·00·FALSE 는 빈 모드, 1·TRUE 는
+// REAL_AS_FLOAT 이고, 0.0 은 1232, 0x00 은 1231 이다. 0 은 빈 모드로 받고 그 밖의 숫자는 비트를 재현하지 않아 거부한다. 변수(@m·@@foreign_key_checks)의 숫자·TRUE·FALSE 는
+// 정수(비트)인지 문자열('0' 은 1231)인지 따라가지 않아 함께 거부한다. 따옴표 친 '0'·'FALSE' 는 모드 이름이 아니라 1231 이다 (resolveSqlMode)
 function sqlModeOf(value: string, written: Token | undefined): string {
-  if (written?.t === 'number') {
-    return /^0+$/.test(value) ? '' : fail(`SQL_MODE 를 숫자 ${value} 로 쓰면 MySQL 이 모드 비트로 읽습니다 — 0(빈 모드) 밖의 숫자는 받지 않습니다 — ${RE_EXPORT}`);
+  const integer = written?.t === 'number' ? value : written?.t === 'word' ? BOOLEAN_INTEGERS.get(value) : undefined;
+  if (integer !== undefined) {
+    const shown = integer === value ? `숫자 ${value}` : `${value}(정수 ${integer})`;
+    return /^0+$/.test(integer) ? '' : fail(`SQL_MODE 를 ${shown} 로 쓰면 MySQL 이 모드 비트로 읽습니다 — 0(빈 모드) 밖의 숫자는 받지 않습니다 — ${RE_EXPORT}`);
   }
-  if (written?.t !== 'string' && /^\d+$/.test(value)) {
-    fail(`SQL_MODE 에 넣은 변수 값 ${value} 가 숫자입니다 — MySQL 은 정수면 모드 비트로 읽고 문자열이면 1231 로 거부하는데, 이 도구는 변수 값이 정수인지 따라가지 않습니다 — ${RE_EXPORT}`);
+  if (written?.t !== 'string' && (/^\d+$/.test(value) || BOOLEAN_INTEGERS.has(value))) {
+    fail(`SQL_MODE 에 넣은 변수 값 ${value} 가 숫자(TRUE·FALSE 는 정수 1·0)입니다 — MySQL 은 정수면 모드 비트로 읽고 문자열이면 1231 로 거부하는데, 이 도구는 변수 값이 정수인지 `
+      + `따라가지 않습니다 — ${RE_EXPORT}`);
   }
   return resolveSqlMode(value);
 }
