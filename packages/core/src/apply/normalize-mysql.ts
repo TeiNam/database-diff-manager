@@ -4,7 +4,7 @@ import { Cursor } from '../cursor';
 import { quoteString, tokenize, type Token } from '../lexer';
 import type { Column, TableOption } from '../model';
 import { normalizeType } from '../normalize';
-import { floatDefault } from './float-default';
+import { assertFloatSize, floatDefault } from './float-default';
 import { splitList } from './lists';
 import { TEMPORAL_TYPES, temporalDefault, type TemporalType } from './temporal-default';
 import { fail, RE_EXPORT, type ColumnSpec, type DefaultSpec, type NowSpec } from './types';
@@ -65,6 +65,7 @@ function withArgs(name: string, inner: Token[] | undefined, src: string): string
   if (inner && !inner.length) fail(`타입 인자가 비었습니다: ${src} (MySQL 1064)`); // 빈 괄호는 splitList 보다 먼저 봐서 어느 타입인지 메시지에 남긴다
   const args = inner && splitList(inner, '타입 인자').map((part) => (part.length === 1 && part[0].t === 'number' && /^\d+$/.test(part[0].v) ? String(Number(part[0].v)) : fail(`타입 인자가 올바르지 않습니다: ${src}`)));
   if (args && args.length > (TWO_ARGS.has(name) ? 2 : 1)) fail(`타입 인자가 너무 많습니다: ${src}`);
+  if (FLOAT_TYPES.has(name) && args?.length === 2) assertFloatSize(name.toUpperCase(), Number(args[0]), Number(args[1]));
   switch (name) {
     case 'decimal': return `decimal(${args?.[0] ?? 10},${args?.[1] ?? 0})`;
     case 'char': case 'binary': case 'bit': return `${name}(${args?.[0] ?? 1})`;

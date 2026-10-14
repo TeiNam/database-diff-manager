@@ -5,7 +5,20 @@
 // - (M,D): 소수 D 자리로 0 을 채워 찍는다 ('1.5' → '1.500'). 정수부가 M-D 자리를 넘으면 1067 이다. D 자리 밖 숫자는 이진 값의 소수부를 rint 로 반올림해
 //   십진 반올림과 다르다 (DOUBLE(10,2) 의 1.005 → '1.00', DOUBLE(10,0) 의 1.5 → '1')
 // 그대로 다시 쓸 수 있는 꼴(유효숫자가 FLOAT 6·DOUBLE 15 자리 이하인 'f' 표기, D 자리 안에서 끝나는 (M,D) 값)만 받고, 나머지는 RE_EXPORT 로 거부한다
+import { fail } from './types';
+
 const DECIMAL_TEXT = /^([+-]?)(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i;
+const MAX_SCALE = 30;
+const MAX_PRECISION = 255;
+
+// FLOAT·DOUBLE(M,D) 의 크기 한도 (MySQL 8.0.46·8.4.11 실측, 검사 순서도 같다): D 는 30 이하(1425), D 는 M 이하(1427), M 은 1~255(1439).
+// 기본값을 찍기 전에 본다 — (M,D) 기본값은 소수 D 자리로 0 을 채우므로, D 를 묶지 않으면 56자 스크립트가 1,000만 자 기본값을 만든다 (리뷰 1회차 F4)
+export function assertFloatSize(name: string, precision: number, scale: number): void {
+  const type = `${name}(${precision},${scale})`;
+  if (scale > MAX_SCALE) fail(`${type} 의 소수 자릿수는 ${MAX_SCALE} 이하여야 합니다 (MySQL 1425)`);
+  if (scale > precision) fail(`${type} 은 전체 자릿수가 소수 자릿수 이상이어야 합니다 (MySQL 1427)`);
+  if (precision < 1 || precision > MAX_PRECISION) fail(`${type} 의 전체 자릿수는 1~${MAX_PRECISION} 이어야 합니다 (MySQL 1439)`);
+}
 
 // 값 = 0.digits × 10^point. digits 는 앞뒤 0 이 없다 ('' 이면 0)
 interface Decimal {
@@ -59,8 +72,9 @@ const plainLength = ({ digits, point }: Decimal): number => (point <= 0 ? digits
 
 export function floatDefault(text: string, type: string, bad: (why: string) => never, reExport: (why: string) => never): string {
   const kind = type.startsWith('float') ? FLOAT : DOUBLE;
-  const x = readDecimal(text);
   const fixed = /^(?:float|double)\((\d+),(\d+)\)/.exec(type);
+  if (fixed) assertFloatSize(kind === FLOAT ? 'FLOAT' : 'DOUBLE', Number(fixed[1]), Number(fixed[2])); // 기준 덤프의 컬럼 타입도 본다 (ALTER COLUMN … SET DEFAULT)
+  const x = readDecimal(text);
   return fixed ? fixedDefault(x, text, kind, Number(fixed[1]), Number(fixed[2]), bad, reExport) : plainDefault(x, text, kind, reExport);
 }
 

@@ -321,6 +321,19 @@ describe('ALTER TABLE — 문자열 컬럼의 숫자 기본값', () => {
   });
 });
 
+// 56자 스크립트가 1,000만 자 기본값을 만들어 서버 힙을 다 쓰던 문제 (리뷰 1회차 F4): 타입의 (M,D) 를 기본값을 찍기 전에 MySQL 한도로 본다
+describe('ALTER TABLE — FLOAT·DOUBLE(M,D) 크기 한도', () => {
+  it('아주 큰 D 는 기본값을 찍기 전에 1425 로 거부한다 (기준 덤프의 컬럼에 SET DEFAULT 해도)', () => {
+    const started = performance.now();
+    const script = 'ALTER TABLE member ADD x DOUBLE(255,10000000) DEFAULT 0;';
+    expect(script.length).toBeLessThan(60);
+    expect(apply(script)).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1425)') } });
+    const base = parseSqlDump(tdExport('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x` double(10,10000000) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;')).model;
+    expect(applyScript(base, 'ALTER TABLE t ALTER x SET DEFAULT 0;', { schemaName: 'shop' })).toMatchObject({ ok: false, error: { reason: expect.stringContaining('(MySQL 1425)') } });
+    expect(performance.now() - started).toBeLessThan(200);
+  });
+});
+
 describe('ALTER TABLE — ALTER COLUMN … DROP DEFAULT', () => {
   const DEFAULTS_BASE = parseSqlDump(tdExport(
     "CREATE TABLE `d` (\n  `id` int NOT NULL,\n  `n1` varchar(10) DEFAULT NULL,\n  `n2` varchar(10) NOT NULL,\n  `n3` text,\n  `n4` int DEFAULT '5',\n  `n5` int NOT NULL AUTO_INCREMENT,\n  `n6` json DEFAULT NULL,\n  `n7` datetime DEFAULT CURRENT_TIMESTAMP,\n  `n9` int NOT NULL DEFAULT '7',\n  `n10` varchar(5) DEFAULT 'x',\n  `n11` timestamp NULL DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `n5` (`n5`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",

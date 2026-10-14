@@ -31,6 +31,18 @@ describe('normalizeUserType', () => {
     expect(() => normalizeUserType(src)).toThrow(ApplyFailure);
   });
 
+  // FLOAT·DOUBLE(M,D) 의 크기 한도 (MySQL 8.0.46·8.4.11 실측, 검사 순서도 같다): D > 30 은 1425, D > M 은 1427, M 이 0 이나 255 를 넘으면 1439 (리뷰 1회차 F4)
+  it.each([
+    ['DOUBLE(255,10000000)', '1425'], ['DOUBLE(256,300)', '1425'], ['FLOAT(10,31)', '1425'], ['DOUBLE(5,10)', '1427'], ['DOUBLE(0,5)', '1427'],
+    ['DOUBLE(0,0)', '1439'], ['DOUBLE(256,2)', '1439'], ['FLOAT(256,1)', '1439'], ['REAL(99999999999,1)', '1439'],
+  ])('%s 는 거부 (MySQL %s)', (src, errno) => {
+    expect(messageOf(() => normalizeUserType(src))).toContain(`(MySQL ${errno})`);
+  });
+
+  it.each([['DOUBLE(255,30)', 'double(255,30)'], ['FLOAT(255,30)', 'float(255,30)'], ['DOUBLE(1,1)', 'double(1,1)']])('%s → %s (한도 안)', (src, out) => {
+    expect(normalizeUserType(src)).toBe(out);
+  });
+
   it.each([['VARCHAR()'], ['INT()'], ['DATETIME()'], ['DECIMAL()'], ['CHAR VARYING()']])('%s: 빈 괄호는 거부', (src) => {
     expect(() => normalizeUserType(src)).toThrow(/타입 인자가 비었습니다.*\(MySQL 1064\)/);
   });
