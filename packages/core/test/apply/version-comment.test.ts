@@ -170,6 +170,14 @@ describe('마지막 문장 뒤의 실행 주석', () => {
     expectReExport(run('ALTER TABLE t ADD a INT;\n/*!40101 /* x */ -- y */ ALTER TABLE t ADD c INT;'), 0, '마지막 문장 뒤(줄 2)의 실행 주석 /*!40101 안의 주석');
   });
 
+  // 변이 N28 (리뷰 14회차 F4 — 번호 바로 뒤에 붙은 '/*' 를 놓친다): 서버는 공백 없이 붙은 '/*' 도 건너뛰는 주석 안의 한 겹 주석으로 읽어 둘째 '*/' 까지 건너뛴다 (8.0.46·8.4.11
+  // 에서 mysql 클라이언트로 실측: 8.4 클라이언트는 첫째에 a 만, 둘째에 a·c 를 더하고, 8.0 클라이언트는 둘 다 그 문장에서 1064 다). 변이는 a·b 와 a 를 냈다
+  it('번호 바로 뒤에 붙은 주석도 안의 주석으로 거부한다', () => {
+    expectReExport(run('ALTER TABLE t ADD a INT /*!99999/* x */ , ADD b INT */;'), 1, '건너뛰는 실행 주석 /*!99999 안의 주석은 받지 않습니다');
+    expectReExport(run('ALTER TABLE t ADD a INT;\n/*!99999/* x */ -- y */ ALTER TABLE t ADD c INT;'), 0, '마지막 문장 뒤(줄 2)의 건너뛰는 실행 주석 /*!99999 안의 주석은 받지 않습니다');
+    expectReExport(run('/*!99999/* x */ */;\nALTER TABLE t ADD c INT;'), 1, '앞 문장 뒤(줄 1)의 건너뛰는 실행 주석 /*!99999 안의 주석은 받지 않습니다');
+  });
+
   it('문장이 없는 스크립트면 스크립트의 줄을 밝힌다', () => {
     expectReExport(run('-- 메모\n/*!80400 -- x */ ALTER TABLE t ADD c INT;'), 0, '스크립트(줄 2)의 서버 버전에 따라 건너뛰는 실행 주석 /*!80400');
   });
