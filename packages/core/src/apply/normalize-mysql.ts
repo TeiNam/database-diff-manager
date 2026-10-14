@@ -138,6 +138,9 @@ export function charsetOfCollation(coll: string): string {
 
 export const primaryCollation = (cs: string): string => PRIMARY_COLLATION.get(cs) ?? fail(`알 수 없는 문자셋입니다: ${cs} (MySQL 1115)`);
 
+// primaryCollation 과 같되 표에 없는 문자셋이면 undefined (세션 문자셋은 이름을 검사하지 않고 따라간다 — client-charset.ts)
+export const knownPrimaryCollation = (cs: string): string | undefined => PRIMARY_COLLATION.get(cs);
+
 export interface TableCharset {
   charset: string;
   collation: string;

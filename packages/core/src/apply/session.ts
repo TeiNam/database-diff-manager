@@ -1,5 +1,5 @@
-// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 세션 문자셋(SET NAMES·CHARACTER SET,
-// character_set_client·character_set_connection·collation_connection)도 따라간다 (client-charset.ts, 리뷰 11회차 Claude F4). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
+// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 세션 문자셋(SET NAMES·CHARACTER SET, character_set_client·
+// character_set_connection·character_set_results·collation_connection)도 따라간다 (client-charset.ts, 리뷰 11회차 Claude F4·12회차 R12-2). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
 // (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(unique_checks·sql_notes 등)는 스키마에 영향이 없어 값을 버린다 — 값을 모르는
 // 변수에서 되돌려도 받는다 (리뷰 9회차). 값을 쓰는 대상(사용자 변수, 세션 SQL_MODE·TIME_ZONE·FOREIGN_KEY_CHECKS)도 값을 모르는 변수에서 정하면 그 SET 에서 거부하지 않고
 // 모르는 값으로 둔다 — 그 값에 기대는 뒤 문장만 거부한다 (리뷰 10회차, unknown-session.ts). 트랜잭션 특성·역할·자원 그룹의 SET(SET TRANSACTION·SET ROLE·SET DEFAULT ROLE·
@@ -23,7 +23,7 @@ const SCHEMA_VARIABLES: ReadonlySet<string> = new Set([
 ]);
 
 // 값을 쓰는 세션 변수 (소문자, assignValue 가 따라가는 것): FOREIGN_KEY_CHECKS·SQL_MODE 는 값을, time_zone 은 UTC 로 정했는지를, 문자셋 변수는 문자셋을 쓴다. 사용자 변수도
-// 뒤 SET 이 읽으므로 값을 쓴다 — 값을 모르는 변수에서 정하면 모르는 값을 기억한다 (setUnknown). 그 밖의 세션 변수(unique_checks·sql_notes·character_set_results …)는 값을
+// 뒤 SET 이 읽으므로 값을 쓴다 — 값을 모르는 변수에서 정하면 모르는 값을 기억한다 (setUnknown). 그 밖의 세션 변수(unique_checks·sql_notes·autocommit …)는 값을
 // 버리므로, 값을 모르는 변수(저장하지 않았거나 저장 함수 호출 뒤 잊은 사용자 변수, @@global·@@persist 서버 변수)에서 되돌려도 받는다 — mysqldump·Workbench 꼬리의
 // 'SET UNIQUE_CHECKS = @OLD_UNIQUE_CHECKS' (리뷰 9회차 Claude 참고 1)
 const TRACKED_VARIABLES: ReadonlySet<string> = new Set(['foreign_key_checks', 'sql_mode', 'time_zone', ...CHARSET_VARIABLES]);

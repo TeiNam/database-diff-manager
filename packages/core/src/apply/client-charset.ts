@@ -2,19 +2,29 @@
 // 리터럴은 character_set_connection 으로 바꿔 저장한다. 스크립트는 UTF-8 이므로(화면이 UTF-8 로만 읽는다) 'SET NAMES latin1' 뒤의 DEFAULT '가'·COMMENT '회원 이름'·`가` 는
 // 'ê°€'·'íšŒì› ì´ë¦„'·`ê°€` 로 저장되고, connection 만 latin1 이어도 DEFAULT '가' 는 '?' 다 (ENUM('가','나') 는 1291). 두 문자셋이 UTF-8 계열이나 binary(바이트 그대로)가
 // 아니면, 또는 모르면, ASCII 밖 글자가 든 DDL·루틴 문장을 거부한다 — 깨진 글자를 재현하지 않는다. 데이터 문장·SET 같은 무시하는 문장은 스키마를 바꾸지 않아 받는다.
-// 처음 세션 문자셋은 utf8mb4 로 본다 (mysql 클라이언트 8.0 의 기본값 — state.ts). 콜레이션은 따라가지 않아 @@collation_connection 은 모르는 값이다. 저장 함수 안의
-// SET NAMES·character_set_client 는 함수에서 돌아올 때 MySQL 이 부른 쪽의 값으로 되돌려 따라가지 않는다 (8.0.46·8.4.11 실측)
+// 처음 세션은 utf8mb4 와 그 기본 콜레이션 utf8mb4_0900_ai_ci 로 본다 (mysql 클라이언트 8.0 의 기본 연결 — CLIENT_DEFAULTS). collation_connection·character_set_results 도
+// 따라가 @@collation_connection·@@character_set_results 를 읽어 두었다 되돌리는 mysqldump·phpMyAdmin 머리·꼬리, mysqldump --routines 의 루틴 블록이 아는 값을 되돌린다
+// (리뷰 12회차 R12-2·Claude F1 — 11회차는 모르는 값으로 읽어 되돌린 뒤의 한글 DDL 을 거부했다). 저장 함수 안의 SET NAMES·character_set_client 는 함수에서 돌아올 때
+// MySQL 이 부른 쪽의 값으로 되돌려 따라가지 않는다 (8.0.46·8.4.11 실측)
 import type { Cursor } from '../cursor';
 import type { Token } from '../lexer';
+import { knownPrimaryCollation } from './normalize-mysql';
 import { cappedReason, isUnknown, type SessionValue, type State } from './state';
 import { fail, RE_EXPORT } from './types';
 
-// 값을 따라가는 세션 문자셋 변수 (소문자). collation_connection 은 그 콜레이션의 문자셋을 character_set_connection 으로 정한다
-export const CHARSET_VARIABLES: ReadonlySet<string> = new Set(['character_set_client', 'character_set_connection', 'collation_connection']);
+// 값을 따라가는 세션 문자셋 변수 (소문자). character_set_connection 과 collation_connection 은 서로를 정한다: 문자셋을 정하면 콜레이션은 그 문자셋의 기본 콜레이션이 되고,
+// 콜레이션을 정하면 문자셋은 그 콜레이션의 문자셋이 된다 (8.0.46·8.4.11 실측). character_set_results 는 DDL 을 읽는 데 쓰지 않고 읽기만 따라간다
+export const CHARSET_VARIABLES: ReadonlySet<string> = new Set(['character_set_client', 'character_set_connection', 'character_set_results', 'collation_connection']);
 // 스크립트(UTF-8)의 바이트를 같은 글자로 읽는 문자셋 (utf8 은 utf8mb3 로 읽는다)
 const SAFE_CHARSETS: ReadonlySet<string> = new Set(['utf8mb4', 'utf8mb3', 'binary']);
 const NON_ASCII = /[^\x00-\x7f]/;
 const GLOBAL_DEFAULT = 'DEFAULT 는 서버의 전역 값을 읽는데 그 값을 알 수 없습니다';
+
+// 세션의 연결 문자셋과 콜레이션 (character_set_connection·collation_connection)
+interface Connection {
+  readonly charset: SessionValue;
+  readonly collation: SessionValue;
+}
 
 // 문자셋 이름 (소문자, utf8 은 MySQL 8.0 처럼 utf8mb3)
 function charsetName(name: string): string {
@@ -22,43 +32,67 @@ function charsetName(name: string): string {
   return lower === 'utf8' ? 'utf8mb3' : lower;
 }
 
-// 콜레이션의 문자셋: binary 는 binary, 그 밖에는 첫 '_' 앞이다 (MySQL 의 콜레이션 이름은 문자셋 이름으로 시작한다 — utf8mb4_0900_ai_ci, latin1_swedish_ci)
-const collationCharset = (name: string): string => (name.toLowerCase() === 'binary' ? 'binary' : charsetName(name.split('_')[0]));
+// 콜레이션 이름 (소문자, utf8_ 로 시작하면 MySQL 8.0 처럼 utf8mb3_ — 8.0.46·8.4.11 의 @@collation_connection 은 utf8mb3_general_ci 다)
+const collationName = (name: string): string => name.toLowerCase().replace(/^utf8_/, 'utf8mb3_');
 
-// @@character_set_client·@@character_set_connection 은 따라간 값을 읽는다 (mysqldump 의 SET @saved_cs_client = @@character_set_client … 되돌림). 아니면 undefined
-export function currentCharset(st: State, name: string): SessionValue | undefined {
-  if (name === 'character_set_client') return st.clientCharset;
-  return name === 'character_set_connection' ? st.connectionCharset : undefined;
+// 문자셋을 정한 연결: 콜레이션은 그 문자셋의 기본 콜레이션이다 (SET NAMES x·character_set_connection = x). 이 도구가 기본 콜레이션을 모르는 문자셋이면 콜레이션만 모른다
+function connectionOf(charset: SessionValue): Connection {
+  if (isUnknown(charset)) return { charset, collation: charset };
+  return { charset, collation: knownPrimaryCollation(charset) ?? { unknown: `문자셋 ${charset} 의 기본 콜레이션은 이 도구가 모릅니다` } };
 }
 
-// SET NAMES x [COLLATE y] · NAMES DEFAULT 는 client·connection 을 함께, SET CHARACTER SET x · CHARSET x 는 client 를 x 로, connection 을 스키마 기본 문자셋으로 정한다
-// (MySQL: character_set_database — 8.0.46·8.4.11 실측). DEFAULT 는 서버의 전역 character_set_client 를 읽어 모르는 값이다. a 는 NAMES·CHARACTER·CHARSET 자리이고,
-// 돌려주는 대입은 applySet 이 2단계에서 반영한다
+// 콜레이션을 정한 연결: 문자셋은 binary 면 binary, 그 밖에는 첫 '_' 앞이다 (MySQL 의 콜레이션 이름은 문자셋 이름으로 시작한다 — utf8mb4_0900_ai_ci, latin1_swedish_ci)
+function connectionWith(collation: SessionValue): Connection {
+  if (isUnknown(collation)) return { charset: collation, collation };
+  return { charset: collation === 'binary' ? 'binary' : charsetName(collation.split('_')[0]), collation };
+}
+
+function setConnection(st: State, c: Connection): void {
+  st.connectionCharset = c.charset;
+  st.connectionCollation = c.collation;
+}
+
+// @@character_set_client·@@character_set_connection·@@character_set_results·@@collation_connection 은 따라간 값을 읽는다 (mysqldump 의
+// SET @saved_cs_client = @@character_set_client … 되돌림). 아니면 undefined
+const READS: ReadonlyMap<string, (st: State) => SessionValue> = new Map([
+  ['character_set_client', (st: State) => st.clientCharset], ['character_set_connection', (st: State) => st.connectionCharset],
+  ['character_set_results', (st: State) => st.resultsCharset], ['collation_connection', (st: State) => st.connectionCollation],
+]);
+export const currentCharset = (st: State, name: string): SessionValue | undefined => READS.get(name)?.(st);
+
+// SET NAMES x [COLLATE y] · NAMES DEFAULT 는 client·results·connection 을 함께 x 로, collation_connection 을 y 나 x 의 기본 콜레이션으로 정한다. SET CHARACTER SET x ·
+// CHARSET x 는 client·results 를 x 로, connection 을 스키마 기본 문자셋·콜레이션으로 정한다 (MySQL: character_set_database·collation_database — 8.0.46·8.4.11 실측).
+// DEFAULT 는 서버의 전역 character_set_client 를 읽어 모르는 값이다. a 는 NAMES·CHARACTER·CHARSET 자리이고, 돌려주는 대입은 applySet 이 2단계에서 반영한다
 export function namesWrite(st: State, a: Cursor): () => void {
   const statement = `SET ${a.src.slice(a.toks[0].s, a.toks[a.toks.length - 1].e)}`;
   const names = a.acceptWord('NAMES');
   if (!names && !a.acceptWord('CHARSET')) a.expectWord('CHARACTER', 'SET');
   const t = a.next();
   if (t.t !== 'word' && t.t !== 'ident' && t.t !== 'string') fail(`문자셋 이름이 필요합니다: ${t.v} (MySQL 1064)`);
-  const client: SessionValue = t.t === 'word' && t.v.toUpperCase() === 'DEFAULT' ? { unknown: `앞의 \`${statement}\` 문장의 ${GLOBAL_DEFAULT}` } : charsetName(t.v);
-  if (names && a.acceptWord('COLLATE')) a.next(); // 콜레이션은 따라가지 않는다 (문자셋이 다르면 MySQL 이 1253 으로 거부한다)
+  const charset: SessionValue = t.t === 'word' && t.v.toUpperCase() === 'DEFAULT' ? { unknown: `앞의 \`${statement}\` 문장의 ${GLOBAL_DEFAULT}` } : charsetName(t.v);
+  // COLLATE 는 NAMES x 뒤에만 쓴다 (NAMES DEFAULT COLLATE y 는 1064 — 8.0.46·8.4.11 실측). x 와 문자셋이 다르면 MySQL 은 1253 으로 거부한다
+  const collate = names && !isUnknown(charset) && a.acceptWord('COLLATE') ? collationName(a.next().v) : undefined;
   if (!a.done) fail(`알 수 없는 내용입니다: ${a.peek()!.v} (MySQL 1064)`);
-  const connection = names ? client : charsetName(st.defaults.charset);
+  const connection = !names ? { charset: charsetName(st.defaults.charset), collation: st.defaults.collation } : collate === undefined ? connectionOf(charset) : { charset, collation: collate };
   return () => {
-    st.clientCharset = client;
-    st.connectionCharset = connection;
+    st.clientCharset = charset;
+    st.resultsCharset = charset;
+    setConnection(st, connection);
   };
 }
 
-// character_set_client·character_set_connection·collation_connection 대입 (applySet 2단계). written: 쓴 값의 첫 토큰 (DEFAULT 는 서버의 전역 값을 읽는다).
-// 모르는 값이면 이 대입(assignment)과 까닭을 남긴다
+// character_set_client·character_set_connection·character_set_results·collation_connection 대입 (applySet 2단계). written: 쓴 값의 첫 토큰 (DEFAULT 는 서버의 전역 값을
+// 읽는다). 모르는 값이면 이 대입(assignment)과 까닭을 남긴다
 export function assignCharset(st: State, target: string, value: SessionValue, written: Token | undefined, assignment: string): void {
   const resolved: SessionValue = written?.t === 'word' && value === 'DEFAULT' ? { unknown: GLOBAL_DEFAULT } : value;
-  const charset: SessionValue = isUnknown(resolved)
+  const known: SessionValue = isUnknown(resolved)
     ? { unknown: cappedReason(`앞의 \`${assignment}\` 문장이 세션 ${target} 를 알 수 없는 값으로 정했습니다 — ${resolved.unknown}`) }
-    : target === 'collation_connection' ? collationCharset(resolved) : charsetName(resolved);
-  if (target === 'character_set_client') st.clientCharset = charset;
-  else st.connectionCharset = charset;
+    : resolved;
+  if (target === 'collation_connection') return setConnection(st, connectionWith(isUnknown(known) ? known : collationName(known)));
+  const charset = isUnknown(known) ? known : charsetName(known);
+  if (target === 'character_set_connection') setConnection(st, connectionOf(charset));
+  else if (target === 'character_set_client') st.clientCharset = charset;
+  else st.resultsCharset = charset;
 }
 
 // 세션 문자셋이 스크립트의 UTF-8 바이트를 같은 글자로 읽지 않으면 ASCII 밖 글자가 든 DDL·루틴 문장을 거부한다. ddl: 문장 원문, toks: 그 토큰 (주석 속 글자는 토큰이 아니다)

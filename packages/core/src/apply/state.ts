@@ -1,9 +1,9 @@
-// ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE·time_zone 이 UTC 인지·문자셋 — 모르는 값이면 그 까닭), 기준 이름 추적
+// ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE·time_zone 이 UTC 인지·문자셋·콜레이션 — 모르는 값이면 그 까닭), 기준 이름 추적
 import { Cursor } from '../cursor';
 import { routineNameKey } from '../diff';
 import type { Column, ForeignKey, Routine, SchemaModel, Table } from '../model';
 import { splitList } from './lists';
-import { fail, RE_EXPORT, type ApplyDefaults } from './types';
+import { CLIENT_DEFAULTS, fail, RE_EXPORT, type ApplyDefaults } from './types';
 
 // src 타입 검사(tsconfig.src.json)는 DOM·node 타입 없이 ES2023 lib 만 쓰므로 전역 structuredClone 이 선언되어 있지 않다.
 // 실행 환경(Node 17+·브라우저)은 전역으로 제공하므로 선언만 둔다 (모듈 안 선언이라 실행 코드는 생기지 않는다)
@@ -73,6 +73,11 @@ export interface State {
   // UTF-8 계열·binary 가 아니면 ASCII 밖 글자가 든 DDL 을 거부한다 (client-charset.ts, 리뷰 11회차 Claude F4)
   clientCharset: SessionValue;
   connectionCharset: SessionValue;
+  // 세션 collation_connection·character_set_results (소문자, 모르면 Unknown). 처음은 utf8mb4_0900_ai_ci·utf8mb4 다 (mysql 클라이언트 8.0 의 기본 연결 — CLIENT_DEFAULTS).
+  // DDL 을 읽는 데는 쓰지 않고, 이 값을 읽어 두었다 되돌리는 mysqldump·phpMyAdmin 머리·꼬리와 mysqldump --routines 의 루틴 블록이 아는 값을 되돌리게 한다 (client-charset.ts,
+  // 리뷰 12회차 R12-2·Claude F1)
+  connectionCollation: SessionValue;
+  resultsCharset: SessionValue;
   timeZoneUtc: boolean; // 스크립트가 세션 time_zone 을 UTC 로 정했는가 — 아니면 서버 시간대라 TIMESTAMP 리터럴 기본값을 받지 않는다 (session.ts assertUtcTimestampDefault)
   // 세션 time_zone 을 모르는 까닭 ('…어' 로 끝나는 안내 글 — 그 뒤 time_zone 을 다시 정하면 지운다). 이때 timeZoneUtc 는 false 다: UTC 로 정한 세션 time_zone 을 바꿨을 수 있는
   // 저장 함수 호출(stored-call.ts), 값을 모르는 변수에서 정한 SET (session.ts). 없으면 서버 시간대라 모른다
@@ -109,7 +114,12 @@ export function initialState(base: SchemaModel, schemaName: string, defaults: Ap
   model.tables.forEach((t, k) => {
     if (!tableAt.has(t.name)) tableAt.set(t.name, k); // 같은 이름이 둘이면 앞의 것 (find 와 같다)
   });
-  const st: State = { model, schemaName, defaults, fkChecks: true, fkChecksUnknown: undefined, sqlMode, sqlModeUnknown: undefined, initialSqlMode: sqlMode, sqlModeLiteral: false, serverSqlModeChanged: false, clientCharset: 'utf8mb4', connectionCharset: 'utf8mb4', timeZoneUtc: false, timeZoneUnknown: undefined, saved: new Map(), forgotten: new Set(), storedCall: undefined, origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
+  const st: State = {
+    model, schemaName, defaults, fkChecks: true, fkChecksUnknown: undefined, sqlMode, sqlModeUnknown: undefined, initialSqlMode: sqlMode, sqlModeLiteral: false,
+    serverSqlModeChanged: false, clientCharset: CLIENT_DEFAULTS.charset, connectionCharset: CLIENT_DEFAULTS.charset,
+    connectionCollation: CLIENT_DEFAULTS.collation, resultsCharset: CLIENT_DEFAULTS.charset, timeZoneUtc: false, timeZoneUnknown: undefined, saved: new Map(),
+    forgotten: new Set(), storedCall: undefined, origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)),
+  };
   for (const t of model.tables) countForeignKeys(st, t, 1);
   return st;
 }
