@@ -175,14 +175,15 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
   });
 
   // 리뷰 7회차 R7-2·8회차: 무시하는 문장이 저장 함수를 부르면 함수가 SET @m = … 으로 바꾼 사용자 변수를 알 수 없다 — 문장을 실행하지 않아 함수의 결과를 평가할 수 없다.
-  // 문장은 받고(임시 도우미 함수로 데이터를 고치는 마이그레이션이 흔하다) 사용자 변수를 모두 잊는다. 뒤 SET 이 그 전에 저장한 변수를 읽으면 그 SET 을 RE_EXPORT 로 거부한다
+  // 문장은 받고(임시 도우미 함수로 데이터를 고치는 마이그레이션이 흔하다) 사용자 변수를 모두 잊는다. 뒤 SET 이 그 전에 저장한 변수를 읽으면 그 SET 도 받고 세션 SQL_MODE 를
+  // 모르는 값으로 두며, 그 SQL_MODE 를 쓰는 뒤 루틴(PROC)을 RE_EXPORT 로 거부한다 (리뷰 10회차)
   const FN = 'CREATE FUNCTION fn_one() RETURNS INT DETERMINISTIC NO SQL RETURN 1;';
   const MODE = "SET @m = 'NO_ENGINE_SUBSTITUTION';";
   const READ = 'SET SQL_MODE = @m;';
   const ALTER = 'ALTER TABLE t ADD COLUMN y INT;';
   const PROC = 'CREATE PROCEDURE p() SELECT 1;';
   const sqlModeOfP = (r: ReturnType<typeof run>) => (r.ok ? r.model.routines.find((x) => x.name === 'p')?.sqlMode : r.error.reason);
-  // 함수가 바꿨을 수 있는 변수(variable)를 읽는 index 번째 문장을, 부른 함수 이름(call)을 알리며 RE_EXPORT 로 거부한다
+  // 함수가 바꿨을 수 있는 변수(variable)에서 정한 SQL_MODE 를 쓰는 index 번째 문장을, 부른 함수 이름(call)을 알리며 RE_EXPORT 로 거부한다
   const expectForgotten = (r: ReturnType<typeof run>, index: number, call: string, variable = '@m'): void => {
     expect(r).toMatchObject({ ok: false, error: { index } });
     if (r.ok) return;
@@ -199,18 +200,19 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
     'SET GLOBAL max_connections = fn_one();', 'SET PERSIST max_connections = fn_one() + 1;', 'SET PERSIST_ONLY max_connections = FN_ONE ();', 'SET @@global.max_connections = `fn_one`();',
     'SET @@persist.max_connections = shop.fn_one();', 'SET GLOBAL sql_mode = CONCAT(@@sql_mode, fn_one());', 'SET GLOBAL max_connections = 10, wait_timeout = fn_one();',
     'SET SESSION foreign_key_checks = 1, GLOBAL max_connections = fn_one();', '/*!40000 SET GLOBAL max_connections = fn_one() */;',
-  ])('저장 함수를 부르는 무시 문장 %s 는 받고, 그 전에 저장한 사용자 변수를 뒤에서 읽는 SET 은 RE_EXPORT 로 거부한다', (sql) => {
+  ])('저장 함수를 부르는 무시 문장 %s 는 받고, 그 전에 저장한 사용자 변수에서 정한 SQL_MODE 를 쓰는 뒤 루틴은 RE_EXPORT 로 거부한다', (sql) => {
     expect(run(`${FN}\n${sql}\n${ALTER}`)).toMatchObject({ ok: true, applied: 2 });
-    const r = run(`${FN}\n${MODE}\n${sql}\n${READ}\n${ALTER}`);
-    expectForgotten(r, 4, /shop\./.test(sql) ? 'shop.fn_one' : sql.match(/fn_one/i)![0]);
-    expect(r).toMatchObject({ ok: false, error: { line: 4, statement: READ.slice(0, -1) } });
+    expect(run(`${FN}\n${MODE}\n${sql}\n${READ}\n${ALTER}`)).toMatchObject({ ok: true, applied: 2 }); // 변수를 읽는 SET 은 받는다
+    const r = run(`${FN}\n${MODE}\n${sql}\n${READ}\n${PROC}`);
+    expectForgotten(r, 5, /shop\./.test(sql) ? 'shop.fn_one' : sql.match(/fn_one/i)![0]);
+    expect(r).toMatchObject({ ok: false, error: { line: 5, statement: PROC.slice(0, -1), reason: expect.stringContaining(`앞의 \`${READ.slice(0, -1)}\` 문장이`) } });
   });
 
-  it('기준 버전에 있는 저장 함수(대소문자 무시)를 불러도 받고, 그 뒤 사용자 변수를 읽는 SET 은 거부한다', () => {
+  it('기준 버전에 있는 저장 함수(대소문자 무시)를 불러도 받고, 그 뒤 사용자 변수에서 정한 SQL_MODE 를 쓰는 루틴은 거부한다', () => {
     const shop = (script: string) => applyScript(SHOP, script, { schemaName: 'shop' });
     for (const [sql, call] of [['SELECT tax(100);', 'tax'], ['SELECT TAX (1.5) AS x;', 'TAX'], ['INSERT INTO orders (amount) VALUES (Tax(5));', 'Tax'], ['DO `tax`(1);', 'tax'], ['SET GLOBAL max_connections = TAX(1);', 'TAX']]) {
       expect(shop(`${sql}\nALTER TABLE orders ADD COLUMN y INT;`), sql).toMatchObject({ ok: true, applied: 1 });
-      expectForgotten(shop(`${MODE}\n${sql}\n${READ}\nALTER TABLE orders ADD COLUMN y INT;`), 3, call);
+      expectForgotten(shop(`${MODE}\n${sql}\n${READ}\n${PROC}`), 4, call);
     }
   });
 
@@ -221,25 +223,25 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
   ].join('\n');
 
   it.each(['SELECT set_m();', 'DO set_m();', 'INSERT INTO t VALUES (set_m());', 'SET GLOBAL max_connections = set_m();', 'SET PERSIST max_connections = set_m();'])(
-    'R7-2 재현: %s 뒤의 SET SQL_MODE = @m 은 함수가 바꾼 @m 을 옛 값으로 읽지 않고 RE_EXPORT 로 거부한다',
+    'R7-2 재현: %s 뒤의 SET SQL_MODE = @m 은 함수가 바꾼 @m 을 옛 값으로 읽지 않고, 그 SQL_MODE 를 쓰는 CREATE PROCEDURE 를 RE_EXPORT 로 거부한다',
     (call) => {
       const r = run(setMScript(call));
-      expectForgotten(r, 4, 'set_m');
-      expect(r).toMatchObject({ ok: false, error: { line: 10, statement: 'SET SQL_MODE = @m' } });
+      expectForgotten(r, 5, 'set_m');
+      expect(r).toMatchObject({ ok: false, error: { line: 11, statement: 'CREATE PROCEDURE p() SELECT 1' } });
     },
   );
 
   // 리뷰 8회차 R8-2: MySQL 은 숫자로만 되지 않은 이름이면 숫자로 시작해도 식별자로 읽는다 (1set_m() 은 저장 함수 1set_m 을 부른다, 8.0.46·8.4.11 실측)
   it.each([['SELECT 1set_m();', '1set_m'], ['DO shop.1set_m();', 'shop.1set_m'], ['INSERT INTO t VALUES (1set_m());', '1set_m'], ['SET GLOBAL max_connections = 1set_m();', '1set_m'], ['SELECT `1set_m`();', '1set_m']])(
     '숫자로 시작하는 이름의 저장 함수 호출 %s 도 사용자 변수를 잊게 한다 (R8-2)',
-    (call, name) => expectForgotten(run(setMScript(call, '1set_m')), 4, name),
+    (call, name) => expectForgotten(run(setMScript(call, '1set_m')), 5, name),
   );
 
   // 리뷰 9회차 R9-2: 현재 스키마로 한정한 자리('.' 바로 뒤)는 숫자처럼 보이는 이름도 식별자다 — shop.0xface() 는 저장 함수 0xface 를 부른다 (8.0.46·8.4.11 실측).
   // 렉서는 0xface·0b101·123 을 16진수·비트·숫자 리터럴로 읽는다
   it.each([['SELECT shop.0xface();', '0xface'], ['DO shop.0b101();', '0b101'], ['INSERT INTO t VALUES (shop.123());', '123'], ['SELECT shop.`0xface`();', '0xface']])(
     '현재 스키마로 한정한 숫자처럼 보이는 이름의 저장 함수 호출 %s 도 사용자 변수를 잊게 한다 (R9-2)',
-    (call, name) => expectForgotten(run(setMScript(call, name)), 4, `shop.${name}`),
+    (call, name) => expectForgotten(run(setMScript(call, name)), 5, `shop.${name}`),
   );
 
   // 리뷰 8회차 (Claude 참고 1): 임시 도우미 함수로 데이터를 고친 뒤 지우는 마이그레이션. 뒤에서 사용자 변수를 읽지 않으므로 받고, 최종 모델은 ALTER 만 적용한 것과 같다
@@ -269,7 +271,7 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
 
   it.each([['SELECT `now`();', 'now'], ['SELECT shop.concat();', 'shop.concat'], ['SELECT NOW ();', 'NOW'], ['SELECT NOW/**/();', 'NOW'], ['SELECT `coalesce`();', 'coalesce']])(
     '이름이 같은 저장 함수가 있을 때 %s 는 저장 함수 호출로 본다 (R8-1 대조군)',
-    (call, name) => expectForgotten(run(`${COLLIDING}\n${MODE}\n${call}\n${READ}\n${ALTER}`), 8, name),
+    (call, name) => expectForgotten(run(`${COLLIDING}\n${MODE}\n${call}\n${READ}\n${PROC}`), 9, name),
   );
 
   // 리뷰 9회차 R9-1: 바로 '(' 가 붙어야 내장 함수인 이름(NOW·COUNT … 15개)이 아니면, 이름과 괄호 사이에 공백·주석을 끼워도 MySQL 은 내장 함수를 부른다 (8.0.46·8.4.11 실측)
@@ -298,20 +300,21 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
   });
 
   it('다른 스키마의 함수 호출(other.f())은 이 버전이 모르는 함수라 저장 함수 호출로 센다', () => {
-    expectForgotten(run(`${MODE}\nSELECT other.f(1);\n${READ}\n${ALTER}`), 3, 'other.f');
+    expectForgotten(run(`${MODE}\nSELECT other.f(1);\n${READ}\n${PROC}`), 4, 'other.f');
   });
 
   it('저장 함수 호출 뒤 다시 정한 변수는 읽고, 그 전의 변수는 다른 변수에서 옮긴 값·mysqldump 의 @OLD_ 저장까지 모두 잊는다', () => {
     expect(sqlModeOfP(run(`${FN}\nSELECT fn_one();\n${MODE}\n${READ}\n${PROC}`))).toBe('NO_ENGINE_SUBSTITUTION');
-    expectForgotten(run(`${FN}\n${MODE}\nSET @b = @m;\nSELECT fn_one();\nSET SQL_MODE = @b;\n${ALTER}`), 5, 'fn_one', '@b');
-    expectForgotten(run(`${FN}\n${MODE}\nSELECT fn_one();\nSET @x = @m;\n${ALTER}`), 4, 'fn_one');
-    expectForgotten(run(`${FN}\nSELECT fn_one();\nSET SQL_MODE = @never_saved;\n${ALTER}`), 3, 'fn_one', '@never_saved'); // 함수가 정했을 수도 있다
-    const dump = ["SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO';", FN, 'UPDATE t SET id = fn_one();', ALTER, 'SET SQL_MODE=@OLD_SQL_MODE;'].join('\n');
-    expectForgotten(run(dump), 5, 'fn_one', '@old_sql_mode');
+    expectForgotten(run(`${FN}\n${MODE}\nSET @b = @m;\nSELECT fn_one();\nSET SQL_MODE = @b;\n${PROC}`), 6, 'fn_one', '@b');
+    expectForgotten(run(`${FN}\n${MODE}\nSELECT fn_one();\nSET @x = @m;\nSET SQL_MODE = @x;\n${PROC}`), 6, 'fn_one'); // 잊은 @m 을 옮긴 @x 도 모른다
+    expectForgotten(run(`${FN}\nSELECT fn_one();\nSET SQL_MODE = @never_saved;\n${PROC}`), 4, 'fn_one', '@never_saved'); // 함수가 정했을 수도 있다
+    const dump = ["SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO';", FN, 'UPDATE t SET id = fn_one();', ALTER, 'SET SQL_MODE=@OLD_SQL_MODE;'];
+    expect(run(dump.join('\n'))).toMatchObject({ ok: true, applied: 2 }); // 꼬리의 복원은 받는다 (리뷰 10회차)
+    expectForgotten(run([...dump, PROC].join('\n')), 6, 'fn_one', '@old_sql_mode');
   });
 
   it('한 SET 문 안에서는 저장 함수 호출 뒤의 대입만 그 변수를 읽지 못한다 (MySQL 은 값을 차례로 계산한다)', () => {
-    expectForgotten(run(`${FN}\n${MODE}\nSET GLOBAL max_connections = fn_one(), SESSION sql_mode = @m;\n${ALTER}`), 3, 'fn_one');
+    expectForgotten(run(`${FN}\n${MODE}\nSET GLOBAL max_connections = fn_one(), SESSION sql_mode = @m;\n${PROC}`), 4, 'fn_one');
     expect(sqlModeOfP(run(`${FN}\n${MODE}\nSET SESSION sql_mode = @m, GLOBAL max_connections = fn_one();\n${PROC}`))).toBe('NO_ENGINE_SUBSTITUTION');
   });
 
@@ -322,8 +325,8 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
   });
 
   // 함수 안의 SET GLOBAL sql_mode 는 전역 값을 바꾼다 (8.0.46·8.4.11 실측). DEFAULT 는 대입할 때 전역 값을 읽으므로 한 문장의 뒤 대입이 부르는 함수도 앞의 DEFAULT 에 걸린다
-  it('저장 함수 호출 뒤(같은 SET 문의 뒤 대입 포함)의 SET sql_mode = DEFAULT 는 함수가 바꿨을 수 있는 전역 값을 읽어 RE_EXPORT 로 거부한다', () => {
-    const scripts: [string, number][] = [[`${FN}\nSELECT fn_one();\nSET SESSION sql_mode = DEFAULT;\n${PROC}`, 3], [`${FN}\nSET SESSION sql_mode = DEFAULT, GLOBAL max_connections = fn_one();\n${PROC}`, 2]];
+  it('저장 함수 호출 뒤(같은 SET 문의 뒤 대입 포함)의 SET sql_mode = DEFAULT 는 함수가 바꿨을 수 있는 전역 값을 읽어, 그 SQL_MODE 를 쓰는 뒤 루틴을 RE_EXPORT 로 거부한다', () => {
+    const scripts: [string, number][] = [[`${FN}\nSELECT fn_one();\nSET SESSION sql_mode = DEFAULT;\n${PROC}`, 4], [`${FN}\nSET SESSION sql_mode = DEFAULT, GLOBAL max_connections = fn_one();\n${PROC}`, 3]];
     for (const [script, index] of scripts) {
       const r = run(script);
       expect(r).toMatchObject({ ok: false, error: { index, reason: expect.stringContaining('저장 함수 호출(`fn_one`)이 전역 sql_mode 를 바꿨을 수 있') } });

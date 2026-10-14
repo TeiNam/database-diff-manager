@@ -335,11 +335,12 @@ describe('처음 세션 SQL_MODE (ApplyOptions.sqlMode)', () => {
   });
 
   // 리뷰 7회차 R7-1 재현 (session-boundaries default-after-global): SET GLOBAL 은 세션을 바꾸지 않지만 그 뒤의 SET SESSION sql_mode = DEFAULT 는 바뀐 서버 값을 읽는다.
-  // 처음 세션 SQL_MODE 를 붙이면 루틴의 sqlMode 가 실제와 달라지므로 거부한다. DEFAULT 를 쓰지 않았거나 서버 값을 바꾸기 전에 썼으면 세션 값은 처음 값 그대로다
-  it.each(['SET GLOBAL sql_mode', 'SET PERSIST sql_mode', 'SET @@global.sql_mode'])('%s 뒤의 SET SESSION sql_mode = DEFAULT 는 루틴에 처음 세션 SQL_MODE 를 붙이지 않고 RE_EXPORT 로 거부한다', (set) => {
+  // 처음 세션 SQL_MODE 를 붙이면 루틴의 sqlMode 가 실제와 달라지므로 그 루틴을 거부한다 (리뷰 10회차: DEFAULT 는 받고 세션 SQL_MODE 를 모르는 값으로 둔다).
+  // DEFAULT 를 쓰지 않았거나 서버 값을 바꾸기 전에 썼으면 세션 값은 처음 값 그대로다
+  it.each(['SET GLOBAL sql_mode', 'SET PERSIST sql_mode', 'SET @@global.sql_mode'])('%s 뒤의 SET SESSION sql_mode = DEFAULT 다음 루틴은 처음 세션 SQL_MODE 를 붙이지 않고 RE_EXPORT 로 거부한다', (set) => {
     const script = `${set} = 'NO_ENGINE_SUBSTITUTION';\nSET SESSION sql_mode = DEFAULT;\nCREATE PROCEDURE p() SELECT 1;`;
     for (const r of [withMode(script, RELAXED), apply(script)]) {
-      expect(r).toMatchObject({ ok: false, error: { index: 2, line: 2, reason: expect.stringContaining('전역') } });
+      expect(r).toMatchObject({ ok: false, error: { index: 3, line: 3, reason: expect.stringContaining('전역') } });
       expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);
     }
   });

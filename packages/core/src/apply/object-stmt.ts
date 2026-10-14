@@ -8,6 +8,7 @@ import { isDefaultCharacteristic } from '../routine-defaults';
 import { assertBmpText, routineReturns } from './normalize-mysql';
 import { objectName, objectNameList, routineKey, type State } from './state';
 import { fail, RE_EXPORT } from './types';
+import { routineSqlMode } from './unknown-session';
 
 const CREATE_ROUTINE_RE = /^CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCEDURE)\b/i;
 const IF_NOT_EXISTS_RE = /^(CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:FUNCTION|PROCEDURE)\s+)IF\s+NOT\s+EXISTS\s+/i;
@@ -17,7 +18,7 @@ const label = (kind: RoutineKind) => (kind === 'function' ? 'FUNCTION' : 'PROCED
 
 export const isCreateRoutine = (ddl: string): boolean => CREATE_ROUTINE_RE.test(ddl);
 
-// 루틴은 만들 때의 세션 SQL_MODE 를 기억한다. 이름은 대소문자를 구분하지 않는다
+// 루틴은 만들 때의 세션 SQL_MODE 를 기억한다 (모르면 거부한다 — routineSqlMode). 이름은 대소문자를 구분하지 않는다
 export function createRoutine(st: State, ddl: string, noBackslashEscapes: boolean): void {
   assertNoExecutableComment(ddl, tokenize(ddl, { noBackslashEscapes }));
   const ifNotExists = IF_NOT_EXISTS_RE.test(ddl);
@@ -27,7 +28,8 @@ export function createRoutine(st: State, ddl: string, noBackslashEscapes: boolea
     fail(`${label(r.kind)} \`${r.name}\` 이 이미 있습니다 (MySQL 1304)`);
   }
   const returns = r.returns === undefined ? {} : { returns: routineReturns(r.returns, st.defaults.charset, st.defaults.collation) };
-  st.model.routines = [...st.model.routines, { ...r, ...returns, sqlMode: st.sqlMode }];
+  const sqlMode = routineSqlMode(st, `${label(r.kind)} \`${r.name}\``);
+  st.model.routines = [...st.model.routines, { ...r, ...returns, sqlMode }];
   st.routineKeys.add(routineKey(r));
 }
 

@@ -1,7 +1,7 @@
 // 무시하는 문장 속 저장 함수 호출 (리뷰 7회차 R7-2·8회차·9회차). 이 도구는 문장을 실행하지 않으므로 저장 함수가 바꿨을 수 있는 세션 상태를 모르는 값으로 둔다.
 // 문장은 받는다 — 거부는 뒤에서 그 값을 읽는 문장이 한다 (session.ts). 함수를 만들어 데이터를 고친 뒤 지우는 마이그레이션이 흔하다
 import type { Token } from '../lexer';
-import { routineKey, type State } from './state';
+import { isUnknown, routineKey, type State } from './state';
 
 // 이름이 같은 저장 함수가 있어도 MySQL 이 내장 함수를 부르는 잘 알려진 이름 (소문자). 따옴표·스키마 없이 쓸 때만이다 (8.0.46·8.4.11 실측: 이 이름의 저장 함수를 모두
 // 만든 뒤 불러도 내장 함수가 돈다). 백틱으로 감싸면(`now`()) 저장 함수를 부르는 이름이 있어 저장 함수 호출로 본다. 목록에 없는 내장 함수도 이름이 같은 저장 함수가
@@ -94,16 +94,16 @@ export function storedFunctionCall(st: State, toks: readonly Token[]): string | 
 }
 
 // 무시하는 문장(조회·데이터 문장, 값을 버리는 서버 변수 대입 — no-op.ts·session.ts)이 저장 함수를 부르면, 함수가 바꿨을 수 있는 세션 상태를 모르는 값으로 둔다 (리뷰 8회차):
-// 사용자 변수는 모두 잊고(다른 변수에서 옮긴 값도 함께 — 함수는 어느 변수든 바꿀 수 있다. 잊은 이름은 안내에 쓰려고 st.forgotten 에 남긴다), UTC 로 정한 세션 time_zone 도
-// UTC 로 보지 않으며, 전역 sql_mode 도 바뀌었을 수 있다고 기억한다 (st.storedCall — 뒤의 SET sql_mode = DEFAULT 를 거부한다). 세션 sql_mode·FOREIGN_KEY_CHECKS 는 MySQL 이
-// 함수에서 돌아올 때 되돌린다 (8.0.46·8.4.11 실측).
+// 사용자 변수는 모두 잊고(다른 변수에서 옮긴 값도 함께 — 함수는 어느 변수든 바꿀 수 있다. 저장한 값을 잊은 이름은 안내에 쓰려고 st.forgotten 에 남긴다), UTC 로 정한 세션
+// time_zone 도 UTC 로 보지 않으며, 전역 sql_mode 도 바뀌었을 수 있다고 기억한다 (st.storedCall — 뒤의 SET sql_mode = DEFAULT 가 정한 세션 값을 모른다). 세션 sql_mode·
+// FOREIGN_KEY_CHECKS 는 MySQL 이 함수에서 돌아올 때 되돌린다 (8.0.46·8.4.11 실측).
 // 한계: 함수가 바꾼 그 밖의 세션 변수(default_storage_engine 등)는 따라가지 않는다 — 막으려면 호출 뒤의 CREATE TABLE 을 거의 모두 거부해야 한다 (설계 3.2)
 export function forgetStateChangedByCall(st: State, toks: readonly Token[]): void {
   const call = storedFunctionCall(st, toks);
   if (call === undefined) return;
-  for (const name of st.saved.keys()) st.forgotten.add(name);
+  for (const [name, value] of st.saved) if (!isUnknown(value)) st.forgotten.add(name);
   st.saved.clear();
-  if (st.timeZoneUtc) st.timeZoneChangedBy = call;
+  if (st.timeZoneUtc) st.timeZoneUnknown = `무시한 문장의 저장 함수 호출(\`${call}\`)이 세션 시간대를 바꿨을 수 있어`;
   st.timeZoneUtc = false;
   st.storedCall = call;
 }

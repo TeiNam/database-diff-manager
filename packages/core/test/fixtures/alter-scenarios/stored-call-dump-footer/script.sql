@@ -1,0 +1,24 @@
+-- 리뷰 10회차 (Claude 참고 5): mysqldump 머리·꼬리 사이에서 도우미 함수를 만들어 데이터를 고친 뒤 지우는 마이그레이션 (머리·꼬리의 실행 주석 /*!40101 … */ 은 이 실행기가
+-- 그대로 보내지 못해 벗겨 쓴다 — 감싼 꼴은 단위 테스트가 본다). 함수 호출 뒤 꼬리가 되돌리는 TIME_ZONE·SQL_MODE·FOREIGN_KEY_CHECKS 는 함수가 바꿨을 수 있는 @OLD_… 를
+-- 읽어 값을 모르지만, 뒤에 그 값에 기대는 문장이 없으므로 받는다. 모델은 ALTER 만 적용한 것과 같다
+SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT;
+SET NAMES utf8mb4;
+SET @OLD_TIME_ZONE=@@TIME_ZONE;
+SET TIME_ZONE='+00:00';
+SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0;
+SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;
+SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO';
+SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0;
+DELIMITER //
+CREATE FUNCTION fn_bump(x INT) RETURNS INT DETERMINISTIC NO SQL BEGIN SET @touched = x; RETURN x + 1; END//
+DELIMITER ;
+INSERT INTO member (email, name, age) VALUES ('a@example.com', 'a', fn_bump(1));
+UPDATE member SET age = fn_bump(age) WHERE email = 'a@example.com';
+DROP FUNCTION fn_bump;
+ALTER TABLE member ADD COLUMN nick VARCHAR(20);
+SET TIME_ZONE=@OLD_TIME_ZONE;
+SET SQL_MODE=@OLD_SQL_MODE;
+SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;
+SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS;
+SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT;
+SET SQL_NOTES=@OLD_SQL_NOTES;
