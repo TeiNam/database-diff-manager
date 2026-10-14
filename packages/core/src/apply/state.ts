@@ -48,7 +48,7 @@ export interface State {
   // 처음 세션 SQL_MODE (ApplyOptions.sqlMode, 주지 않았으면 MySQL 기본 모드) — 스크립트를 실행한 서버의 sql_mode 다. SET sql_mode = DEFAULT 가 이 값으로 되돌린다 (session.ts)
   readonly initialSqlMode: string;
   // 스크립트가 서버(GLOBAL·PERSIST) sql_mode 를 바꿨는가 — 바꾼 뒤의 SET sql_mode = DEFAULT 는 바뀐 전역 값을 읽는데 그 값은 알 수 없어 세션 SQL_MODE 를 모르는 값으로 둔다
-  // (session.ts sessionSqlMode, 리뷰 7회차 R7-1·10회차)
+  // (session.ts sqlModeDefault, 리뷰 7회차 R7-1·10회차)
   serverSqlModeChanged: boolean;
   timeZoneUtc: boolean; // 스크립트가 세션 time_zone 을 UTC 로 정했는가 — 아니면 서버 시간대라 TIMESTAMP 리터럴 기본값을 받지 않는다 (session.ts assertUtcTimestampDefault)
   // 세션 time_zone 을 모르는 까닭 ('…어' 로 끝나는 안내 글 — 그 뒤 time_zone 을 다시 정하면 지운다). 이때 timeZoneUtc 는 false 다: UTC 로 정한 세션 time_zone 을 바꿨을 수 있는

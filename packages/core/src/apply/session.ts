@@ -85,7 +85,7 @@ function assign(st: State, a: Cursor, inherited: Scope, call: string | undefined
   const scope = scopeWord(a) ?? inherited;
   const variable = target(a);
   if (!variable.name.startsWith('@') && (variable.scope ?? scope) === 'server') {
-    // 서버 변수: 값이 식이어도, 스키마에 영향을 주는 변수여도 이 세션과 상관없다. 다만 서버 sql_mode 를 바꾼 사실은 기억한다 (sessionSqlMode).
+    // 서버 변수: 값이 식이어도, 스키마에 영향을 주는 변수여도 이 세션과 상관없다. 다만 서버 sql_mode 를 바꾼 사실은 기억한다 (sqlModeDefault).
     // PERSIST_ONLY 는 실행 중인 값을 바꾸지 않지만 범위를 가르지 않고 함께 본다 (드물어 보수적으로 거부).
     // 값을 읽지 않고 버려도 그 안의 저장 함수 호출은 실행되어 사용자 변수 등을 바꿀 수 있으므로 다른 무시하는 문장과 같이 그 값을 모르는 값으로 둔다 (리뷰 8회차)
     if (variable.name === 'sql_mode') st.serverSqlModeChanged = true;
@@ -250,7 +250,7 @@ function sqlModeDefault(st: State): SessionValue {
 // 쓴 모드를 MySQL 순서로 줄 세워 대문자로 돌려준다 (루틴이 기억하는 sql_mode 가 SHOW CREATE 와 같아야 한다). 같은 이름은 한 번만 쓰고,
 // 빈 항목('A,' · ',A')은 MySQL 처럼 건너뛴다. ANSI·TRADITIONAL 같은 묶음 이름과 REAL_AS_FLOAT·ANSI_QUOTES 는 받지 않는다 (ApplyFailure).
 // SET SQL_MODE 의 값과 처음 세션 SQL_MODE(ApplyOptions.sqlMode)가 함께 쓴다 — 서버도 기준 버전 루틴의 SQL_MODE 를 이것으로 가린다.
-// 여기서 DEFAULT 는 MySQL 기본 모드다 (SET 문의 DEFAULT 는 sessionSqlMode 가 처음 세션 SQL_MODE 로 푼다)
+// 여기서 DEFAULT 는 MySQL 기본 모드다 (SET 문의 DEFAULT 는 sqlModeDefault 가 처음 세션 SQL_MODE 로 푼다)
 export function resolveSqlMode(value: string): string {
   if (value === 'DEFAULT') return DEFAULT_SQL_MODE;
   const written = new Set(value.toUpperCase().split(',').filter((mode) => mode !== ''));
