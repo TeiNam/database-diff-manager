@@ -141,6 +141,7 @@ function setKnown(st: State, target: string, value: string, written: Token | und
   } else if (target === 'sql_mode') {
     st.sqlMode = sqlModeOf(value, written);
     st.sqlModeUnknown = undefined;
+    st.sqlModeLiteral = isLiteral(written);
   } else {
     st.timeZoneUtc = isUtcZone(written);
     st.timeZoneUnknown = undefined;
@@ -156,9 +157,15 @@ function setUnknown(st: State, target: string, assignment: string, why: string):
     return;
   }
   const reason = `앞의 \`${assignment}\` 문장이 세션 ${target.toUpperCase()} 를 알 수 없는 값으로 정했습니다 — ${why}`;
-  if (target === 'sql_mode') st.sqlModeUnknown = reason;
-  else st.fkChecksUnknown = reason;
+  if (target === 'sql_mode') {
+    st.sqlModeUnknown = reason;
+    st.sqlModeLiteral = false;
+  } else st.fkChecksUnknown = reason;
 }
+
+// 값을 리터럴로 썼는가 (문자열·숫자, DEFAULT 가 아닌 단어). @변수·@@변수·DEFAULT 는 아니다
+const isLiteral = (written: Token | undefined): boolean =>
+  written?.t === 'string' || written?.t === 'number' || (written?.t === 'word' && written.v.toUpperCase() !== 'DEFAULT');
 
 // 대입한 SQL_MODE 값 (written: 쓴 값의 첫 토큰). 숫자 (리뷰 11회차 Claude F8, 8.0.46·8.4.11 실측): MySQL 은 정수를 모드 비트로 읽어 0·00 은 빈 모드, 1 은 REAL_AS_FLOAT 이고,
 // 0.0 은 1232, 0x00 은 1231 이다. 0 은 빈 모드로 받고 그 밖의 숫자는 비트를 재현하지 않아 거부한다. 변수(@m·@@foreign_key_checks)의 숫자는 정수(비트)인지

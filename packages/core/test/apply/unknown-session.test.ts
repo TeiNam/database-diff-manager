@@ -202,3 +202,23 @@ describe('추적하지 않는 시스템 변수 읽기', () => {
     expect(run('SET unique_checks = @@sql_notes, @@session.sql_notes = @@init_connect;\nALTER TABLE t ADD COLUMN y INT;')).toMatchObject({ ok: true, applied: 1 });
   });
 });
+
+// 리뷰 11회차 R11-1 (10회차 R10-1 남은 가지): 처음 세션 SQL_MODE(서버가 기준 버전 루틴에서 짐작한 값)에서 온 IGNORE_SPACE 는 믿지 않지만, 스크립트가 SET SQL_MODE = '…'
+// 리터럴로 정한 뒤에는 짐작한 값과 같아도 그 모드로 내장 함수를 가른다. DEFAULT·변수로 짐작한 값에 돌아오면 다시 믿지 않는다 (보수적)
+describe('처음 세션 SQL_MODE 의 IGNORE_SPACE', () => {
+  const withSink = parseSqlDump(tdExport('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\nCREATE TABLE `sink` (\n  `v` longtext\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;')).model;
+  const NOW_FN = 'CREATE FUNCTION `now`() RETURNS INT DETERMINISTIC NO SQL RETURN 1;';
+  const runIgnoreSpace = (...lines: string[]) => applyScript(withSink, [NOW_FN, ...lines].join('\n'), { schemaName: 'shop', sqlMode: 'IGNORE_SPACE' });
+  const TAIL = ['SET @m=@@sql_mode;', 'INSERT INTO sink VALUES (NOW ());', 'ALTER TABLE t ADD y INT;', 'SET sql_mode=@m;', 'CREATE PROCEDURE p() SELECT 1;'];
+
+  it("R11-1: 처음 값에 IGNORE_SPACE 가 있어도 SET sql_mode='IGNORE_SPACE' 뒤의 NOW () 는 내장 함수라 @m 을 잊지 않는다", () => {
+    const r = runIgnoreSpace("SET sql_mode='IGNORE_SPACE';", ...TAIL);
+    expect(r).toMatchObject({ ok: true, applied: 3 });
+    expect(sqlModeOf(r, 'p')).toBe('IGNORE_SPACE');
+  });
+
+  it('SET 없이 처음 값 그대로이거나 DEFAULT 로 돌아온 세션의 NOW () 는 저장 함수 호출로 센다 (짐작한 값)', () => {
+    expectRejected(runIgnoreSpace(...TAIL), TAIL.length + 1, '무시한 문장의 저장 함수 호출(`NOW`)');
+    expectRejected(runIgnoreSpace("SET sql_mode='IGNORE_SPACE';", 'SET sql_mode = DEFAULT;', ...TAIL), TAIL.length + 3, '무시한 문장의 저장 함수 호출(`NOW`)');
+  });
+});
