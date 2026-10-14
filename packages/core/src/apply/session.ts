@@ -15,7 +15,7 @@ const SCHEMA_VARIABLES: ReadonlySet<string> = new Set([
   'restrict_fk_on_non_standard_key', 'default_collation_for_utf8mb4', 'character_set_database', 'collation_database', 'innodb_strict_mode',
 ]);
 
-// MySQL 8.0/8.4 의 SQL_MODE 이름. SHOW CREATE·@@sql_mode 가 내는 순서(MySQL 내부 순서, 8.0.46 실측)대로 둔다 — sqlModeOf 가 이 순서로 줄 세운다.
+// MySQL 8.0/8.4 의 SQL_MODE 이름. SHOW CREATE·@@sql_mode 가 내는 순서(MySQL 내부 순서, 8.0.46 실측)대로 둔다 — resolveSqlMode 가 이 순서로 줄 세운다.
 // 8.0 에서 없어진 NO_AUTO_CREATE_USER·MAXDB·ORACLE 같은 이름은 1231
 const SQL_MODES: readonly string[] = [
   'REAL_AS_FLOAT', 'PIPES_AS_CONCAT', 'ANSI_QUOTES', 'IGNORE_SPACE', 'NOT_USED', 'ONLY_FULL_GROUP_BY', 'NO_UNSIGNED_SUBTRACTION', 'NO_DIR_IN_CREATE', 'ANSI',
@@ -71,7 +71,7 @@ function assignSession(st: State, a: Cursor, target: string): void {
   if (!a.done) fail(`SET 값은 리터럴·@변수·@@변수만 받습니다: ${a.src.slice(a.peek()!.s).trim()}`);
   if (target.startsWith('@')) st.saved.set(target, value);
   else if (target === 'foreign_key_checks') st.fkChecks = foreignKeyChecksOf(value);
-  else if (target === 'sql_mode') st.sqlMode = sqlModeOf(value);
+  else if (target === 'sql_mode') st.sqlMode = resolveSqlMode(value);
   else if (target === 'time_zone') st.timeZoneUtc = isUtcZone(written);
 }
 
@@ -136,8 +136,9 @@ function foreignKeyChecksOf(value: string): boolean {
 }
 
 // 쓴 모드를 MySQL 순서로 줄 세워 대문자로 돌려준다 (루틴이 기억하는 sql_mode 가 SHOW CREATE 와 같아야 한다). 같은 이름은 한 번만 쓰고,
-// 빈 항목('A,' · ',A')은 MySQL 처럼 건너뛴다. ANSI·TRADITIONAL 같은 묶음 이름과 REAL_AS_FLOAT·ANSI_QUOTES 는 받지 않는다
-function sqlModeOf(value: string): string {
+// 빈 항목('A,' · ',A')은 MySQL 처럼 건너뛴다. ANSI·TRADITIONAL 같은 묶음 이름과 REAL_AS_FLOAT·ANSI_QUOTES 는 받지 않는다 (ApplyFailure).
+// SET SQL_MODE 의 값과 처음 세션 SQL_MODE(ApplyOptions.sqlMode)가 함께 쓴다 — 서버도 기준 버전 루틴의 SQL_MODE 를 이것으로 가린다
+export function resolveSqlMode(value: string): string {
   if (value === 'DEFAULT') return DEFAULT_SQL_MODE;
   const written = new Set(value.toUpperCase().split(',').filter((mode) => mode !== ''));
   const unknown = [...written].find((mode) => !KNOWN_SQL_MODES.has(mode));

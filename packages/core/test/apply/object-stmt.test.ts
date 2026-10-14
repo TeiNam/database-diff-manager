@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyScript, printSqlDump } from '../../src/apply';
+import { applyScript, printSqlDump, type ApplyResult } from '../../src/apply';
 import { isCreateRoutine } from '../../src/apply/object-stmt';
 import { DEFAULT_SQL_MODE, RE_EXPORT } from '../../src/apply/types';
 import { canonicalJson } from '../../src/canonical';
@@ -293,5 +293,65 @@ describe('DROP VIEW', () => {
     expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('`nope`, `nada`') } });
     expect(!r.ok && r.error.reason).toContain('(MySQL 1051)');
     expect(apply('DROP VIEW other.big_paid;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('other') } });
+  });
+});
+
+// 리뷰 5회차 M-1: SET SQL_MODE 없이 만든 루틴은 스크립트를 실행한 서버의 sql_mode 를 기억한다. 스크립트만 봐서는 알 수 없어, 그 값을 짐작할 수 있는 쪽
+// (서버: 기준 버전 루틴의 SQL_MODE 최빈값)이 처음 세션 SQL_MODE(ApplyOptions.sqlMode)로 준다. SET SQL_MODE 의 값처럼 검사하고 MySQL 순서로 맞춘다
+describe('처음 세션 SQL_MODE (ApplyOptions.sqlMode)', () => {
+  const RELAXED = 'STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+  const PROC = 'CREATE PROCEDURE p1() SELECT 1;';
+  const withMode = (script: string, sqlMode: string) => applyScript(SHOP, script, { schemaName: 'shop', sqlMode });
+  const routineIn = (r: ApplyResult, name: string) => {
+    if (!r.ok) throw new Error(`${r.error.index}: ${r.error.reason}`);
+    return r.model.routines.find((x) => x.name === name)!;
+  };
+
+  it('SET SQL_MODE 없이 만든 루틴에 붙고, 쓴 순서·대소문자·중복과 상관없이 MySQL 순서로 맞춘다', () => {
+    const r = withMode(PROC, 'no_engine_substitution,STRICT_TRANS_TABLES,no_zero_date,NO_ZERO_IN_DATE,error_for_division_by_zero,strict_trans_tables');
+    expect(routineIn(r, 'p1').sqlMode).toBe(RELAXED);
+  });
+
+  it('스크립트의 SET SQL_MODE 가 앞서고, @@SQL_MODE 로 저장했다 되돌리면 처음 값으로 돌아온다. DEFAULT 는 MySQL 기본 모드다', () => {
+    const script = [
+      "SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'STRICT_TRANS_TABLES';", 'CREATE PROCEDURE p1() SELECT 1;',
+      'SET SQL_MODE = @OLD_SQL_MODE;', 'CREATE PROCEDURE p2() SELECT 2;', 'SET SQL_MODE = DEFAULT;', 'CREATE PROCEDURE p3() SELECT 3;',
+    ].join('\n');
+    const r = withMode(script, RELAXED);
+    expect(routineIn(r, 'p1').sqlMode).toBe('STRICT_TRANS_TABLES');
+    expect(routineIn(r, 'p2').sqlMode).toBe(RELAXED);
+    expect(routineIn(r, 'p3').sqlMode).toBe(DEFAULT_SQL_MODE);
+  });
+
+  it("빈 모드('')도 받고, 주지 않으면 지금처럼 MySQL 8.0/8.4 기본 모드다", () => {
+    expect(routineIn(withMode(PROC, ''), 'p1').sqlMode).toBe('');
+    expect(routineOf(PROC, 'p1').sqlMode).toBe(DEFAULT_SQL_MODE);
+  });
+
+  it.each([
+    ['NO_SUCH_MODE', '(MySQL 1231)'], ['TRADITIONAL', '묶은 이름'], ['STRICT_TRANS_TABLES,ANSI', '묶은 이름'], ['ANSI_QUOTES', '다르게 읽게'], ['real_as_float', '다르게 읽게'],
+  ])('SET SQL_MODE 가 받지 않는 값 %s 는 특정 문장이 아닌 실패로 거부한다', (mode, reason) => {
+    const r = withMode(PROC, mode);
+    expect(r).toMatchObject({ ok: false, error: { index: 0, line: 1, statement: '' } });
+    expect(!r.ok && r.error.reason).toContain('처음 세션 SQL_MODE');
+    expect(!r.ok && r.error.reason).toContain(reason);
+  });
+
+  it('NO_BACKSLASH_ESCAPES 가 든 처음 값: 문장 나누기는 보통 규칙으로 읽으므로 백슬래시가 든 문장은 거부하고, 스크립트가 SET SQL_MODE 로 정하면 받는다', () => {
+    const nbe = 'STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES';
+    const withBackslash = "CREATE PROCEDURE p1() SELECT 'a\\\\b';";
+    expect(routineIn(withMode(PROC, nbe), 'p1').sqlMode).toBe('NO_BACKSLASH_ESCAPES,STRICT_TRANS_TABLES');
+    const rejected = withMode(withBackslash, nbe);
+    expect(rejected).toMatchObject({ ok: false, error: { index: 1 } });
+    expect(!rejected.ok && rejected.error.reason).toContain('서버 SQL_MODE');
+    expect(!rejected.ok && rejected.error.reason.endsWith(RE_EXPORT)).toBe(true);
+    const set = withMode(`SET SQL_MODE = '${nbe}';\n${withBackslash}`, nbe);
+    expect(routineIn(set, 'p1')).toMatchObject({ sqlMode: 'NO_BACKSLASH_ESCAPES,STRICT_TRANS_TABLES', body: "SELECT 'a\\\\b'" });
+  });
+
+  it('입력 모델은 바꾸지 않는다', () => {
+    const before = canonicalJson(SHOP);
+    routineIn(withMode(PROC, RELAXED), 'p1');
+    expect(canonicalJson(SHOP)).toBe(before);
   });
 });
