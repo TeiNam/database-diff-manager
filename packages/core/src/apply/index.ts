@@ -4,7 +4,7 @@ import type { RenameMapping } from '../diff';
 import { LexError, tokenize, type Token } from '../lexer';
 import type { SchemaModel } from '../model';
 import { routineLexMode } from '../normalize';
-import { splitDump } from '../parse-dump';
+import { splitForApply, type ApplyStatement } from '../parse-dump';
 import { UnsafeValueError } from '../sql-safety';
 import { alterTable, createIndex, dropIndexOn } from './alter-table';
 import { assertBmpText, canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
@@ -15,6 +15,7 @@ import { initialState, type State } from './state';
 import { createTable, dropTable, renameTables } from './table-stmt';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
 import { assertKnownRealType, assertModeIndependentText } from './unknown-session';
+import { executedText } from './version-comment';
 
 export { MYSQL_DEFAULTS, type ApplyDefaults, type ApplyError, type ApplyOptions, type ApplyResult } from './types';
 export { printSqlDump } from './print-dump';
@@ -31,11 +32,12 @@ const ACCOUNT_STATEMENT = '계정 문장(CREATE USER·ALTER USER·SET PASSWORD)�
   + '비밀번호가 든 계정 문장은 지우고 다시 넣어 주세요 (계정 문장은 스키마를 바꾸지 않습니다)';
 
 export function applyScript(base: SchemaModel, script: string, opts: ApplyOptions): ApplyResult {
-  let statements;
+  const text = script.replace(/^\uFEFF/, '');
+  let statements: ApplyStatement[];
   let defaults: ApplyDefaults;
   let sqlMode: string;
   try {
-    statements = splitDump(script.replace(/^\uFEFF/, ''));
+    statements = splitForApply(text);
     defaults = resolveDefaults(opts.defaults);
     sqlMode = initialSqlMode(opts.sqlMode);
   } catch (e) {
@@ -47,7 +49,7 @@ export function applyScript(base: SchemaModel, script: string, opts: ApplyOption
   let applied = 0;
   for (const [i, s] of statements.entries()) {
     try {
-      if (applyStatement(st, s.ddl, s.noBackslashEscapes)) applied++;
+      if (applyStatement(st, s, text)) applied++;
     } catch (e) {
       if (e instanceof ApplyFailure || e instanceof ParseError || e instanceof LexError || e instanceof UnsafeValueError) return failure(i + 1, s.line, s.ddl, e.message);
       throw e;
@@ -84,12 +86,21 @@ function initialSqlMode(given: string | undefined): string {
 
 type Handler = (st: State, c: Cursor) => void;
 
-// DDL 을 적용했으면 true, 세션 문장(SET·USE)과 무시하는 문장(no-op.ts)이면 false. 루틴은 본문 안의 ';' 와 덩어리의 경계를 assertOneRoutine 이 가르고,
-// 그 밖의 문장은 끝의 ';' 를 뗀 덩어리에 문장이 하나만 있어야 한다 (assertOneStatement — 지원하지 않는 문장은 그보다 먼저 지원 범위 안내로 거부한다)
-function applyStatement(st: State, statement: string, noBackslashEscapes: boolean): boolean {
-  assertSameBackslashMode(st, statement, noBackslashEscapes);
-  const tokens = tokenize(statement, { noBackslashEscapes });
-  assertModeIndependentText(st, statement, tokens); // 세션 SQL_MODE 를 모르면 모드에 따라 달리 읽히는 백슬래시·큰따옴표 (리뷰 10회차)
+// DDL 을 적용했으면 true, 세션 문장(SET·USE)과 무시하는 문장(no-op.ts), 건너뛰는 실행 주석뿐인 문장이면 false. script: 문장을 나눈 원문 (실행 주석의 표지는 문장 앞에 있을 수 있다).
+// 모드 검사는 쓴 글 그대로 본다 — 건너뛰는 실행 주석 안의 글도 문장 나누기는 읽었다 (보수적)
+function applyStatement(st: State, s: ApplyStatement, script: string): boolean {
+  const { noBackslashEscapes } = s;
+  const statement = executedText(script, s); // 실행 주석의 버전 번호 (리뷰 11회차 R11-2)
+  assertSameBackslashMode(st, s.ddl, noBackslashEscapes);
+  const written = tokenize(s.ddl, { noBackslashEscapes });
+  assertModeIndependentText(st, s.ddl, written); // 세션 SQL_MODE 를 모르면 모드에 따라 달리 읽히는 백슬래시·큰따옴표 (리뷰 10회차)
+  const tokens = statement === s.ddl ? written : tokenize(statement, { noBackslashEscapes });
+  return tokens.length > 0 && applyTokens(st, statement, tokens, noBackslashEscapes); // 주석뿐인 문장은 MySQL 도 오류 없이 지나간다
+}
+
+// 루틴은 본문 안의 ';' 와 덩어리의 경계를 assertOneRoutine 이 가르고, 그 밖의 문장은 끝의 ';' 를 뗀 덩어리에 문장이 하나만 있어야 한다
+// (assertOneStatement — 지원하지 않는 문장은 그보다 먼저 지원 범위 안내로 거부한다)
+function applyTokens(st: State, statement: string, tokens: Token[], noBackslashEscapes: boolean): boolean {
   const routine = withoutCommentEnd(statement, tokens).ddl;
   if (isCreateRoutine(routine)) {
     createRoutine(st, routine, noBackslashEscapes);
