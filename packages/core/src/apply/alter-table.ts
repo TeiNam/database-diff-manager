@@ -79,7 +79,7 @@ function alterWith(st: State, name: string, clauses: readonly Clause[]): void {
   const { table, renamed } = applyClauses(st, before, clauses);
   replaceTable(st, name, table);
   renameRefColumns(st, name, renamed); // 9) 다른 테이블 FK 가 참조하는 컬럼 이름 (자기 참조는 remapKeys 가 고쳤다)
-  const rename = clauses.filter((x): x is Extract<Clause, { k: 'renameTable' }> => x.k === 'renameTable').at(-1);
+  const rename = clausesOf(clauses, 'renameTable').at(-1);
   if (rename && rename.to !== name) renameTable(st, name, rename.to);
 }
 
@@ -215,20 +215,15 @@ function parseOptions(c: Cursor): Clause[] {
   return out;
 }
 
+const clausesOf = <K extends Clause['k']>(clauses: readonly Clause[], k: K): Extract<Clause, { k: K }>[] => clauses.filter((x): x is Extract<Clause, { k: K }> => x.k === k);
+
 function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { table: Table; renamed: Map<string, string> } {
-  const charset = tableCharset(before.options, st.defaults);
-  const pick = <K extends Clause['k']>(k: K) => clauses.filter((x): x is Extract<Clause, { k: K }> => x.k === k);
-  const dropped = droppedColumns(before, pick('dropColumn')); // 1) 기존 컬럼 삭제
-  assertColumnCount(before.columns.length - dropped.size + pick('add').length); // 컬럼 1017개 한도 (1117) — 위치를 찾기 전에 보아 계산량을 묶는다
-  const entries = arrangeColumns(st, before, clauses, charset, dropped); // 2) 기존 컬럼 변경 (이름은 문장 전 기준) 3) 컬럼 추가 4) 위치
-  assertUniqueColumns(entries);
-  const renamed = new Map(entries.filter((e) => e.from !== undefined && e.from !== e.col.name).map((e) => [e.from!.toLowerCase(), e.col.name]));
-  assertNoDependents(st, before, dropped, renamed, pick('dropKey'));
-  updateColumnOrigins(st, before.name, entries);
+  const pick = <K extends Clause['k']>(k: K) => clausesOf(clauses, k);
+  const { columns, dropped, renamed } = applyColumnClauses(st, before, clauses); // 1) ~ 4)
   const renames = pick('renameIndex');
   // 문장 시작에 아는 출처·덤프 이름으로 가린 FK 자동 인덱스. RENAME INDEX 가 건드린 옛 이름·새 이름은 뺀다 (자동 표시가 지워지고, 다른 인덱스가 그 이름을 이어받는다)
   const flagged = withoutNames(classifyFkIndexes(before, st.origins.provenance.get(before.name)), renames.flatMap((r) => [r.old, r.to]));
-  let t = dropSoleColumnChecks(keepKeys(before, entries, clauses, dropped, renamed), dropped); // 5) 키 삭제 → 컬럼 변화 반영 (지우는 컬럼만 쓰는 CHECK 도 함께) → 인덱스 이름 변경·가시성
+  let t = dropSoleColumnChecks(keepKeys(before, columns, clauses, dropped, renamed), dropped); // 5) 키 삭제 → 컬럼 변화 반영 (지우는 컬럼만 쓰는 CHECK 도 함께) → 인덱스 이름 변경·가시성
   for (const r of renames) {
     t = renameIndex(t, r.old, r.to);
     moveIndexOrigin(st, before.name, r.old, r.to);
@@ -248,8 +243,41 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   syncIndexOrigins(st, before.name, t);
   syncProvenance(st, before.name, t, flagged);
   for (const o of pick('option')) t = { ...t, options: setOption(t.options, o.key, o.value) };
-  assertKeyPartBytes(t, st.defaults); // 이 문장에서 바꾼 ROW_FORMAT 으로 본다
+  if (changesKeyBytes(clauses, dropped)) assertKeyPartBytes(t, st.defaults); // 이 문장에서 바꾼 ROW_FORMAT 으로 본다
   return { table: t, renamed };
+}
+
+// 키 파트의 바이트나 한도를 바꿀 수 있는 문장인가 (assertKeyPartBytes): 키 추가, 키에 든 컬럼의 정의(MODIFY·CHANGE, 지우고 다시 더한 컬럼 — 옛 키 파트를 이어받는다),
+// ROW_FORMAT. 새 컬럼의 ADD 와 그 밖의 절(COMMENT·이름 변경·기본값·삭제 …)만 쓴 문장은 키 파트 바이트도 한도도 그대로라 테이블의 키 파트를 다시 훑지 않는다 (리뷰 4회차 M-2).
+// dropped: 이 문장에서 지운 컬럼 (소문자)
+const changesKeyBytes = (clauses: readonly Clause[], dropped: ReadonlySet<string>): boolean =>
+  clauses.some((x) => x.k === 'modify' || x.k === 'key' || (x.k === 'add' && dropped.has(x.spec.name.toLowerCase())) || (x.k === 'option' && x.key === 'ROW_FORMAT'));
+
+// 컬럼 절을 적용한 결과. dropped: 지운 컬럼 (소문자), renamed: 문장 전 이름(소문자) → 새 이름
+interface ColumnChange {
+  columns: Column[];
+  dropped: Set<string>;
+  renamed: Map<string, string>;
+}
+
+const COLUMN_CLAUSES: ReadonlySet<Clause['k']> = new Set(['add', 'modify', 'renameColumn', 'alterColumn', 'dropColumn']);
+
+// 컬럼 이름과 자리를 바꾸지 않는 절: 컬럼 절이 아니거나, 기본값·가시성(ALTER COLUMN)이나 위치 없이 정의만 바꾸는 MODIFY
+const keepsColumnNames = (x: Clause): boolean => !COLUMN_CLAUSES.has(x.k) || x.k === 'alterColumn' || (x.k === 'modify' && !x.rename && !x.pos);
+
+// 1) 기존 컬럼 삭제 2) 기존 컬럼 변경 (이름은 문장 전 기준) 3) 컬럼 추가 4) 위치. 컬럼이 많은 테이블에서 문장마다 컬럼을 모두 다시 훑지 않도록 (리뷰 4회차 M-2)
+// 컬럼 절이 없는 문장(COMMENT·키·이름 변경)은 컬럼 배열을 그대로 두고, 컬럼 이름·자리가 그대로인 문장은 이름 중복 검사와 이름 추적을 건너뛴다 (결과가 같다)
+function applyColumnClauses(st: State, before: Table, clauses: readonly Clause[]): ColumnChange {
+  const dropped = droppedColumns(before, clausesOf(clauses, 'dropColumn'));
+  assertColumnCount(before.columns.length - dropped.size + clausesOf(clauses, 'add').length); // 컬럼 1017개 한도 (1117) — 위치를 찾기 전에 보아 계산량을 묶는다
+  if (!clauses.some((x) => COLUMN_CLAUSES.has(x.k))) return { columns: before.columns, dropped, renamed: new Map() };
+  const keepsNames = clauses.every(keepsColumnNames);
+  const entries = arrangeColumns(st, before, clauses, tableCharset(before.options, st.defaults), dropped);
+  if (!keepsNames) assertUniqueColumns(entries);
+  const renamed = new Map(entries.filter((e) => e.from !== undefined && e.from !== e.col.name).map((e) => [e.from!.toLowerCase(), e.col.name]));
+  assertNoDependents(st, before, dropped, renamed, clausesOf(clauses, 'dropKey'));
+  if (!keepsNames) updateColumnOrigins(st, before.name, entries);
+  return { columns: entries.map((e) => e.col), dropped, renamed };
 }
 
 // 지우는 컬럼 (소문자 이름). 같은 컬럼을 두 번 지우면 MySQL 은 1091 (대소문자 무시, 실측)
@@ -265,11 +293,10 @@ function droppedColumns(before: Table, drops: readonly Extract<Clause, { k: 'dro
 
 // 5) 키 삭제 → 남은 키에 컬럼 삭제·이름 변경 반영 → 바꾼 컬럼의 키 파트 길이·타입 맞춤. 같은 문장에서 지우고 같은 이름으로 다시 더한 컬럼의 키 파트는
 // 새 컬럼에 남는다 (컬럼 이름이 같아졌을 뿐인 CHANGE·RENAME COLUMN 대상에는 안 남는다 — MySQL 8.0.46·8.4.11 실측)
-function keepKeys(before: Table, entries: readonly Entry[], clauses: readonly Clause[], dropped: ReadonlySet<string>, renamed: ReadonlyMap<string, string>): Table {
+function keepKeys(before: Table, columns: Column[], clauses: readonly Clause[], dropped: ReadonlySet<string>, renamed: ReadonlyMap<string, string>): Table {
   const added = new Set(clauses.flatMap((x) => (x.k === 'add' ? [x.spec.name.toLowerCase()] : [])));
   const readded = new Set([...dropped].filter((n) => added.has(n)));
-  const keyDrops = clauses.filter((x): x is Extract<Clause, { k: 'dropKey' }> => x.k === 'dropKey');
-  const t = remapKeys(dropKeys({ ...before, columns: entries.map((e) => e.col) }, keyDrops), new Set([...dropped].filter((n) => !readded.has(n))), renamed);
+  const t = remapKeys(dropKeys({ ...before, columns }, clausesOf(clauses, 'dropKey')), new Set([...dropped].filter((n) => !readded.has(n))), renamed);
   assertReaddedKeysFit(before, t, readded);
   const modified = clauses.flatMap((x) => (x.k === 'modify' ? [x.spec.name.toLowerCase()] : []));
   return refitKeyParts(t, new Set([...modified, ...readded]));
@@ -290,7 +317,8 @@ function explicitNullColumns(clauses: readonly Clause[]): Set<string> {
 // 2) 기존 컬럼 변경 3) 컬럼 추가 4) 위치. 컬럼을 더하는 절과 FIRST·AFTER 를 준 MODIFY·CHANGE 는 절 순서대로 하나씩 목록에 넣는다 — MySQL 8.0.46·8.4.11 실측:
 // AFTER 는 그때까지 목록에 든 컬럼(바뀐 컬럼은 새 이름)만 보므로, 뒤 절에서 더하거나 옮기는 컬럼을 앞서 가리키면 1054. 옮기는 컬럼은 옮기기 전 자리에 있다가 자기 절 차례에 빠져나온다
 function arrangeColumns(st: State, before: Table, clauses: readonly Clause[], charset: TableCharset, dropped: ReadonlySet<string>): Entry[] {
-  const list: Entry[] = before.columns.filter((col) => !dropped.has(col.name.toLowerCase())).map((col) => ({ from: col.name, col }));
+  const kept = dropped.size ? before.columns.filter((col) => !dropped.has(col.name.toLowerCase())) : before.columns;
+  const list: Entry[] = kept.map((col) => ({ from: col.name, col }));
   const moved = changeColumns(st, before, list, clauses, charset);
   for (const ch of clauses) {
     if (ch.k === 'add') insertEntry(list, { col: finalizeIn(st, ch.spec, charset) }, ch.pos);

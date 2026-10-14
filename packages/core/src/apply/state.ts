@@ -207,6 +207,23 @@ export const sameName = (a: string, b: string): boolean => a.toLowerCase() === b
 
 
 export const findColumn = (t: Pick<Table, 'columns'>, name: string): Column | undefined => t.columns.find((c) => sameName(c.name, name));
+
+// 컬럼 이름(소문자) → 컬럼. 같은 이름이 둘이면 앞의 것 (findColumn 과 같다). 키 파트마다 컬럼을 찾는 곳은 이 표를 쓴다 — 컬럼 1017개·키 파트 1008개인 테이블에서
+// 키 파트마다 컬럼 목록을 훑으면 문장 하나에 이름 비교가 100만 번 든다 (리뷰 4회차 M-2). 컬럼 배열은 고쳐 쓰지 않고 늘 새로 만들므로 같은 배열이면 만든 표를 다시 쓴다:
+// 컬럼을 바꾸지 않는 문장(COMMENT·키)이 이어지면 문장마다 컬럼을 모두 다시 훑지 않는다
+const byNameCache = new WeakMap<readonly Column[], ReadonlyMap<string, Column>>();
+
+export function columnsByName(t: Pick<Table, 'columns'>): ReadonlyMap<string, Column> {
+  const cached = byNameCache.get(t.columns);
+  if (cached) return cached;
+  const byName = new Map<string, Column>();
+  for (const c of t.columns) {
+    const key = c.name.toLowerCase();
+    if (!byName.has(key)) byName.set(key, c);
+  }
+  byNameCache.set(t.columns, byName);
+  return byName;
+}
 // 테이블 이름은 대소문자를 구분한다 (Linux 기본 lower_case_table_names=0). 자리(st.model.tables 안), 없으면 -1.
 // 표의 자리가 어긋났으면 (앞의 테이블을 지웠다) 다시 찾아 고친다
 export function tableIndex(st: State, name: string): number {

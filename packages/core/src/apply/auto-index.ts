@@ -63,6 +63,7 @@ function candidateIndexes(t: Table): (fk: ForeignKey) => Index | undefined {
 // 출처를 모르는 인덱스만 FK 이름으로 덤프에서 짐작한다
 export function classifyFkIndexes(t: Table, known: ReadonlyMap<string, IndexProvenance> = new Map()): FkAutoIndexes {
   const generated = new Set(t.indexes.filter((i) => known.get(i.name.toLowerCase()) === 'auto').map((i) => i.name.toLowerCase()));
+  if (!t.foreignKeys.length) return { generated }; // FK 가 없으면 이름으로 짐작할 인덱스가 없다 (후보 표를 만들지 않는다)
   const candidateIndex = candidateIndexes(t);
   for (const fk of t.foreignKeys) {
     const index = candidateIndex(fk);
@@ -143,7 +144,12 @@ export interface AutoKeyPlan {
 // 자동(generated)으로 보는 인덱스 이름인가 — 새 키가 버릴 수 있는 기존 인덱스다 (직접 만든 인덱스는 버려지지 않는다)
 export const isFlagged = (auto: FkAutoIndexes, name: string): boolean => auto.generated.has(name.toLowerCase());
 
+// 더한 키도 줄어든 키도 없으면 버려지는 키가 없다 — 문장이 건드리지 않은 기존 키끼리는 서로 버리지 않는다 (키를 견주지 않고 돌려준다, 리뷰 4회차 M-2)
 export function planAutoKeys(t: Table, items: readonly ConstraintItem[], auto: FkAutoIndexes = NO_AUTO_INDEXES, shrunk: ReadonlySet<string> = new Set()): AutoKeyPlan {
+  if (!items.length && !shrunk.size) {
+    assertKeyCount(t.indexes.length);
+    return { kept: t.indexes, skipped: new Set() };
+  }
   const isAuto = (i: Index) => isFlagged(auto, i.name);
   const existing = t.indexes.map((index) => ({ index, key: { parts: index.parts, auto: isAuto(index), isNew: shrunk.has(index.name.toLowerCase()) } }));
   const added = items.map((item) => ({
@@ -192,10 +198,12 @@ export function syncProvenance(st: State, table: string, t: Table, flagged: FkAu
     const provenance = current.get(key) ?? (flagged.generated.has(key) ? 'auto' : undefined);
     return provenance === undefined ? [] : [[key, provenance]];
   }));
-  const candidateIndex = candidateIndexes(t);
-  for (const fk of t.foreignKeys) {
-    const key = candidateIndex(fk)?.name.toLowerCase();
-    if (key !== undefined && !known.has(key)) known.set(key, 'user');
+  if (t.foreignKeys.length) {
+    const candidateIndex = candidateIndexes(t);
+    for (const fk of t.foreignKeys) {
+      const key = candidateIndex(fk)?.name.toLowerCase();
+      if (key !== undefined && !known.has(key)) known.set(key, 'user');
+    }
   }
   st.origins.provenance.set(table, known);
 }

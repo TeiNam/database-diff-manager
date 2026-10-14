@@ -5,7 +5,7 @@ import type { Check, Column, ForeignKey, Index, IndexKind, IndexPart, Partitioni
 import { markProvenance, planAutoKeys, type AutoKeyPlan } from './auto-index';
 import { assertForeignKeyCount, assertKeyCount } from './limits';
 import { baseType, BLOB_TYPES, CHARSET_TYPES, columnMaxlen, effectiveCollation, INT_TYPES, tableCharset, type TableCharset } from './normalize-mysql';
-import { childTables, findColumn, findTable, hasOtherChild, refLists, sameName, type State } from './state';
+import { childTables, columnsByName, findColumn, findTable, hasOtherChild, refLists, sameName, type State } from './state';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type FkItem, type IndexItem } from './types';
 
 export interface KeyDrop {
@@ -209,7 +209,7 @@ export function assertKeyPartBytes(t: Table, defaults: TableCharset): void {
   const rowFormat = rowFormatOf(t);
   const limit = keyLimit(rowFormat).part;
   const charset = tableCharset(t.options, defaults);
-  const columns = new Map(t.columns.map((c) => [c.name.toLowerCase(), c])); // 컬럼이 많은 테이블에서 키 파트마다 컬럼 목록을 훑지 않는다
+  const columns = columnsByName(t); // 컬럼이 많은 테이블에서 키 파트마다 컬럼 목록을 훑지 않는다
   for (const i of t.indexes) {
     if (i.kind === 'FULLTEXT' || i.kind === 'SPATIAL') continue;
     for (const p of i.parts) {
@@ -229,14 +229,19 @@ export const isExplicitNull = (s: ColumnSpec): boolean => s.nullable === true ||
 // ADD PRIMARY KEY 로 새 키를 더한 경우, CREATE TABLE 의 PRIMARY KEY 가 모두 이 함수 하나로 처리된다 (키가 다 정해진 뒤에 부른다).
 // explicitNull: 이 문장의 컬럼 정의가 NULL 이나 DEFAULT NULL 을 명시한 컬럼의 (최종) 이름, 소문자. 그런 컬럼이 PRIMARY KEY 에 있으면 MySQL 은 1171 로 거부한다
 // (절 순서·키를 더한 절과 상관없이; 같은 문장에서 PRIMARY KEY 를 지웠으면 키가 없으니 걸리지 않는다). AUTO_INCREMENT 컬럼의 NOT NULL 은 finalizeColumn 이 만든다
+// 바꿀 컬럼이 없으면 t 를 그대로 돌려준다 (컬럼 배열이 그대로라 columnsByName 표를 다시 쓴다 — 컬럼이 많은 테이블에서 문장마다 컬럼을 훑지 않는다, 리뷰 4회차 M-2)
 export function enforcePrimaryKeyNotNull(t: Table, explicitNull: ReadonlySet<string> = new Set()): Table {
   const pk = t.indexes.find((i) => i.kind === 'PRIMARY');
   if (!pk) return t;
-  const members = new Set(pk.parts.flatMap((p) => (p.column === undefined ? [] : [p.column.toLowerCase()])));
-  const isMember = (c: Column) => members.has(c.name.toLowerCase());
-  const bad = t.columns.find((c) => isMember(c) && explicitNull.has(c.name.toLowerCase()));
+  const byName = columnsByName(t);
+  const members = new Set(pk.parts.flatMap((p) => {
+    const col = p.column === undefined ? undefined : byName.get(p.column.toLowerCase());
+    return col ? [col] : [];
+  }));
+  const bad = explicitNull.size ? t.columns.find((c) => members.has(c) && explicitNull.has(c.name.toLowerCase())) : undefined;
   if (bad) fail(`PRIMARY KEY 컬럼 \`${bad.name}\` 은 NULL 일 수 없습니다 (MySQL 1171)`);
-  return { ...t, columns: t.columns.map((c) => (isMember(c) ? notNull(c) : c)) };
+  if ([...members].every((c) => !c.nullable)) return t;
+  return { ...t, columns: t.columns.map((c) => (members.has(c) ? notNull(c) : c)) };
 }
 
 // 컬럼 정의를 바꾼(MODIFY·CHANGE) 뒤 그 컬럼을 쓰는 기존 키를 새 정의에 맞춘다 (MySQL 8.0.46·8.4.11 실측, sql_table.cc mysql_prepare_alter_table):
@@ -305,10 +310,12 @@ export function addForeignKey(st: State, t: Table, item: FkItem, generatedName?:
   return { ...t, foreignKeys: [...t.foreignKeys, fk] };
 }
 
+const isSetNullFk = (fk: Pick<ForeignKey, 'onDelete' | 'onUpdate'>): boolean => fk.onDelete === 'SET NULL' || fk.onUpdate === 'SET NULL';
+
 // ON DELETE·ON UPDATE SET NULL 은 NOT NULL 컬럼에 쓸 수 없다. 둘 중 하나만 SET NULL 이어도, 여러 컬럼 중 하나만 NOT NULL 이어도 같다
 // (MySQL 8.0.46 실측 1830 — 타입 검사 3780·부모 없음 1824 보다 먼저)
 function checkSetNull(t: Table, columns: readonly string[], fk: Pick<ForeignKey, 'onDelete' | 'onUpdate'>, name: string): void {
-  if (fk.onDelete !== 'SET NULL' && fk.onUpdate !== 'SET NULL') return;
+  if (!isSetNullFk(fk)) return;
   const notNullColumn = columns.map((n) => findColumn(t, n)!).find((c) => !c.nullable);
   if (notNullColumn) fail(setNullOnNotNull(notNullColumn.name, name));
 }
@@ -320,7 +327,7 @@ const setNullOnNotNull = (column: string, fkName: string): string => `컬럼 \`$
 // notNullBefore: 이 문장 앞에 이미 NOT NULL 이던 컬럼 (소문자, 이 문장에서 바뀐 이름) — 기준에 있는 상태는 다시 검사하지 않는다. CREATE TABLE 은 비워 둔다
 export function checkSetNullFks(t: Table, notNullBefore: ReadonlySet<string> = new Set()): void {
   for (const fk of t.foreignKeys) {
-    if (fk.onDelete !== 'SET NULL' && fk.onUpdate !== 'SET NULL') continue;
+    if (!isSetNullFk(fk)) continue;
     const column = fk.columns.map((n) => findColumn(t, n)!).find((c) => !c.nullable && !notNullBefore.has(c.name.toLowerCase()));
     if (column) fail(setNullOnNotNull(column.name, fk.name));
   }
@@ -328,7 +335,9 @@ export function checkSetNullFks(t: Table, notNullBefore: ReadonlySet<string> = n
 
 // ALTER TABLE 의 문장 끝 검사: 이 문장에서 NOT NULL 이 된 컬럼(MODIFY·CHANGE 의 NOT NULL, PRIMARY KEY 의 암묵적 NOT NULL)과 이 문장이 더한 컬럼을 본다.
 // 같은 문장에서 지운 FK 는 t 에 없으니 보지 않는다. renamed: 이 문장에서 바뀐 컬럼 이름 (소문자 옛 이름 → 새 이름)
+// SET NULL FK 가 없으면 볼 것이 없다 — 컬럼이 많은 테이블에서 문장마다 컬럼을 훑지 않는다 (리뷰 4회차 M-2)
 export function checkNowNotNull(before: Table, t: Table, renamed: ReadonlyMap<string, string>): void {
+  if (!t.foreignKeys.some(isSetNullFk)) return;
   checkSetNullFks(t, new Set(before.columns.filter((c) => !c.nullable).map((c) => (renamed.get(c.name.toLowerCase()) ?? c.name).toLowerCase())));
 }
 
@@ -542,9 +551,11 @@ const UNKNOWN_NULL = -1;
 type KeyRank = number[];
 
 export function sortIndexes(t: Table, ctx?: KeyOrderContext): Index[] {
-  const keys = t.indexes.map((i, n) => ({ i, n, r: keyRank(t, i) }));
-  const stable = memo((i: Index) => ctx !== undefined && ctx.existing.has(i) && orderShape(ctx.before, indexBefore(ctx, i)) === orderShape(t, i));
+  const columns = columnsByName(t); // 키 파트마다 컬럼 목록을 훑지 않는다 (리뷰 4회차 M-2)
+  const keys = t.indexes.map((i, n) => ({ i, n, r: keyRank(columns, i) }));
+  const stable = memo((i: Index) => ctx !== undefined && ctx.existing.has(i) && orderShape(columnsByName(ctx.before), indexBefore(ctx, i)) === orderShape(columns, i));
   const order = (a: (typeof keys)[number], b: (typeof keys)[number]): number => {
+    if (a.r[1] !== UNKNOWN_NULL && b.r[1] !== UNKNOWN_NULL) return Math.sign(compareRanks(a.r, b.r) || a.n - b.n); // 모르는 값이 없으면 결과가 하나다
     const outcomes = rankOptions(a.r).flatMap((ra) => rankOptions(b.r).map((rb) => Math.sign(compareRanks(ra, rb) || a.n - b.n)));
     if (outcomes.every((o) => o === outcomes[0])) return outcomes[0];
     if (stable(a.i) && stable(b.i)) return Math.sign(a.n - b.n);
@@ -555,10 +566,11 @@ export function sortIndexes(t: Table, ctx?: KeyOrderContext): Index[] {
   return keys.sort(order).map((x) => x.i);
 }
 
-function keyRank(t: Table, i: Index): KeyRank {
-  const isVirtual = i.parts.some((p) => p.column === undefined || findColumn(t, p.column)?.generated?.stored === false) ? 1 : 0;
+function keyRank(columns: ReadonlyMap<string, Column>, i: Index): KeyRank {
+  const partColumns = i.parts.map((p) => (p.column === undefined ? undefined : columns.get(p.column.toLowerCase()))); // 식 파트는 undefined — 키 파트마다 컬럼을 한 번만 찾는다
+  const isVirtual = partColumns.some((c, k) => i.parts[k].column === undefined || c?.generated?.stored === false) ? 1 : 0;
   if (i.kind !== 'PRIMARY' && i.kind !== 'UNIQUE') return [1, i.kind === 'FULLTEXT' ? 1 : 0, isVirtual, 0, 0];
-  const nullable = i.parts.some((p) => p.column !== undefined && findColumn(t, p.column)?.nullable === true) ? 1 : i.parts.some((p) => p.column === undefined) ? UNKNOWN_NULL : 0;
+  const nullable = partColumns.some((c) => c?.nullable === true) ? 1 : i.parts.some((p) => p.column === undefined) ? UNKNOWN_NULL : 0;
   return [0, nullable, i.kind === 'PRIMARY' ? 0 : 1, i.parts.some((p) => p.length !== undefined) ? 1 : 0, isVirtual];
 }
 
@@ -567,10 +579,10 @@ const compareRanks = (a: KeyRank, b: KeyRank): number => a.reduce((d, x, k) => d
 
 // 순서를 정하는 키 속성: 파트마다 컬럼의 타입·NULL 허용·생성 컬럼 여부·길이, 식 파트는 식과 식이 쓰는 컬럼의 정의 (식의 NULL 허용은 그 컬럼에 달렸다).
 // 함수 인덱스가 쓰는 컬럼은 지우거나 이름을 바꿀 수 없어 (3837) 같은 이름으로 찾는다
-function orderShape(t: Table, i: Index | undefined): string {
+function orderShape(columns: ReadonlyMap<string, Column>, i: Index | undefined): string {
   if (!i) return '';
   const column = (name: string) => {
-    const c = findColumn(t, name);
+    const c = columns.get(name.toLowerCase());
     return c && [c.type, c.nullable, c.generated?.stored ?? null];
   };
   return JSON.stringify([i.kind, i.parts.map((p) => (p.column === undefined ? [p.expr, [...exprColumns(p.expr ?? '')].map(column)] : [column(p.column), p.length !== undefined]))]);
