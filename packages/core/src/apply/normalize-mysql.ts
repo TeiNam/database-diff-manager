@@ -1,10 +1,13 @@
 // 사람이 쓴 타입·기본값·문자셋을 MySQL SHOW CREATE 모양으로 맞춘다 (8.0/8.4).
 // 규칙마다 test:mysql 의 ALTER 시나리오(test/apply.int.test.ts)가 실제 MySQL 결과와 비교한다
+import { charsetMaxlen, partBytes } from '../convert-keys';
 import { Cursor } from '../cursor';
 import { quoteString, tokenize, type Token } from '../lexer';
 import type { Column, TableOption } from '../model';
 import { normalizeType } from '../normalize';
+import { memberFinder } from './enum-member';
 import { assertFloatSize, floatDefault } from './float-default';
+import { MAX_VARCHAR_BYTES } from './limits';
 import { splitList } from './lists';
 import { TEMPORAL_TYPES, temporalDefault, type TemporalType } from './temporal-default';
 import { fail, RE_EXPORT, type ColumnSpec, type DefaultSpec, type NowSpec } from './types';
@@ -13,6 +16,7 @@ export const INT_TYPES: ReadonlySet<string> = new Set(['tinyint', 'smallint', 'm
 const NUMERIC: ReadonlySet<string> = new Set([...INT_TYPES, 'decimal', 'float', 'double']);
 // 문자셋·콜레이션이 붙는 타입
 export const CHARSET_TYPES: ReadonlySet<string> = new Set(['char', 'varchar', 'tinytext', 'text', 'mediumtext', 'longtext', 'enum', 'set']);
+const ENUM_SET: ReadonlySet<string> = new Set(['enum', 'set']);
 export const BLOB_TYPES: ReadonlySet<string> = new Set(['tinytext', 'text', 'mediumtext', 'longtext', 'tinyblob', 'blob', 'mediumblob', 'longblob']);
 // 리터럴 기본값을 쓸 수 없는 타입 (MySQL 1101). 그중 TEXT·BLOB 계열(BLOB_TYPES)만 NULL 허용이어도 SHOW CREATE 에 DEFAULT NULL 이 없고, JSON·GEOMETRY 계열은 찍힌다
 export const NO_LITERAL_DEFAULT: ReadonlySet<string> = new Set([...BLOB_TYPES, 'json',
@@ -153,7 +157,11 @@ export function tableCharset(options: readonly TableOption[], defaults: TableCha
 // 쓰지 않은 컬럼은 테이블 기본을 물려받고, 그 콜레이션이 문자셋의 기본(primary)이 아닐 때만 COLLATE 하나가 남는다. MODIFY·CHANGE 도 옛 컬럼의 문자셋을 물려받지 않는다
 export function columnCharset(type: string, written: Pick<ColumnSpec, 'charset' | 'collation'>, table: TableCharset): Pick<Column, 'charset' | 'collation'> {
   if (!CHARSET_TYPES.has(baseType(type))) return written.charset || written.collation ? fail(`문자열이 아닌 타입에는 CHARACTER SET·COLLATE 를 쓸 수 없습니다: ${type}`) : {};
-  if (!written.charset && !written.collation) return table.collation === primaryCollation(table.charset) ? {} : { collation: table.collation };
+  if (!written.charset && !written.collation) {
+    // 기본 문자셋이 binary 인 테이블: MySQL 은 CHAR·VARCHAR·TEXT 를 BINARY·VARBINARY·BLOB 으로 바꾼다 (8.0.46·8.4.11 실측: VARCHAR(10) → varbinary(10), ENUM·SET 은 그대로)
+    if (table.charset === 'binary' && !ENUM_SET.has(baseType(type))) fail(`기본 문자셋이 binary 인 테이블의 ${type} 은 MySQL 이 BINARY·VARBINARY·BLOB 으로 바꿔 1차 지원 범위가 아닙니다 (이진 타입을 직접 쓰세요) — ${RE_EXPORT}`);
+    return table.collation === primaryCollation(table.charset) ? {} : { collation: table.collation };
+  }
   const charset = written.charset ? canonicalCharset(written.charset) : charsetOfCollation(canonicalCollation(written.collation!));
   const collation = written.collation ? canonicalCollation(written.collation) : primaryCollation(charset);
   if (charsetOfCollation(collation) !== charset) fail(`COLLATE ${collation} 은 문자셋 ${charset} 의 콜레이션이 아닙니다 (MySQL 1253)`);
@@ -165,6 +173,22 @@ export function columnCharset(type: string, written: Pick<ColumnSpec, 'charset' 
 export function effectiveCollation(col: Pick<Column, 'type' | 'charset' | 'collation'>, table: TableCharset): string {
   if (!CHARSET_TYPES.has(baseType(col.type))) return '';
   return col.collation ?? (col.charset ? primaryCollation(canonicalCharset(col.charset)) : table.collation);
+}
+
+// 컬럼의 글자당 최대 바이트 (charsetMaxlen — SHOW CHARACTER SET 의 Maxlen): 문자열 타입은 실제 문자셋의 값이고, 이진 타입(BINARY·VARBINARY·BLOB)은 바이트가 글자라 1 이다.
+// 콜레이션 이름의 앞부분으로 문자셋을 읽어 기준 덤프의 옛 이름(utf8_general_ci)에도 던지지 않는다
+export function columnMaxlen(col: Pick<Column, 'type' | 'charset' | 'collation'>, table: TableCharset): number {
+  if (!CHARSET_TYPES.has(baseType(col.type))) return 1;
+  return charsetMaxlen(col.collation?.split('_')[0] ?? col.charset ?? table.charset);
+}
+
+// VARCHAR·VARBINARY 바이트 한도 (limits.ts): 엄격하지 않은 세션은 넘는 컬럼을 TEXT·BLOB 계열로 바꿔 받는다 (utf8mb4 VARCHAR(16384) → mediumtext). 행 크기 한도(1118)는 보지 않는다
+function assertVarcharBytes(col: Column, table: TableCharset): void {
+  const base = baseType(col.type);
+  if (base !== 'varchar' && base !== 'varbinary') return;
+  const bytes = partBytes(col, undefined, columnMaxlen(col, table));
+  if (bytes <= MAX_VARCHAR_BYTES) return;
+  fail(`컬럼 \`${col.name}\` 의 ${col.type} 은 ${bytes} 바이트로 ${MAX_VARCHAR_BYTES} 바이트를 넘습니다 — 엄격 SQL_MODE 의 MySQL 은 1074 로 거부하고, 엄격하지 않은 세션은 TEXT·BLOB 계열로 바꿔 받습니다 — ${RE_EXPORT}`);
 }
 
 const fspOf = (type: string): number => Number(/^(?:datetime|timestamp|time)\((\d)\)/.exec(type)?.[1] ?? 0);
@@ -181,9 +205,9 @@ export function nowText(type: string, now: NowSpec, what: string, errno = ER_INV
   return now.fsp ? `CURRENT_TIMESTAMP(${now.fsp})` : 'CURRENT_TIMESTAMP';
 }
 
-// 기본값 원문 (SHOW CREATE 표기): 숫자도 따옴표로 감싸고 타입 자릿수에 맞춘다. ENUM·SET 멤버는 컬럼 콜레이션으로 찾는다 (memberKey).
-// undefined: 저장되는 기본값이 없다 — TEXT·BLOB 계열에 명시한 DEFAULT NULL 은 SHOW CREATE 에 보이지 않는다 (JSON·GEOMETRY 는 'NULL')
-export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | 'type' | 'nullable' | 'collation'>): string | undefined {
+// 기본값 원문 (SHOW CREATE 표기): 숫자도 따옴표로 감싸고 타입 자릿수에 맞춘다. ENUM·SET 멤버는 컬럼의 실제 콜레이션으로 찾는다 (memberFinder — table: 컬럼이 든 테이블의
+// 기본 문자셋, 콜레이션을 적지 않은 컬럼이 물려받는다). undefined: 저장되는 기본값이 없다 — TEXT·BLOB 계열에 명시한 DEFAULT NULL 은 SHOW CREATE 에 보이지 않는다 (JSON·GEOMETRY 는 'NULL')
+export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | 'type' | 'nullable' | 'charset' | 'collation'>, table: TableCharset): string | undefined {
   const base = baseType(col.type);
   const bad = (why: string): never => fail(`컬럼 \`${col.name}\` 의 기본값이 올바르지 않습니다: ${why} (MySQL 1067)`);
   const reExport = (why: string): never => fail(`컬럼 \`${col.name}\` 의 기본값 ${why} — ${RE_EXPORT}`);
@@ -201,11 +225,10 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   // ENUM·SET 에 쓴 숫자는 값이 아니라 순번·비트다 (8.0.46·8.4.11 실측: ENUM('2','1') DEFAULT 1 → '2', SET('2','a') DEFAULT 2 → 'a')
   if ((base === 'enum' || base === 'set') && spec.kind === 'number') return reExport(`${spec.value} 은(는) 숫자라 MySQL 이 값이 아니라 순번·비트로 읽습니다 (값을 따옴표로 감싸 쓰세요)`);
   if (base === 'enum') {
-    const key = memberKey(col);
-    const wanted = key(trimTrailingSpaces(spec.value));
-    return quoteString(enumMembers(col.type).find((m) => key(m) === wanted) ?? bad(`'${spec.value}' 은 ENUM 값이 아닙니다`));
+    const find = memberFinder(enumMembers(col.type), effectiveCollation(col, table), reExport);
+    return quoteString(find(trimTrailingSpaces(spec.value)) ?? bad(`'${spec.value}' 은 ENUM 값이 아닙니다`));
   }
-  if (base === 'set') return quoteString(setDefault(spec.value, col, bad));
+  if (base === 'set') return quoteString(setDefault(spec.value, col, table, bad, reExport));
   const text = spec.kind === 'number' ? numberText(spec.value) ?? reExport(`${spec.value} 은(는) 문자열 컬럼에 쓸 수 있는 숫자 꼴이 아닙니다`) : spec.value;
   if (base === 'char') return quoteString(trimTrailingSpaces(text)); // CHAR 는 끝 공백을 떼고 찍는다 (8.0.46·8.4.11 실측: 'ab  ' → 'ab', ' ' → '')
   return quoteString(text);
@@ -317,24 +340,12 @@ export function assertBmpText(text: string, where: string): void {
   if (NON_BMP.test(text)) fail(`${where}에 4바이트 문자(이모지 등)가 있습니다 — MySQL 이 SHOW CREATE 에서 '?' 나 16진수로 바꿔 찍어 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
 }
 
-// SET 기본값: 값마다 멤버여야 하고, 정의 순서로 다시 쓴다
-function setDefault(text: string, col: Pick<Column, 'type' | 'collation'>, bad: (why: string) => never): string {
+// SET 기본값: 값마다 멤버여야 하고 (memberFinder), 정의 순서로 다시 쓴다
+function setDefault(text: string, col: Pick<Column, 'type' | 'charset' | 'collation'>, table: TableCharset, bad: (why: string) => never, reExport: (why: string) => never): string {
   const members = enumMembers(col.type);
-  const key = memberKey(col);
-  const picked = text === '' ? [] : text.split(',').map((v) => {
-    const wanted = key(v);
-    return members.find((m) => key(m) === wanted) ?? bad(`'${v}' 은 SET 값이 아닙니다`);
-  });
+  const find = memberFinder(members, effectiveCollation(col, table), reExport);
+  const picked = text === '' ? [] : text.split(',').map((v) => find(v) ?? bad(`'${v}' 은 SET 값이 아닙니다`));
   return members.filter((m) => picked.includes(m)).join(',');
-}
-
-// ENUM·SET 기본값을 멤버와 견줄 글자 (리뷰 2회차 R2-02): MySQL 은 컬럼 콜레이션으로 멤버를 찾는다 (8.0.46·8.4.11 실측). 대소문자를 가리는 콜레이션(_bin·_cs 등
-// _ci 가 아닌 것)은 같은 글자만 맞아 ENUM('a','A') COLLATE utf8mb4_bin DEFAULT 'A' 는 'A', ENUM('a','b') COLLATE utf8mb4_bin DEFAULT 'A' 는 1067 이다. _ci 는 대소문자를
-// 무시한다 (대소문자만 다른 멤버는 MySQL 이 1291 로 거부해 생기지 않는다). 콜레이션을 적지 않은 컬럼은 문자셋의 기본(늘 _ci) 콜레이션이다 — SHOW CREATE 와 columnCharset 은
-// 기본이 아닌 콜레이션을 (테이블에서 물려받았어도) 컬럼에 적는다
-function memberKey(col: Pick<Column, 'collation'>): (text: string) => string {
-  const caseSensitive = col.collation !== undefined && !col.collation.endsWith('_ci');
-  return caseSensitive ? (text) => text : (text) => text.toLowerCase();
 }
 
 // 사람이 쓴 컬럼 정의 → SHOW CREATE 모양 Column (table: 이 컬럼이 들어갈 테이블의 기본 문자셋)
@@ -348,11 +359,12 @@ export function finalizeColumn(spec: ColumnSpec, table: TableCharset): Column {
   if (spec.autoIncrement && spec.default && spec.default.kind !== 'null') fail(`AUTO_INCREMENT 컬럼 \`${spec.name}\` 에는 기본값을 쓸 수 없습니다 (MySQL 1067)`);
   const nullable = spec.primaryKey || spec.autoIncrement ? false : spec.nullable ?? true;
   const col: Column = { name: spec.name, type: spec.type, ...columnCharset(spec.type, spec, table), nullable, invisible: spec.invisible, autoIncrement: spec.autoIncrement };
+  assertVarcharBytes(col, table);
   if (spec.srid !== undefined) col.srid = spec.srid;
   if (spec.storage) col.storage = spec.storage;
   if (spec.columnFormat) col.columnFormat = spec.columnFormat;
   if (spec.default && !spec.autoIncrement) {
-    const value = normalizeDefault(spec.default, col);
+    const value = normalizeDefault(spec.default, col, table);
     if (value !== undefined) col.default = value;
   } else if (nullable && !BLOB_TYPES.has(base)) col.default = 'NULL';
   if (spec.onUpdate) col.onUpdate = nowText(spec.type, spec.onUpdate, `컬럼 \`${spec.name}\` 의 ON UPDATE`, ER_INVALID_ON_UPDATE);

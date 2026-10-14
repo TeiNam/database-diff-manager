@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeDefault } from '../../src/apply/normalize-mysql';
-import { ApplyFailure, RE_EXPORT, type DefaultSpec } from '../../src/apply/types';
+import { ApplyFailure, MYSQL_DEFAULTS, RE_EXPORT, type DefaultSpec } from '../../src/apply/types';
 
 // 기대값은 MySQL 8.0.46·8.4.11 에 CREATE TABLE … DEFAULT 로 만든 뒤 SHOW CREATE TABLE 이 찍은 값이다 (두 버전이 같다)
 const col = (type: string) => ({ name: 'c', type, nullable: true });
@@ -8,7 +8,7 @@ const num = (value: string): DefaultSpec => ({ kind: 'number', value });
 const str = (value: string): DefaultSpec => ({ kind: 'string', value });
 const messageOf = (spec: DefaultSpec, type: string): string => {
   try {
-    normalizeDefault(spec, col(type));
+    normalizeDefault(spec, col(type), MYSQL_DEFAULTS);
   } catch (e) {
     expect(e).toBeInstanceOf(ApplyFailure);
     return (e as Error).message;
@@ -20,7 +20,7 @@ const messageOf = (spec: DefaultSpec, type: string): string => {
 // 재현하지 않고 RE_EXPORT 로 거부한다. 범위 밖 숫자는 MySQL 도 1067 이다
 describe('YEAR 기본값', () => {
   it.each([[num('2020'), "'2020'"], [str('2020'), "'2020'"], [num('1901'), "'1901'"], [num('2155'), "'2155'"], [num('0000'), "'0000'"], [str('0000'), "'0000'"]] as const)(
-    '%j → %s', (spec, out) => expect(normalizeDefault(spec as DefaultSpec, col('year'))).toBe(out));
+    '%j → %s', (spec, out) => expect(normalizeDefault(spec as DefaultSpec, col('year'), MYSQL_DEFAULTS)).toBe(out));
 
   it.each(['0', '1', '20', '69', '70', '99', '00', '01', '0001', '0070', '0099'])('한두 자리 %s (0 으로 채운 꼴 포함)은 RE_EXPORT 로 거부한다 (숫자·문자열 모두)', (v) => {
     for (const spec of [num(v), str(v)]) {
@@ -71,7 +71,7 @@ describe('DECIMAL 기본값 — 정확한 십진수', () => {
     [str(' 7 '), 'decimal(10,2)', "'7.00'"],
     [num('5'), 'decimal(10,2) unsigned', "'5.00'"],
     [num('0.000'), 'decimal(10,2)', "'0.00'"],
-  ] as const)('%j on %s → %s', (spec, type, out) => expect(normalizeDefault(spec as DefaultSpec, col(type))).toBe(out));
+  ] as const)('%j on %s → %s', (spec, type, out) => expect(normalizeDefault(spec as DefaultSpec, col(type), MYSQL_DEFAULTS)).toBe(out));
 
   it.each([
     [num('1.236'), 'decimal(10,2)', "'1.24'"],
@@ -83,7 +83,7 @@ describe('DECIMAL 기본값 — 정확한 십진수', () => {
     [num('-2.5'), 'decimal(10,0)', "'-3'"],
     [num('999.4'), 'decimal(3,0)', "'999'"],
     [str('1.236'), 'decimal(10,2)', "'1.24'"],
-  ] as const)('반올림 %j on %s → %s', (spec, type, out) => expect(normalizeDefault(spec as DefaultSpec, col(type))).toBe(out));
+  ] as const)('반올림 %j on %s → %s', (spec, type, out) => expect(normalizeDefault(spec as DefaultSpec, col(type), MYSQL_DEFAULTS)).toBe(out));
 
   it.each([
     [num('1e2'), 'decimal(10,2)', "'100.00'"],
@@ -92,7 +92,7 @@ describe('DECIMAL 기본값 — 정확한 십진수', () => {
     [num('1e21'), 'decimal(25,2)', "'1000000000000000000000.00'"],
     [str('1e2'), 'decimal(10,2)', "'100.00'"],
     [num('25e-1'), 'decimal(10,1)', "'2.5'"],
-  ] as const)('지수 표기 %j on %s → %s', (spec, type, out) => expect(normalizeDefault(spec as DefaultSpec, col(type))).toBe(out));
+  ] as const)('지수 표기 %j on %s → %s', (spec, type, out) => expect(normalizeDefault(spec as DefaultSpec, col(type), MYSQL_DEFAULTS)).toBe(out));
 
   it.each([
     [num('1234.5'), 'decimal(5,2)'], [num('1000'), 'decimal(3,0)'], [num('999.5'), 'decimal(3,0)'], [num('99999999.995'), 'decimal(10,2)'], [num('1e18'), 'decimal(20,2)'],
@@ -116,12 +116,12 @@ describe('DECIMAL 기본값 — 정확한 십진수', () => {
   it('긴 숫자 문자열은 정밀도를 넘으면 BigInt 로 읽기 전에 거부하고, 소수가 길어도 scale 자리까지만 본다', () => {
     const started = performance.now();
     expect(messageOf(num('9'.repeat(200000)), 'decimal(10,2)')).toContain('(MySQL 1067)');
-    expect(normalizeDefault(num(`0.${'1'.repeat(200000)}`), col('decimal(10,2)'))).toBe("'0.11'");
+    expect(normalizeDefault(num(`0.${'1'.repeat(200000)}`), col('decimal(10,2)'), MYSQL_DEFAULTS)).toBe("'0.11'");
     expect(performance.now() - started).toBeLessThan(1000);
   });
 
   it('FLOAT·DOUBLE 은 그대로다', () => {
-    expect(normalizeDefault(num('1.5'), col('double'))).toBe("'1.5'");
-    expect(normalizeDefault(str('1e2'), col('double'))).toBe("'100'");
+    expect(normalizeDefault(num('1.5'), col('double'), MYSQL_DEFAULTS)).toBe("'1.5'");
+    expect(normalizeDefault(str('1e2'), col('double'), MYSQL_DEFAULTS)).toBe("'100'");
   });
 });

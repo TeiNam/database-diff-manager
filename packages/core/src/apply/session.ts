@@ -1,11 +1,12 @@
-// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 만 추적한다. 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수(default_storage_engine 등)는
-// 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, time_zone, unique_checks 등)는 스키마에 영향이 없어 무시한다.
+// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 바꾸었는지만 기억한다 (assertZoneFreeDefault). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
+// (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, unique_checks 등)는 스키마에 영향이 없어 무시한다.
 // 서버 변수(SET GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)는 이 스크립트의 세션을 바꾸지 않아 무시한다.
 // td-export·마이그레이션 스크립트의 'SET @OLD_X = @@X, X = 0' 저장과 'SET X = @OLD_X' 복원을 따른다
 import { Cursor } from '../cursor';
 import { splitList } from './lists';
+import { baseType } from './normalize-mysql';
 import type { State } from './state';
-import { DEFAULT_SQL_MODE, fail, RE_EXPORT } from './types';
+import { DEFAULT_SQL_MODE, fail, RE_EXPORT, type DefaultSpec } from './types';
 
 // 값에 따라 이후 CREATE TABLE 의 결과나 허용 여부가 달라지는 세션 변수 (소문자). 8.0 에 없는 이름(storage_engine, restrict_fk_on_non_standard_key)도 막는다
 const SCHEMA_VARIABLES: ReadonlySet<string> = new Set([
@@ -65,6 +66,15 @@ function assignSession(st: State, a: Cursor, target: string): void {
   if (target.startsWith('@')) st.saved.set(target, value);
   else if (target === 'foreign_key_checks') st.fkChecks = foreignKeyChecksOf(value);
   else if (target === 'sql_mode') st.sqlMode = sqlModeOf(value);
+  else if (target === 'time_zone') st.timeZoneSet = true; // 되돌리는 대입(SET time_zone = @OLD_TIME_ZONE)도 바꾼 것으로 본다 — 값이 문장 앞과 같은지 모른다
+}
+
+// 세션 time_zone 을 바꾼 뒤의 TIMESTAMP 리터럴 기본값 (리뷰 3회차 M-1, 8.0.46·8.4.11 실측): MySQL 은 그 값을 세션 시간대에서 UTC 로 바꿔 저장하고, SHOW CREATE 는 읽는 세션의
+// 시간대로 다시 바꿔 찍는다 ('+09:00' 세션의 '2020-01-01 09:00:00' 을 UTC 세션에서 읽으면 '2020-01-01 00:00:00'). mysqldump·phpMyAdmin 머리의 SET TIME_ZONE='+00:00' 뒤의 값은
+// UTC 글자라 td-export(서버 기본 시간대 세션)로 다시 뽑으면 달라진다. 어느 시간대로 읽을지 모르므로 받지 않는다. CURRENT_TIMESTAMP·NULL 과 DATETIME 은 시간대를 타지 않는다
+export function assertZoneFreeDefault(st: Pick<State, 'timeZoneSet'>, column: string, type: string, value: DefaultSpec | undefined): void {
+  if (!st.timeZoneSet || value === undefined || value.kind === 'null' || value.kind === 'now' || baseType(type) !== 'timestamp') return;
+  fail(`세션 time_zone 을 바꾼 뒤의 TIMESTAMP 컬럼 \`${column}\` 리터럴 기본값은 MySQL 이 그 시간대로 바꿔 저장해 다시 뽑으면 달라집니다 (time_zone 을 바꾸지 않은 세션에서 쓰면 됩니다) — ${RE_EXPORT}`);
 }
 
 interface Variable {

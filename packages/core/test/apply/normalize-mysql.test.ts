@@ -112,42 +112,42 @@ describe('normalizeDefault', () => {
     [{ kind: 'null' }, 'int', 'NULL'],
     [{ kind: 'null' }, 'json', 'NULL'],
     [{ kind: 'null' }, 'point', 'NULL'],
-  ] as const)('%j on %s → %s', (s, type, out) => expect(normalizeDefault(s as DefaultSpec, col(type))).toBe(out));
+  ] as const)('%j on %s → %s', (s, type, out) => expect(normalizeDefault(s as DefaultSpec, col(type), T)).toBe(out));
 
   it.each([
     [{ kind: 'null' }, col('int', false)], [{ kind: 'string', value: 'x' }, col('text')], [{ kind: 'now' }, col('date')],
     [{ kind: 'now' }, col('datetime(3)')], [{ kind: 'number', value: '1.5' }, col('int')], [{ kind: 'string', value: 'z' }, col("enum('a')")],
     [{ kind: 'number', value: '-1' }, col('int unsigned')], [{ kind: 'string', value: 'abc' }, col('int')],
-  ] as const)('%j 는 거부', (s, c) => expect(() => normalizeDefault(s as DefaultSpec, c)).toThrow(ApplyFailure));
+  ] as const)('%j 는 거부', (s, c) => expect(() => normalizeDefault(s as DefaultSpec, c, T)).toThrow(ApplyFailure));
 
   it('TEXT·BLOB 계열의 명시한 DEFAULT NULL 은 저장되는 기본값이 없다 (SHOW CREATE 에 보이지 않는다)', () => {
     for (const type of ['text', 'tinytext', 'mediumtext', 'longtext', 'blob', 'tinyblob', 'mediumblob', 'longblob']) {
-      expect(normalizeDefault({ kind: 'null' }, col(type)), type).toBeUndefined();
+      expect(normalizeDefault({ kind: 'null' }, col(type), T), type).toBeUndefined();
     }
   });
 
   it('NOT NULL 인 TEXT 에 DEFAULT NULL 은 여전히 거부 (1067)', () => {
-    expect(() => normalizeDefault({ kind: 'null' }, col('text', false))).toThrow(/1067/);
+    expect(() => normalizeDefault({ kind: 'null' }, col('text', false), T)).toThrow(/1067/);
   });
 
   it.each([
     [{ kind: 'string', value: 'x' }, col('text')], [{ kind: 'string', value: 'x' }, col('blob')], [{ kind: 'string', value: 'x' }, col('json')],
     [{ kind: 'number', value: '1' }, col('point')], [{ kind: 'string', value: 'x' }, col('geometry')], [{ kind: 'now' }, col('json')],
-  ] as const)('%j 는 리터럴 기본값이라 거부 (1101)', (s, c) => expect(() => normalizeDefault(s as DefaultSpec, c)).toThrow(/1101/));
+  ] as const)('%j 는 리터럴 기본값이라 거부 (1101)', (s, c) => expect(() => normalizeDefault(s as DefaultSpec, c, T)).toThrow(/1101/));
 
   // 숫자 판정 정규식은 선형이어야 한다: 앞쪽 \d+ 와 \d* 가 같은 자리를 나눠 갖는 모양은 숫자 아닌 긴 문자열에서 O(n^2) (20만 자 ≈ 30 초)
   it('숫자 판정이 선형이다: 숫자가 아닌 긴 문자열 기본값도 바로 거부한다', () => {
     const started = performance.now();
-    expect(() => normalizeDefault({ kind: 'string', value: `${'1'.repeat(200000)}x` }, col('int'))).toThrow(ApplyFailure);
-    expect(() => normalizeDefault({ kind: 'string', value: `${'1'.repeat(100000)}.${'1'.repeat(100000)}x` }, col('double'))).toThrow(ApplyFailure);
+    expect(() => normalizeDefault({ kind: 'string', value: `${'1'.repeat(200000)}x` }, col('int'), T)).toThrow(ApplyFailure);
+    expect(() => normalizeDefault({ kind: 'string', value: `${'1'.repeat(100000)}.${'1'.repeat(100000)}x` }, col('double'), T)).toThrow(ApplyFailure);
     expect(performance.now() - started).toBeLessThan(500);
   });
 
   it.each([['5', 'int', "'5'"], ['+5', 'int', "'5'"], ['-0', 'int unsigned', "'0'"], ['1.', 'double', "'1'"], ['.5', 'double', "'0.5'"], ['1e2', 'double', "'100'"], ['1.5E+1', 'double', "'15'"], [' 7 ', 'int', "'7'"]])(
-    '숫자 모양 문자열 %j (%s) → %s', (value, type, out) => expect(normalizeDefault({ kind: 'string', value }, col(type))).toBe(out));
+    '숫자 모양 문자열 %j (%s) → %s', (value, type, out) => expect(normalizeDefault({ kind: 'string', value }, col(type), T)).toBe(out));
 
   it.each([[''], ['.'], ['+'], ['e5'], ['1e'], ['1e+'], ['1..2'], ['1.2.3'], ['0x10'], ['1 2']])('숫자가 아닌 문자열 %j 은 거부 (1067)', (value) => {
-    expect(() => normalizeDefault({ kind: 'string', value }, col('double'))).toThrow(/\(MySQL 1067\)/);
+    expect(() => normalizeDefault({ kind: 'string', value }, col('double'), T)).toThrow(/\(MySQL 1067\)/);
   });
 
   // 문자열 컬럼에 쓴 숫자 리터럴은 MySQL 이 수로 읽은 뒤 글자로 바꿔 저장한다 (8.0.46·8.4.11 실측): 정수부 앞 0 을 떼고 소수부는 쓴 그대로 두며,
@@ -158,12 +158,12 @@ describe('normalizeDefault', () => {
     ['00.00', 'varchar(10)', "'0.00'"], ['0001.000100', 'varchar(20)', "'1.000100'"], ['007', 'char(10)', "'7'"], ['1.0', 'char(10)', "'1.0'"],
     ['007', 'varbinary(10)', "'7'"], ['123456789012345678901234567890', 'varchar(40)', "'123456789012345678901234567890'"],
   ])('숫자 리터럴 %s 을 %s 기본값으로 쓰면 MySQL 이 찍는 글자 %s', (value, type, out) => {
-    expect(normalizeDefault({ kind: 'number', value }, col(type))).toBe(out);
+    expect(normalizeDefault({ kind: 'number', value }, col(type), T)).toBe(out);
   });
 
   // ENUM·SET 에 쓴 숫자는 값이 아니라 순번·비트로 읽는다 (8.0.46·8.4.11 실측: ENUM('2','1') DEFAULT 1 → '2', SET('2','a') DEFAULT 2 → 'a'). 1차에서는 받지 않는다
   it.each([[{ value: '1' }, "enum('2','1')"], [{ value: '2' }, "set('2','a')"], [{ value: '0' }, "enum('a')"], [{ value: '1.5' }, "set('a')"]])('숫자 %j 를 %s 기본값으로 쓰면 RE_EXPORT 로 거부한다', ({ value }, type) => {
-    expect(messageOf(() => normalizeDefault({ kind: 'number', value }, col(type)))).toMatch(new RegExp(`순번.*${RE_EXPORT}$`));
+    expect(messageOf(() => normalizeDefault({ kind: 'number', value }, col(type), T))).toMatch(new RegExp(`순번.*${RE_EXPORT}$`));
   });
 
   // ENUM·SET 기본값의 멤버는 컬럼 콜레이션으로 찾는다 (리뷰 2회차 R2-02, 8.0.46·8.4.11 실측): _bin·_cs 는 대소문자까지 같은 멤버만 맞고
@@ -174,29 +174,59 @@ describe('normalizeDefault', () => {
     ["set('a','A')", 'utf8mb4_bin', 'A,a', "'a,A'"], ["set('a','b')", 'utf8mb4_0900_as_cs', 'b,a', "'a,b'"], ["enum('a','b')", 'utf8mb4_bin', 'b  ', "'b'"],
     ["enum('a','b')", 'utf8mb4_0900_as_ci', 'B', "'b'"], ["enum('a','b')", 'latin1_general_ci', 'B  ', "'b'"], ["set('x','y')", 'utf8mb4_general_ci', 'Y,X', "'x,y'"],
   ])('%s COLLATE %s DEFAULT %j → %s', (type, collation, value, out) => {
-    expect(normalizeDefault({ kind: 'string', value }, withCollation(type, collation))).toBe(out);
+    expect(normalizeDefault({ kind: 'string', value }, withCollation(type, collation), T)).toBe(out);
   });
 
   it.each([
     ["enum('a','b')", 'utf8mb4_bin', 'A'], ["enum('a','b')", 'utf8mb4_0900_as_cs', 'B'], ["set('a','b')", 'latin1_general_cs', 'A'], ["set('a','b')", 'utf8mb4_bin', 'a,B'],
   ])('%s COLLATE %s DEFAULT %j 는 대소문자가 다른 멤버라 거부한다 (1067)', (type, collation, value) => {
-    expect(() => normalizeDefault({ kind: 'string', value }, withCollation(type, collation))).toThrow(/\(MySQL 1067\)/);
+    expect(() => normalizeDefault({ kind: 'string', value }, withCollation(type, collation), T)).toThrow(/\(MySQL 1067\)/);
+  });
+
+  // 멤버 비교는 재현할 수 있는 콜레이션 규칙으로만 한다 (리뷰 3회차 R3-02·M-3, 8.0.46·8.4.11 실측): MySQL 은 실제 콜레이션으로 멤버를 하나씩 견주어 처음 같은 멤버를 쓴다.
+  // 표준 _ci 는 ASCII 끼리 대소문자만 무시하고, binary·_bin·표준 _cs 는 글자가 같아야 한다. 언어별 콜레이션(utf8mb4_turkish_ci 의 'I' 는 'ı', utf8mb4_roman_ci 의 'J' 는 'i',
+  // big5_chinese_ci 의 '`' 는 'E')과 ASCII 가 아닌 글자(utf8mb4_0900_ai_ci 의 'cafe' 는 'café')는 글자까지 같은 멤버만 받고 나머지는 RE_EXPORT 로 거부한다
+  it.each([
+    ["enum('i','ı')", 'utf8mb4_turkish_ci', 'ı', "'ı'"], ["enum('i','ı')", 'utf8mb4_turkish_ci', 'i', "'i'"], ["set('i','ı')", 'utf8mb4_tr_0900_ai_ci', 'ı,i', "'i,ı'"],
+    ["enum('남','여')", 'utf8mb4_0900_ai_ci', '여', "'여'"], ["enum('aa','b')", 'utf8mb4_danish_ci', 'aa', "'aa'"],
+    // 대소문자만 다른 멤버(엄격하지 않은 세션에서 만든 기준 컬럼)는 처음 맞는 멤버다 (8.0.46·8.4.11 실측: ENUM('a','A') utf8mb4_general_ci 의 SET DEFAULT 'A' → 'a')
+    ["enum('a','A')", 'utf8mb4_general_ci', 'A', "'a'"],
+    ["enum('a','b')", 'utf8_general_ci', 'B', "'b'"], ["enum('x','y')", 'euckr_korean_ci', 'Y', "'y'"], ["enum('x','y')", 'latin1_swedish_ci', 'Y', "'y'"],
+  ])('%s COLLATE %s DEFAULT %j → %s (콜레이션 규칙)', (type, collation, value, out) => {
+    expect(normalizeDefault({ kind: 'string', value }, withCollation(type, collation), T)).toBe(out);
+  });
+
+  it.each([
+    ["enum('i','ı')", 'utf8mb4_turkish_ci', 'I'], ["set('i','ı')", 'utf8mb4_turkish_ci', 'I'], ["enum('i','ı')", 'utf8mb4_tr_0900_ai_ci', 'I'],
+    ["enum('i','x')", 'utf8mb4_roman_ci', 'J'], ["enum('aa','b')", 'utf8mb4_danish_ci', 'AA'], ["enum('E','x')", 'big5_chinese_ci', '`'],
+    ["enum('café','b')", 'utf8mb4_0900_ai_ci', 'cafe'], ["enum('Ä','b')", 'utf8mb4_general_ci', 'ä'], ["enum('é','b')", 'utf8mb4_0900_as_cs', 'É'],
+    ["enum('a','b')", 'utf8mb4_0900_ai_ci', 'a\u0001'],
+  ])('%s COLLATE %s DEFAULT %j 는 그 콜레이션의 비교를 재현하지 않아 RE_EXPORT 로 거부한다', (type, collation, value) => {
+    expect(messageOf(() => normalizeDefault({ kind: 'string', value }, withCollation(type, collation), T))).toMatch(new RegExp(`콜레이션 ${collation}.*${RE_EXPORT}$`));
+  });
+
+  it('binary 문자셋 테이블의 컬럼은 콜레이션이 찍히지 않아도 글자가 같은 멤버만 맞는다 (리뷰 3회차 M-3)', () => {
+    const binaryTable = { charset: 'binary', collation: 'binary' };
+    expect(normalizeDefault({ kind: 'string', value: 'A' }, col("enum('a','A')"), binaryTable)).toBe("'A'");
+    expect(normalizeDefault({ kind: 'string', value: 'A,a' }, col("set('a','A')"), binaryTable)).toBe("'a,A'");
+    expect(() => normalizeDefault({ kind: 'string', value: 'A' }, col("enum('a','b')"), binaryTable)).toThrow(/\(MySQL 1067\)/);
+    expect(() => normalizeDefault({ kind: 'string', value: 'É' }, withCollation("enum('é','b')", 'utf8mb4_bin'), T)).toThrow(/\(MySQL 1067\)/);
   });
 
   // BIT 에 쓴 문자열은 수가 아니라 글자의 바이트로 저장된다 (8.0.46·8.4.11 실측: BIT(8) DEFAULT '1' → b'110001', BIT(1) DEFAULT '0' → 1067).
   // 바이트 규칙은 재현하지 않고 받지 않는다 — 숫자와 b'…' 는 그대로 받는다 (리뷰 2회차 M-5)
   it.each([['1', 'bit(8)'], ['0', 'bit(1)'], ['ab', 'bit(16)'], ['', 'bit(8)'], ["b'1'", 'bit(8)']])('BIT 의 문자열 기본값 %j (%s) 는 RE_EXPORT 로 거부한다', (value, type) => {
-    expect(messageOf(() => normalizeDefault({ kind: 'string', value }, col(type)))).toMatch(new RegExp(`문자열.*${RE_EXPORT}$`));
+    expect(messageOf(() => normalizeDefault({ kind: 'string', value }, col(type), T))).toMatch(new RegExp(`문자열.*${RE_EXPORT}$`));
   });
 
   it('BIT 의 숫자·b 리터럴 기본값은 그대로 받는다', () => {
-    expect(normalizeDefault({ kind: 'number', value: '5' }, col('bit(8)'))).toBe("b'101'");
-    expect(normalizeDefault({ kind: 'bit', value: "b'110001'" }, col('bit(8)'))).toBe("b'110001'");
+    expect(normalizeDefault({ kind: 'number', value: '5' }, col('bit(8)'), T)).toBe("b'101'");
+    expect(normalizeDefault({ kind: 'bit', value: "b'110001'" }, col('bit(8)'), T)).toBe("b'110001'");
   });
 
   it('DEFAULT CURRENT_TIMESTAMP 가 잘못되면 1067', () => {
-    expect(() => normalizeDefault({ kind: 'now' }, col('date'))).toThrow(/1067/);
-    expect(() => normalizeDefault({ kind: 'now' }, col('datetime(3)'))).toThrow(/1067/);
+    expect(() => normalizeDefault({ kind: 'now' }, col('date'), T)).toThrow(/1067/);
+    expect(() => normalizeDefault({ kind: 'now' }, col('datetime(3)'), T)).toThrow(/1067/);
   });
 });
 
@@ -434,12 +464,12 @@ describe('ENUM·SET 값 끝 공백', () => {
 
   it('긴 공백이 값 가운데 있어도 선형이다 (ENUM 기본값)', () => {
     const started = performance.now();
-    expect(() => normalizeDefault({ kind: 'string', value: `a${' '.repeat(200000)}b` }, col("enum('a','b')"))).toThrow(ApplyFailure);
+    expect(() => normalizeDefault({ kind: 'string', value: `a${' '.repeat(200000)}b` }, col("enum('a','b')"), T)).toThrow(ApplyFailure);
     expect(performance.now() - started).toBeLessThan(500);
   });
 
   it('ENUM 기본값의 끝 공백은 지우고 비교한다', () => {
-    expect(normalizeDefault({ kind: 'string', value: 'B   ' }, col("enum('a','b')"))).toBe("'b'");
-    expect(() => normalizeDefault({ kind: 'string', value: 'b\t' }, col("enum('a','b')"))).toThrow(/ENUM 값이 아닙니다/);
+    expect(normalizeDefault({ kind: 'string', value: 'B   ' }, col("enum('a','b')"), T)).toBe("'b'");
+    expect(() => normalizeDefault({ kind: 'string', value: 'b\t' }, col("enum('a','b')"), T)).toThrow(/ENUM 값이 아닙니다/);
   });
 });

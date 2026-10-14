@@ -21,7 +21,8 @@ describe('applyScript — 문장 처리', () => {
   });
 
   it('지원하지 않는 문장의 거부 안내는 모두 RE_EXPORT 로 끝난다', () => {
-    for (const sql of ['CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET @x = 1;', 'CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1;', 'ALTER DATABASE shop CHARACTER SET utf8mb4;', 'SELECT 1;', 'CALL p();', 'CREATE VIEW v AS SELECT 1;']) {
+    for (const sql of ['CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET @x = 1;', 'CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1;', 'ALTER DATABASE shop CHARACTER SET utf8mb4;', 'CALL p();',
+      "PREPARE s FROM 'ALTER TABLE t ADD x INT';", 'EXECUTE s;', 'CREATE VIEW v AS SELECT 1;', 'CREATE SCHEMA shop;']) {
       const r = run(sql);
       expect(r, sql).toMatchObject({ ok: false, error: { index: 1 } });
       expect(!r.ok && r.error.reason.endsWith(RE_EXPORT), sql).toBe(true);
@@ -40,9 +41,14 @@ describe('applyScript — 문장 처리', () => {
   });
 });
 
-// 이미 MySQL 에서 돈 스크립트에 흔한, 스키마(SHOW CREATE 결과)를 바꾸지 않는 문장은 무시한다: 트랜잭션 제어, LOCK·UNLOCK TABLES, 데이터 문장, 권한, 서버 변수(SET GLOBAL·PERSIST)
+// 이미 MySQL 에서 돈 스크립트에 흔한, 스키마(SHOW CREATE 결과)를 바꾸지 않는 문장은 무시한다: 트랜잭션 제어, LOCK·UNLOCK TABLES, 데이터 문장, 권한, 서버 변수(SET GLOBAL·PERSIST),
+// 조회(SELECT·SHOW·DESC·DESCRIBE·EXPLAIN·DO), DISABLE·ENABLE KEYS 만 쓴 ALTER TABLE (InnoDB 는 note 1031 만 남긴다), 현재 스키마의 CREATE SCHEMA·DATABASE IF NOT EXISTS
+// (리뷰 3회차 M-5, 8.0.46·8.4.11 실측: note 1007)
 describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
   const NO_OPS = [
+    "SELECT 'done';", 'SELECT COUNT(*) FROM t WHERE id > 0;', 'SHOW TABLES;', 'SHOW CREATE TABLE t;', 'DESC t;', 'DESCRIBE `t`;', 'EXPLAIN SELECT * FROM t;', 'DO 1 + 1;',
+    'ALTER TABLE t DISABLE KEYS;', 'ALTER TABLE `t` ENABLE KEYS;', 'ALTER TABLE shop.t DISABLE KEYS;', '/*!40000 ALTER TABLE `t` DISABLE KEYS */;',
+    'CREATE SCHEMA IF NOT EXISTS shop;', 'CREATE DATABASE IF NOT EXISTS `shop`;',
     'START TRANSACTION;', 'BEGIN;', 'BEGIN WORK;', 'COMMIT;', 'ROLLBACK;', 'ROLLBACK TO SAVEPOINT s1;', 'LOCK TABLES t WRITE;', 'LOCK TABLE t READ;', 'UNLOCK TABLES;',
     "INSERT INTO t VALUES (1), (2);", "INSERT INTO t (id) SELECT 3;", "UPDATE t SET id = 4 WHERE id = 1;", 'DELETE FROM t WHERE id = 2;', "REPLACE INTO t VALUES (5);",
     'TRUNCATE TABLE t;', 'TRUNCATE t;', "GRANT SELECT ON shop.* TO 'app'@'%';", "REVOKE SELECT ON shop.* FROM 'app'@'%';",
@@ -73,7 +79,9 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
   it.each([
     'INSERT INTO t VALUES (1); ALTER TABLE t ADD COLUMN x INT;', 'START TRANSACTION; ALTER TABLE t ADD COLUMN x INT;', "GRANT SELECT ON shop.* TO 'app'@'%'; ALTER TABLE t ADD COLUMN x INT;",
     'TRUNCATE TABLE t; ALTER TABLE t ADD COLUMN x INT;', 'SET GLOBAL max_connections = 10; ALTER TABLE t ADD COLUMN x INT;', 'SET NAMES utf8mb4; ALTER TABLE t ADD COLUMN x INT;',
-    'SET FOREIGN_KEY_CHECKS = 0; ALTER TABLE t ADD COLUMN x INT;', 'USE shop; ALTER TABLE t ADD COLUMN x INT;',
+    'SET FOREIGN_KEY_CHECKS = 0; ALTER TABLE t ADD COLUMN x INT;', 'USE shop; ALTER TABLE t ADD COLUMN x INT;', 'SELECT 1; ALTER TABLE t ADD COLUMN x INT;',
+    'SHOW TABLES; DROP TABLE t;', 'DO 1; ALTER TABLE t ADD COLUMN x INT;', 'ALTER TABLE t DISABLE KEYS; ALTER TABLE t ADD COLUMN x INT;',
+    'CREATE SCHEMA IF NOT EXISTS shop; ALTER TABLE t ADD COLUMN x INT;', 'DESC t; DROP TABLE t;',
   ])('구분자 안에 문장이 여럿이면 무시하지 않고 RE_EXPORT 로 거부한다: %s', (chunk) => {
     const r = run(`${NO_DELIMITER_RESET}${chunk}`);
     expect(r).toMatchObject({ ok: false, error: { index: 2 } });
@@ -92,6 +100,23 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
   it('구분자를 바꾼 뒤에도 끝에 ; 만 붙은 무시하는 문장 하나는 그대로 무시한다', () => {
     const r = run('DELIMITER $$\nINSERT INTO t VALUES (1);$$\nCOMMIT;;$$\nDELIMITER ;\nALTER TABLE t ADD COLUMN x INT;');
     expect(r).toMatchObject({ ok: true, applied: 1 });
+  });
+
+  // 조회 문장의 사용자 변수 대입(:=·INTO)은 뒤 SET 이 읽는 저장 값과 어긋날 수 있다. DISABLE·ENABLE KEYS 를 다른 절과 함께 쓴 ALTER TABLE, 옵션을 쓴 CREATE SCHEMA,
+  // 다른 스키마의 CREATE SCHEMA 는 받지 않는다 (MySQL 은 받는다 — 드물어 1차에서 받지 않는다). 없는 테이블의 DISABLE KEYS 는 MySQL 처럼 1146 이다
+  it.each([
+    ['SELECT @x := 1;', ':='], ['SELECT COUNT(*) INTO @n FROM t;', 'INTO'], ['DO @x := 1;', ':='],
+    ['ALTER TABLE t DISABLE KEYS, ADD x INT;', 'DISABLE'], ['ALTER TABLE t ADD x INT, ENABLE KEYS;', 'ENABLE'],
+    ['CREATE SCHEMA IF NOT EXISTS shop DEFAULT CHARACTER SET latin1;', '옵션'], ['CREATE DATABASE IF NOT EXISTS other;', 'other'],
+  ])('%s 는 무시하지 않고 RE_EXPORT 로 거부한다', (sql, mention) => {
+    const r = run(`${sql}\nALTER TABLE t ADD COLUMN y INT;`);
+    expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining(mention) } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  });
+
+  it('없는 테이블의 DISABLE KEYS 는 1146, 다른 스키마의 테이블은 거부한다', () => {
+    expect(run('ALTER TABLE nope DISABLE KEYS;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1146)') } });
+    expect(run('ALTER TABLE other.t DISABLE KEYS;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('other') } });
   });
 
   it('스키마에 영향을 주는 세션 변수와 식으로 쓴 세션 SQL_MODE 는 여전히 거부한다', () => {
@@ -168,6 +193,14 @@ describe('applyScript — 실행 주석(/*!NNNNN … */)으로 감싼 문장', (
 
   it('SET 이 아닌 문장도 실행 주석 안이면 그 문장으로 적용한다 (번호가 없는 /*! 도 같다)', () => {
     const r = run('/*!40000 ALTER TABLE t ADD COLUMN x INT */;\n/*! ALTER TABLE t ADD COLUMN y INT */;');
+    expect(r).toMatchObject({ ok: true, applied: 2 });
+    if (r.ok) expect(r.model.tables[0].columns.map((c) => c.name)).toEqual(['id', 'x', 'y']);
+  });
+
+  // 구분자를 바꾼 동안 '*/;' 로 끝낸 덩어리 (리뷰 3회차 M-2): mysql 클라이언트는 '/*!40101 ALTER … */;' 를 그대로 보내고 MySQL 은 ALTER 를 실행한다 (8.0.46·8.4.11 에서
+  // mysql 클라이언트로 실측 — ';;' 도 같다). 끝의 ';' 를 먼저 떼어야 닫는 '*/' 를 찾는다
+  it('구분자를 바꾼 동안 */; 로 끝낸 실행 주석 문장도 안의 문장으로 적용한다', () => {
+    const r = run('DELIMITER $$\n/*!40101 ALTER TABLE t ADD COLUMN x INT */;$$\n/*!40101 ALTER TABLE t ADD COLUMN y INT */;;$$\n/*!40014 SET FOREIGN_KEY_CHECKS=0 */;$$\nDELIMITER ;');
     expect(r).toMatchObject({ ok: true, applied: 2 });
     if (r.ok) expect(r.model.tables[0].columns.map((c) => c.name)).toEqual(['id', 'x', 'y']);
   });

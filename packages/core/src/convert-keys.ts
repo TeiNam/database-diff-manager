@@ -30,8 +30,8 @@ const TEXT_TYPE = /^(?:tiny|medium|long)?text\b/i;
 const BLOB_TYPE = /^(?:tiny|medium|long)?blob\b/i;
 
 // 키 파트 하나의 바이트. 문자 컬럼은 (prefix 또는 문자 길이) × maxlen, 이진 컬럼은 바이트 그대로.
-// 식 키 파트·그 밖의 타입(숫자·enum 등)은 문자셋과 무관하거나 알 수 없어 0 으로 센다
-function partBytes(column: Column | undefined, length: number | undefined, maxlen: number): number {
+// 식 키 파트·그 밖의 타입(숫자·enum 등)은 문자셋과 무관하거나 알 수 없어 0 으로 센다. ALTER 적용의 바이트 한도 검사도 쓴다 (apply/keys.ts·apply/normalize-mysql.ts)
+export function partBytes(column: Pick<Column, 'type'> | undefined, length: number | undefined, maxlen: number): number {
   if (!column) return 0;
   const chars = CHAR_TYPE.exec(column.type);
   if (chars) return (length ?? Number(chars[1])) * maxlen;

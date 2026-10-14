@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeDefault } from '../../src/apply/normalize-mysql';
 import { temporalDefault } from '../../src/apply/temporal-default';
-import { ApplyFailure, RE_EXPORT, type DefaultSpec } from '../../src/apply/types';
+import { ApplyFailure, MYSQL_DEFAULTS, RE_EXPORT, type DefaultSpec } from '../../src/apply/types';
 
 // 기대값은 MySQL 8.0.46·8.4.11 에 CREATE TABLE 로 만든 뒤 SHOW CREATE TABLE 이 찍은 DEFAULT 다 (두 버전이 같다)
 describe('temporalDefault — MySQL 이 다시 쓰는 날짜·시간 기본값', () => {
@@ -70,16 +70,16 @@ describe('normalizeDefault — 날짜·시간 컬럼', () => {
     ['time', '12:34', "'12:34:00'"],
     ['time(2)', '1:02:03', "'01:02:03.00'"],
   ])('%s DEFAULT %j → %s', (type, value, out) => {
-    expect(normalizeDefault(str(value), col(type))).toBe(out);
+    expect(normalizeDefault(str(value), col(type), MYSQL_DEFAULTS)).toBe(out);
   });
 
   it('MySQL 이 거부하는 값은 1067, 다시 쓰지 못하는 꼴은 RE_EXPORT 로 끝나는 안내', () => {
-    expect(() => normalizeDefault(str('2020-02-30'), col('date'))).toThrow(/\(MySQL 1067\)/);
-    expect(() => normalizeDefault(str('0000-00-00 00:00:00'), col('datetime'))).toThrow(/\(MySQL 1067\)/);
+    expect(() => normalizeDefault(str('2020-02-30'), col('date'), MYSQL_DEFAULTS)).toThrow(/\(MySQL 1067\)/);
+    expect(() => normalizeDefault(str('0000-00-00 00:00:00'), col('datetime'), MYSQL_DEFAULTS)).toThrow(/\(MySQL 1067\)/);
     for (const [spec, type] of [[str('20200101'), 'date'], [str('2020-1-1'), 'datetime'], [{ kind: 'number', value: '0' }, 'date'], [{ kind: 'number', value: '123456' }, 'time']] as const) {
       let message = '';
       try {
-        normalizeDefault(spec as DefaultSpec, col(type));
+        normalizeDefault(spec as DefaultSpec, col(type), MYSQL_DEFAULTS);
       } catch (e) {
         expect(e).toBeInstanceOf(ApplyFailure);
         message = (e as Error).message;
@@ -89,8 +89,8 @@ describe('normalizeDefault — 날짜·시간 컬럼', () => {
   });
 
   it('NULL·CURRENT_TIMESTAMP 기본값은 그대로다', () => {
-    expect(normalizeDefault({ kind: 'null' }, col('datetime'))).toBe('NULL');
-    expect(normalizeDefault({ kind: 'now' }, col('datetime'))).toBe('CURRENT_TIMESTAMP');
-    expect(normalizeDefault({ kind: 'now', fsp: 3 }, col('timestamp(3)'))).toBe('CURRENT_TIMESTAMP(3)');
+    expect(normalizeDefault({ kind: 'null' }, col('datetime'), MYSQL_DEFAULTS)).toBe('NULL');
+    expect(normalizeDefault({ kind: 'now' }, col('datetime'), MYSQL_DEFAULTS)).toBe('CURRENT_TIMESTAMP');
+    expect(normalizeDefault({ kind: 'now', fsp: 3 }, col('timestamp(3)'), MYSQL_DEFAULTS)).toBe('CURRENT_TIMESTAMP(3)');
   });
 });

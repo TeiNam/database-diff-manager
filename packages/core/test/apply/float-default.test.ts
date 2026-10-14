@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeDefault } from '../../src/apply/normalize-mysql';
-import { ApplyFailure, RE_EXPORT, type DefaultSpec } from '../../src/apply/types';
+import { ApplyFailure, MYSQL_DEFAULTS, RE_EXPORT, type DefaultSpec } from '../../src/apply/types';
 
 // FLOAT·DOUBLE 기본값. 기대값은 MySQL 8.0.46·8.4.11 에 CREATE TABLE t (c <타입> DEFAULT <값>) 을 만든 뒤 SHOW CREATE TABLE 이 찍은 값이다 (두 버전이 같다).
 // MySQL 은 값을 이진 부동소수점으로 저장했다가 다시 찍는다: (M,D) 가 없으면 FLOAT 는 유효숫자 6자리로, DOUBLE 은 가장 짧은 표기로, 너무 크거나 작으면 지수 표기로,
@@ -10,7 +10,7 @@ const num = (value: string): DefaultSpec => ({ kind: 'number', value });
 const str = (value: string): DefaultSpec => ({ kind: 'string', value });
 const messageOf = (spec: DefaultSpec, type: string): string => {
   try {
-    normalizeDefault(spec, col(type));
+    normalizeDefault(spec, col(type), MYSQL_DEFAULTS);
   } catch (e) {
     expect(e).toBeInstanceOf(ApplyFailure);
     return (e as Error).message;
@@ -29,7 +29,7 @@ describe('FLOAT·DOUBLE 기본값 — (M,D) 없음', () => {
     ['double', num('0.0000000000001234567891'), '0.0000000000001234567891'], ['double', num('-0.000000000000123456789'), '-0.000000000000123456789'],
     ['double', num('1234567890.12345'), '1234567890.12345'], ['double', num('-123456789012345'), '-123456789012345'], ['double', str('1.50'), '1.5'],
     ['double', num('0.1e1'), '1'],
-  ] as const)('%s DEFAULT %j → %s', (type, spec, out) => expect(normalizeDefault(spec as DefaultSpec, col(type))).toBe(`'${out}'`));
+  ] as const)('%s DEFAULT %j → %s', (type, spec, out) => expect(normalizeDefault(spec as DefaultSpec, col(type), MYSQL_DEFAULTS)).toBe(`'${out}'`));
 
   // 괄호 안은 MySQL 이 찍는 값
   it.each([
@@ -67,7 +67,7 @@ describe('FLOAT·DOUBLE 기본값 — (M,D)', () => {
     ['double(10,2)', num('-0.0'), '0.00'], ['double(10,2)', str('-0'), '0.00'], ['double(10,2)', num('1e2'), '100.00'], ['double(10,2)', str('1e2'), '100.00'],
     ['double(20,10)', num('0.1'), '0.1000000000'], ['double(20,4)', num('12345678901.2345'), '12345678901.2345'], ['double(5,5)', num('0.5'), '0.50000'],
     ['double(10,0)', num('12'), '12'], ['double(10,2) unsigned', num('1.5'), '1.50'],
-  ] as const)('%s DEFAULT %j → %s', (type, spec, out) => expect(normalizeDefault(spec as DefaultSpec, col(type))).toBe(`'${out}'`));
+  ] as const)('%s DEFAULT %j → %s', (type, spec, out) => expect(normalizeDefault(spec as DefaultSpec, col(type), MYSQL_DEFAULTS)).toBe(`'${out}'`));
 
   it.each([
     ['float(7,3)', '1234567'], ['double(10,2)', '123456789'], ['double(10,2)', '100000000'], ['double(10,2)', '-100000000'], ['double(10,2)', '1e15'], ['double(5,5)', '1'],
@@ -107,7 +107,7 @@ describe('FLOAT·DOUBLE 기본값 — (M,D)', () => {
     const zeros = '0'.repeat(200000);
     expect(messageOf(num(`1${zeros}1${zeros}1`), 'double').endsWith(RE_EXPORT)).toBe(true);
     expect(messageOf(num(`0.${zeros}1${zeros}1`), 'double(10,2)').endsWith(RE_EXPORT)).toBe(true);
-    expect(normalizeDefault(num(`1.${zeros}`), col('double(10,2)'))).toBe("'1.00'");
+    expect(normalizeDefault(num(`1.${zeros}`), col('double(10,2)'), MYSQL_DEFAULTS)).toBe("'1.00'");
     expect(messageOf(num('1e999999999999'), 'float')).toMatch(RE_EXPORT);
     expect(performance.now() - started).toBeLessThan(1000);
   });

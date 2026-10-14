@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { applyScript } from '../../src/apply';
 import { applySet } from '../../src/apply/session';
 import { initialState, type State } from '../../src/apply/state';
 import { ApplyFailure, DEFAULT_SQL_MODE, MYSQL_DEFAULTS, RE_EXPORT } from '../../src/apply/types';
 import { Cursor } from '../../src/cursor';
 import { tokenize } from '../../src/lexer';
+import { parseSqlDump } from '../../src/parse-dump';
+import { tdExport } from '../helpers';
 
 const empty = { name: 'shop', tables: [], views: [], routines: [] };
 
@@ -240,5 +243,48 @@ describe('SET 범위', () => {
     setIn(st, "SET GLOBAL max_connections = 10, SESSION foreign_key_checks = 0, sql_mode = ''");
     expect(st.fkChecks).toBe(false);
     expect(st.sqlMode).toBe('');
+  });
+});
+
+// 세션 time_zone (리뷰 3회차 M-1, 8.0.46·8.4.11 실측): MySQL 은 TIMESTAMP 리터럴 기본값을 세션 시간대에서 UTC 로 바꿔 저장하고, SHOW CREATE 는 읽는 세션의 시간대로 다시 바꿔 찍는다
+// ('+09:00' 세션의 DEFAULT '2020-01-01 09:00:00' 을 UTC 세션에서 읽으면 '2020-01-01 00:00:00'). mysqldump·phpMyAdmin 머리의 SET TIME_ZONE='+00:00' 뒤 값은 UTC 글자라
+// td-export 로 다시 뽑으면 달라진다. 어느 시간대로 읽을지 모르므로 세션 time_zone 을 바꾼 뒤의 TIMESTAMP 리터럴 기본값은 RE_EXPORT 로 거부한다
+describe('SET time_zone 뒤의 TIMESTAMP 리터럴 기본값', () => {
+  const base = parseSqlDump(tdExport('CREATE TABLE `ev` (\n  `id` int NOT NULL,\n  `ts` timestamp NULL DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;')).model;
+  const run = (script: string) => applyScript(base, script, { schemaName: 'shop' });
+  const ZONES = [
+    "/*!40103 SET TIME_ZONE='+00:00' */;", "SET time_zone = '+09:00';", "SET @@session.time_zone = 'SYSTEM';", "SET LOCAL TIME_ZONE = 'Asia/Seoul';",
+    "SET NAMES utf8mb4, time_zone = '+00:00';", 'SET @@time_zone = @@time_zone;',
+  ];
+  const LITERALS = [
+    "CREATE TABLE ev2 (id INT PRIMARY KEY, starts_at TIMESTAMP NOT NULL DEFAULT '2020-01-01 00:00:00');",
+    "ALTER TABLE ev ADD starts_at TIMESTAMP NOT NULL DEFAULT '2020-01-01 00:00:00';",
+    "ALTER TABLE ev MODIFY ts TIMESTAMP NULL DEFAULT '2020-01-01 00:00:00';",
+    "ALTER TABLE ev CHANGE ts starts_at TIMESTAMP(3) NULL DEFAULT '2020-01-01 00:00:00.000';",
+    "ALTER TABLE ev ALTER COLUMN ts SET DEFAULT '2020-01-01 00:00:00';",
+  ];
+
+  it.each(ZONES.flatMap((zone) => LITERALS.map((stmt) => [zone, stmt])))('%s 뒤의 %s 는 RE_EXPORT 로 거부한다', (zone, stmt) => {
+    const r = run(`${zone}\n${stmt}`);
+    expect(r).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining('time_zone') } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  });
+
+  it.each(LITERALS)('time_zone 을 바꾸지 않았으면 받는다: %s', (stmt) => {
+    expect(run(stmt)).toMatchObject({ ok: true, applied: 1 });
+  });
+
+  it('CURRENT_TIMESTAMP·NULL 기본값과 DATETIME 리터럴은 시간대를 타지 않아 받는다', () => {
+    const r = run("SET time_zone = '+00:00';\nALTER TABLE ev ADD a TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, ADD b TIMESTAMP NULL DEFAULT NULL, ADD c DATETIME NOT NULL DEFAULT '2020-01-01 00:00:00', ALTER COLUMN ts SET DEFAULT NULL;");
+    expect(r).toMatchObject({ ok: true, applied: 1 });
+  });
+
+  it('없는 날짜는 시간대와 상관없이 1067 이다', () => {
+    expect(run("SET time_zone = '+00:00';\nALTER TABLE ev ALTER COLUMN ts SET DEFAULT '2020-02-30 00:00:00';")).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining('(MySQL 1067)') } });
+  });
+
+  it('서버 변수(SET GLOBAL time_zone)와 값 저장(SET @OLD_TIME_ZONE = @@TIME_ZONE)은 세션 시간대를 바꾸지 않는다', () => {
+    const r = run("SET GLOBAL time_zone = '+00:00';\n/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;\nALTER TABLE ev ALTER COLUMN ts SET DEFAULT '2020-01-01 00:00:00';");
+    expect(r).toMatchObject({ ok: true, applied: 1 });
   });
 });

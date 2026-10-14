@@ -8,6 +8,7 @@ import { splitDump } from '../parse-dump';
 import { UnsafeValueError } from '../sql-safety';
 import { alterTable, createIndex, dropIndexOn } from './alter-table';
 import { assertBmpText, canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
+import { noOpHandler } from './no-op';
 import { createRoutine, dropRoutine, dropView, isCreateRoutine } from './object-stmt';
 import { applySet } from './session';
 import { initialState, type State } from './state';
@@ -20,6 +21,7 @@ export { ApplyFailure } from './types'; // printSqlDump 가 출력할 수 없는
 
 const MAX_STATEMENT_TEXT = 500;
 const VIEW_RE = /^(?:CREATE\s+(?:OR\s+REPLACE\s+)?|ALTER\s+)(?:ALGORITHM\s*=\s*\w+\s+)?(?:DEFINER\s*=\s*\S+\s+)?(?:SQL\s+SECURITY\s+\w+\s+)?VIEW\b/i;
+const SCHEMA_RE = /^CREATE\s+(?:SCHEMA|DATABASE)\b/i;
 
 export function applyScript(base: SchemaModel, script: string, opts: ApplyOptions): ApplyResult {
   let statements;
@@ -62,24 +64,28 @@ export function resolveDefaults(given: Partial<ApplyDefaults> = {}): ApplyDefaul
 
 type Handler = (st: State, c: Cursor) => void;
 
-// DDL 을 적용했으면 true, 세션 문장(SET·USE)과 무시하는 문장(isNoOp)이면 false. 루틴은 본문 안의 ';' 와 덩어리의 경계를 assertOneRoutine 이 가르고,
+// DDL 을 적용했으면 true, 세션 문장(SET·USE)과 무시하는 문장(no-op.ts)이면 false. 루틴은 본문 안의 ';' 와 덩어리의 경계를 assertOneRoutine 이 가르고,
 // 그 밖의 문장은 끝의 ';' 를 뗀 덩어리에 문장이 하나만 있어야 한다 (assertOneStatement — 지원하지 않는 문장은 그보다 먼저 지원 범위 안내로 거부한다)
 function applyStatement(st: State, statement: string, noBackslashEscapes: boolean): boolean {
   assertSameBackslashMode(st, statement, noBackslashEscapes);
-  const { toks, ddl } = withoutCommentEnd(statement, tokenize(statement, { noBackslashEscapes }));
-  if (isCreateRoutine(ddl)) {
-    createRoutine(st, ddl, noBackslashEscapes);
+  const tokens = tokenize(statement, { noBackslashEscapes });
+  const routine = withoutCommentEnd(statement, tokens).ddl;
+  if (isCreateRoutine(routine)) {
+    createRoutine(st, routine, noBackslashEscapes);
     return true;
   }
-  const c = new Cursor(withoutTrailingSemicolons(toks), ddl);
-  const isSession = c.isWord('SET') || c.isWord('USE') || isNoOp(c);
-  const handler = isSession ? undefined : (ddlHandler(c) ?? fail(unsupported(ddl)));
+  // 끝의 ';' 를 먼저 떼고 실행 주석의 닫는 '*/' 를 찾는다: 구분자를 바꾼 동안의 '/*!40101 ALTER … */;' 도 안의 문장이다 (리뷰 3회차 M-2)
+  const { toks, ddl } = withoutCommentEnd(statement, withoutTrailingSemicolons(tokens));
+  const c = new Cursor(toks, ddl);
+  const session = sessionHandler(c);
+  const handler = session ?? ddlHandler(c) ?? fail(unsupported(ddl));
   assertOneStatement(c.toks);
-  if (!handler) return applySession(st, c);
-  assertBmpStrings(c.toks);
-  if (noBackslashEscapes) assertNoBackslashTypeValues(c.toks, ddl);
+  if (!session) {
+    assertBmpStrings(c.toks);
+    if (noBackslashEscapes) assertNoBackslashTypeValues(c.toks, ddl);
+  }
   handler(st, c);
-  return true;
+  return !session;
 }
 
 // 문장 종류에 맞는 DDL 처리기 (지원하지 않는 문장이면 undefined). c 는 처리기가 읽기 시작할 자리로 옮긴다
@@ -101,24 +107,16 @@ function ddlHandler(c: Cursor): Handler | undefined {
   return undefined;
 }
 
-// SET·USE 와 무시하는 문장 (적용한 DDL 이 아니다)
-function applySession(st: State, c: Cursor): false {
-  if (c.isWord('SET')) applySet(st, c);
-  else if (c.acceptWord('USE')) {
-    const db = c.ident();
-    if (db !== st.schemaName || !c.done) fail(`다른 스키마로 USE 할 수 없습니다: ${db}`);
-  }
-  return false;
+// SET·USE 와 무시하는 문장(no-op.ts)의 처리기 — 적용한 DDL 이 아니다. 아니면 undefined
+function sessionHandler(c: Cursor): Handler | undefined {
+  if (c.isWord('SET')) return applySet;
+  return c.isWord('USE') ? useSchema : noOpHandler(c);
 }
 
-// 스키마(SHOW CREATE 결과)를 바꾸지 않는 문장 — 이미 MySQL 에서 돈 스크립트에 흔해 무시한다 (적용한 문장 수에 세지 않는다): 트랜잭션 제어, LOCK·UNLOCK TABLES,
-// 데이터 문장, 권한. DDL 은 MySQL 이 암묵적으로 커밋하므로 ROLLBACK 이 되돌리지 않고, TRUNCATE 가 바꾸는 AUTO_INCREMENT 값은 비교하지 않는다
-const NO_OP_WORDS: ReadonlySet<string> = new Set(['BEGIN', 'COMMIT', 'ROLLBACK', 'INSERT', 'UPDATE', 'DELETE', 'REPLACE', 'TRUNCATE', 'GRANT', 'REVOKE']);
-
-function isNoOp(c: Cursor): boolean {
-  const first = c.peek();
-  if (first?.t !== 'word') return false;
-  return NO_OP_WORDS.has(first.v.toUpperCase()) || c.isWord('START', 'TRANSACTION') || ['LOCK', 'UNLOCK'].some((w) => c.isWord(w, 'TABLES') || c.isWord(w, 'TABLE'));
+function useSchema(st: State, c: Cursor): void {
+  c.expectWord('USE');
+  const db = c.ident();
+  if (db !== st.schemaName || !c.done) fail(`다른 스키마로 USE 할 수 없습니다: ${db}`);
 }
 
 const isOp = (t: Token, v: string): boolean => t.t === 'op' && t.v === v;
@@ -181,9 +179,10 @@ function withoutCommentEnd(statement: string, toks: Token[]): { toks: Token[]; d
 
 function unsupported(ddl: string): string {
   if (VIEW_RE.test(ddl)) return `CREATE·ALTER VIEW 는 1차 지원 범위가 아닙니다 (MySQL 이 뷰 본문을 다시 써서 저장합니다) — ${RE_EXPORT}`;
+  if (SCHEMA_RE.test(ddl)) return `CREATE SCHEMA·DATABASE 는 옵션 없이 쓴 현재 스키마의 IF NOT EXISTS 꼴만 무시하고 그 밖에는 받지 않습니다 — ${RE_EXPORT}`;
   const head = ddl.split(/\s+/).slice(0, 3).join(' ');
   return `지원하지 않는 문장입니다: ${head} — 1차 지원 범위는 ALTER·CREATE·DROP·RENAME TABLE, CREATE·DROP INDEX, CREATE·DROP FUNCTION·PROCEDURE, DROP VIEW 이고, `
-    + `스키마를 바꾸지 않는 문장(트랜잭션 제어·LOCK·데이터 문장·권한)은 무시합니다 — ${RE_EXPORT}`;
+    + `스키마를 바꾸지 않는 문장(트랜잭션 제어·LOCK·데이터 문장·권한·조회)은 무시합니다 — ${RE_EXPORT}`;
 }
 
 // 기준 → 결과 이름 대응 (diff 의 rename 매핑 형식). 새로 만든 객체·지운 객체는 들어가지 않는다
