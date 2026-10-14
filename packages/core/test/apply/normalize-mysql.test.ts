@@ -166,6 +166,23 @@ describe('normalizeDefault', () => {
     expect(messageOf(() => normalizeDefault({ kind: 'number', value }, col(type)))).toMatch(new RegExp(`순번.*${RE_EXPORT}$`));
   });
 
+  // ENUM·SET 기본값의 멤버는 컬럼 콜레이션으로 찾는다 (리뷰 2회차 R2-02, 8.0.46·8.4.11 실측): _bin·_cs 는 대소문자까지 같은 멤버만 맞고
+  // (ENUM('a','A') COLLATE utf8mb4_bin DEFAULT 'A' → 'A', ENUM('a','b') COLLATE utf8mb4_bin DEFAULT 'A' → 1067), _ci 는 대소문자를 무시한다
+  const withCollation = (type: string, collation: string) => ({ ...col(type), charset: collation.split('_')[0], collation });
+  it.each([
+    ["enum('a','A')", 'utf8mb4_bin', 'A', "'A'"], ["enum('a','A')", 'utf8mb4_bin', 'a', "'a'"], ["set('a','A')", 'utf8mb4_bin', 'A', "'A'"],
+    ["set('a','A')", 'utf8mb4_bin', 'A,a', "'a,A'"], ["set('a','b')", 'utf8mb4_0900_as_cs', 'b,a', "'a,b'"], ["enum('a','b')", 'utf8mb4_bin', 'b  ', "'b'"],
+    ["enum('a','b')", 'utf8mb4_0900_as_ci', 'B', "'b'"], ["enum('a','b')", 'latin1_general_ci', 'B  ', "'b'"], ["set('x','y')", 'utf8mb4_general_ci', 'Y,X', "'x,y'"],
+  ])('%s COLLATE %s DEFAULT %j → %s', (type, collation, value, out) => {
+    expect(normalizeDefault({ kind: 'string', value }, withCollation(type, collation))).toBe(out);
+  });
+
+  it.each([
+    ["enum('a','b')", 'utf8mb4_bin', 'A'], ["enum('a','b')", 'utf8mb4_0900_as_cs', 'B'], ["set('a','b')", 'latin1_general_cs', 'A'], ["set('a','b')", 'utf8mb4_bin', 'a,B'],
+  ])('%s COLLATE %s DEFAULT %j 는 대소문자가 다른 멤버라 거부한다 (1067)', (type, collation, value) => {
+    expect(() => normalizeDefault({ kind: 'string', value }, withCollation(type, collation))).toThrow(/\(MySQL 1067\)/);
+  });
+
   it('DEFAULT CURRENT_TIMESTAMP 가 잘못되면 1067', () => {
     expect(() => normalizeDefault({ kind: 'now' }, col('date'))).toThrow(/1067/);
     expect(() => normalizeDefault({ kind: 'now' }, col('datetime(3)'))).toThrow(/1067/);

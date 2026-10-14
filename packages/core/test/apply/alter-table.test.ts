@@ -431,6 +431,36 @@ describe('ALTER TABLE — 문자열 컬럼의 숫자 기본값', () => {
   });
 });
 
+// ENUM·SET 기본값의 멤버는 컬럼 콜레이션으로 찾는다 (리뷰 2회차 R2-02, 8.0.46·8.4.11 실측, 시나리오 enum-set-collation-defaults): 기준 덤프의 COLLATE utf8mb4_bin 컬럼은
+// 'a'·'A' 를 다른 멤버로 두어 SET DEFAULT 'A' 가 'A' 다. 테이블 콜레이션을 물려받은 컬럼도 같다 (SHOW CREATE 는 기본이 아닌 콜레이션을 컬럼에 찍는다)
+describe('ALTER TABLE — ENUM·SET 기본값과 대소문자를 가리는 콜레이션', () => {
+  const base = parseSqlDump(tdExport([
+    "CREATE TABLE `e` (\n  `id` int NOT NULL,\n  `v` enum('a','A') CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,\n  `s` set('a','A') CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,\n"
+      + '  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    "CREATE TABLE `inh` (\n  `id` int NOT NULL,\n  `v` enum('a','b') COLLATE utf8mb4_bin DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;",
+  ].join('\n\n'))).model;
+  const run = (script: string) => applyScript(base, script, { schemaName: 'shop' });
+
+  it('기준 컬럼의 SET DEFAULT 는 대소문자까지 같은 멤버를 고른다', () => {
+    const r = run("ALTER TABLE e ALTER COLUMN v SET DEFAULT 'A', ALTER COLUMN s SET DEFAULT 'A';");
+    if (!r.ok) throw new Error(r.error.reason);
+    expect(r.model.tables[0].columns.map((c) => c.default)).toEqual([undefined, "'A'", "'A'"]);
+  });
+
+  it.each([
+    ["ALTER TABLE e ADD COLUMN w ENUM('a','b') COLLATE utf8mb4_bin DEFAULT 'A';"], ["ALTER TABLE inh ALTER COLUMN v SET DEFAULT 'B';"],
+    ["ALTER TABLE inh ADD COLUMN w SET('x','y') DEFAULT 'Y';"], ["CREATE TABLE u (id INT, v ENUM('x','y') DEFAULT 'Y') COLLATE=utf8mb4_bin;"],
+  ])('대소문자만 같은 멤버는 기본값이 아니다 (1067): %s', (script) => {
+    expect(run(script)).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1067)') } });
+  });
+
+  it('_ci 콜레이션은 대소문자를 무시하고 멤버의 표기로 저장한다', () => {
+    const r = run("ALTER TABLE e ADD COLUMN u ENUM('a','b') DEFAULT 'B', ADD COLUMN t SET('x','y') COLLATE utf8mb4_0900_as_ci DEFAULT 'Y,X';");
+    if (!r.ok) throw new Error(r.error.reason);
+    expect(r.model.tables[0].columns.slice(3).map((c) => c.default)).toEqual(["'b'", "'x,y'"]);
+  });
+});
+
 // 56자 스크립트가 1,000만 자 기본값을 만들어 서버 힙을 다 쓰던 문제 (리뷰 1회차 F4): 타입의 (M,D) 를 기본값을 찍기 전에 MySQL 한도로 본다
 describe('ALTER TABLE — FLOAT·DOUBLE(M,D) 크기 한도', () => {
   it('아주 큰 D 는 기본값을 찍기 전에 1425 로 거부한다 (기준 덤프의 컬럼에 SET DEFAULT 해도)', () => {
