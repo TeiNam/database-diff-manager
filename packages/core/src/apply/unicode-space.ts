@@ -12,10 +12,21 @@ const UNICODE_SPACE = /[\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\
 // s 의 덩어리에서 렉서가 공백으로 건너뛴 것(건너뛰는 실행 주석 skipped 안은 빼고 — MySQL 에는 주석이다)과 실행하는 글의 단어 토큰(toks) 안의 것을 거부한다.
 // script: 문장을 나눈 원문
 export function assertAsciiSpaces(script: string, s: ApplyStatement, skipped: readonly Region[], toks: readonly Token[]): void {
-  const between = s.spaces.find((at) => !skipped.some((r) => r.start <= at && at < r.end));
+  const between = firstOutside(s.spaces, skipped);
   const char = between !== undefined ? script[between] : UNICODE_SPACE.exec(toks.find((t) => t.t === 'word' && UNICODE_SPACE.test(t.v))?.v ?? '')?.[0];
   if (char === undefined) return;
   const code = char.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0');
   fail(`따옴표·주석 밖에 ASCII 가 아닌 공백(U+${code})이 있습니다 — MySQL 은 이 글자를 공백으로 보지 않고 이름의 글자로 읽어, 이름이 그 글자로 시작하거나 끝나는 `
     + `컬럼·테이블을 만들거나 문장을 거부합니다 (실행한 스크립트가 보통 공백이었다면 그 글로 바꿔 넣어 주세요) — ${RE_EXPORT}`);
+}
+
+// regions(건너뛰는 실행 주석) 밖의 첫 공백 자리 (없으면 undefined). 두 배열은 원문 자리 순서이고 regions 는 겹치지 않아 한 번에 훑는다 (리뷰 12회차 Claude F2 — 공백마다
+// 주석을 모두 훑으면 NBSP 50만 개·건너뛰는 주석 5만 개인 1,000,000자 문장 하나가 28 초였다)
+function firstOutside(spaces: readonly number[], regions: readonly Region[]): number | undefined {
+  let k = 0;
+  for (const at of spaces) {
+    while (k < regions.length && regions[k].end <= at) k++;
+    if (k === regions.length || at < regions[k].start) return at;
+  }
+  return undefined;
 }

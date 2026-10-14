@@ -57,13 +57,18 @@ function skippedRegion(script: string, s: ApplyStatement, m: VersionMark): Regio
   return { start: m.at, end };
 }
 
-// ddl 에서 regions(원문 자리)에 든 글자를 공백으로 바꾼다. 줄바꿈은 남기고 길이는 그대로다 — 주석처럼 앞뒤 토큰을 가른다
+// ddl 에서 regions(원문 자리 — 자리 순서이고 겹치지 않는다)에 든 글자를 공백으로 바꾼다. 줄바꿈은 남기고 길이는 그대로다 — 주석처럼 앞뒤 토큰을 가른다. 조각을 모아 한 번에
+// 잇는다 (리뷰 12회차 Claude F2 — 주석마다 문장 전체를 다시 이으면 건너뛰는 주석 10만 개인 1,000,000자 문장 하나가 4 초였다)
 function blank(s: ApplyStatement, regions: readonly Region[]): string {
-  let out = s.ddl;
+  const pieces: string[] = [];
+  let at = 0; // ddl 에서 아직 옮기지 않은 첫 자리
   for (const r of regions) {
-    const from = Math.max(r.start - s.offset, 0);
+    const from = Math.max(r.start - s.offset, at);
     const to = Math.min(r.end - s.offset, s.ddl.length);
-    if (to > from) out = out.slice(0, from) + out.slice(from, to).replace(/[^\n]/g, ' ') + out.slice(to);
+    if (to <= from) continue;
+    pieces.push(s.ddl.slice(at, from), s.ddl.slice(from, to).replace(/[^\n]/g, ' '));
+    at = to;
   }
-  return out;
+  pieces.push(s.ddl.slice(at));
+  return pieces.join('');
 }
