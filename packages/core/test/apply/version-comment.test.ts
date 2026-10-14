@@ -56,6 +56,34 @@ describe('8.0·8.4 가 모두 건너뛰는 실행 주석 (80500 이상)', () => 
     expect(run('/*!99999 SET @a = 1; SET @b = 2 */;\nALTER TABLE t ADD c INT;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1064)') } });
     expectReExport(run('/*!99999 ALTER TABLE t ADD c INT /* 메모 */ */;'), 1, '/*!99999');
   });
+
+  // 리뷰 12회차 R12-3·Claude F3 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 건너뛰는 주석 안의 줄 주석은 mysql 클라이언트가 판과 설정에 따라 떼고 보내거나(8.0 기본) 그대로
+  // 보내(8.4 기본·--comments) MySQL 이 건너뛰는 글이 갈린다 — 첫 재현은 8.0 이 1064, 8.4 가 real_col·second_col 이고, 셋째는 8.0 이 a, 8.4 가 1064 다. 렉서는 줄 주석으로 읽어
+  // 닫는 '*/' 와 뒤 DDL 을 삼켰다 (11회차는 real_col 을 조용히 버렸고, 셋째는 a·b 였다)
+  it.each([
+    ['-- 가 닫는 */ 와 뒤 DDL 을 삼킨다 (Codex 재현)', '/*!99999 -- ignored */ ALTER TABLE t ADD real_col INT;\nALTER TABLE t ADD second_col INT;'],
+    ['# 도 같다', '/*!99999 # ignored */ ALTER TABLE t ADD real_col INT;\nALTER TABLE t ADD second_col INT;'],
+    ['# 줄 주석이 */ 를 담는다 (Claude 재현)', 'ALTER TABLE t ADD a INT /*!99999 # 나중에 */\n , ADD b INT */;'],
+    ['-- 줄 주석이 */ 를 담는다 (CRLF)', 'ALTER TABLE t ADD a INT /*!99999 -- todo */\r\n , ADD b INT */;'],
+    ['줄 주석이 다음 줄의 */ 앞에서 끝난다', 'ALTER TABLE t ADD a INT /*!99999 , ADD b INT --\tnote\n */;'],
+  ])('건너뛰는 실행 주석 안의 줄 주석은 RE_EXPORT 로 거부한다 — %s', (_name, script) => {
+    expectReExport(run(script), 1, '/*!99999', '줄 주석');
+  });
+
+  it('마지막 문장 뒤의 건너뛰는 주석 안에서 줄 주석이 DDL 을 삼켜도 거부한다', () => {
+    for (const end of ['', '\n', '\n*/\n']) {
+      const r = run(`ALTER TABLE t ADD a INT;\n/*!99999 -- x */ ALTER TABLE t ADD c INT;${end}`);
+      expect(r).toMatchObject({ ok: false, error: { index: 0, line: 2, reason: expect.stringContaining('줄 주석') } });
+      expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);
+    }
+    expect(columnsOf(run('ALTER TABLE t ADD a INT;\n/*!99999 */;\n/*!99999 x\n*/'))).toEqual(['id', 'a']);
+  });
+
+  it('줄 주석이 아닌 -- 와 건너뛰는 주석 밖의 줄 주석, 실행하는 주석 안의 줄 주석은 받는다', () => {
+    expect(columnsOf(run('ALTER TABLE t ADD a INT /*!99999 , ADD b INT --*/;'))).toEqual(['id', 'a']);
+    expect(columnsOf(run('ALTER TABLE t ADD a INT /*!99999 , ADD b INT */ -- 메모 */\n;'))).toEqual(['id', 'a']);
+    expect(columnsOf(run('ALTER TABLE t ADD a INT /*!40101 , ADD b INT -- 메모\n */;'))).toEqual(['id', 'a', 'b']);
+  });
 });
 
 describe('실행하는 실행 주석 (번호 없음, 80046 이하)', () => {
@@ -80,13 +108,14 @@ describe('서버 버전에 따라 실행 여부가 갈리는 실행 주석', () 
 });
 
 describe('문장 나누기와 렉서 (덤프 파서와 함께 쓴다)', () => {
-  it('splitForApply 는 splitDump 와 같은 문장에 원문 자리와 실행 주석 표지를 더한다', () => {
+  it('splitForApply 는 splitDump 와 같은 문장에 원문 자리와 실행 주석 표지를 더하고, 마지막 문장 뒤의 표지는 따로 둔다', () => {
     const text = "-- 머리\n/*!40101 SET NAMES utf8 */;\n/*!99999 ALTER TABLE t ADD x INT */;\nALTER TABLE t ADD y INT /*!90000 , ADD z INT */;\n/*!99999 */;";
-    const statements = splitForApply(text);
+    const { statements, trailing } = splitForApply(text);
     expect(statements.map(({ ddl, line }) => ({ ddl, line }))).toEqual(splitStatements(text));
     expect(statements.map((s) => [text.slice(s.offset, s.offset + 3), s.marks.map((m) => [text.slice(m.at, m.at + 3), m.digits])])).toEqual([
       ['SET', [['/*!', '40101']]], ['ALT', [['/*!', '99999']]], ['ALT', [['/*!', '90000']]],
     ]);
+    expect(trailing).toEqual({ marks: [{ at: text.lastIndexOf('/*!'), digits: '99999' }], spaces: [] });
   });
 
   it('렉서는 버전 번호와 상관없이 실행 주석의 내용을 토큰으로 읽는다 (덤프의 /*!80023 INVISIBLE */)', () => {

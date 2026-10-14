@@ -7,7 +7,7 @@
 // 번호가 다섯 자리가 아니면 거부한다: 다섯 자리보다 짧은 숫자는 MySQL 이 실행할 글로 읽고(/*!1 …), 여섯 자리는 8.0 이 앞 다섯 자리만 번호로 읽는데 8.4 는 뒤에 공백이
 // 오면 여섯 자리를 번호로 읽는다(/*!100000 … 은 8.0 1064, 8.4 는 건너뛴다). 렉서는 '/*!' 뒤의 숫자를 모두 표지로 떼고 내용은 번호와 상관없이 토큰으로 읽는다 —
 // 덤프 파서와 함께 쓰므로 그대로 두고, 문장 나누기가 알려 준 표지(ApplyStatement.marks)로 이 문장에서 MySQL 이 실행하는 글을 만든다
-import type { ApplyStatement, VersionMark } from '../parse-dump';
+import type { ApplyStatement, LexNotes, VersionMark } from '../parse-dump';
 import { isCreateRoutine } from './object-stmt';
 import { fail, RE_EXPORT } from './types';
 
@@ -46,15 +46,43 @@ function runs(m: VersionMark): boolean {
     + `8.4 는 판에 따라 실행합니다 (8.4.11 은 80411 까지) — ${RE_EXPORT}`);
 }
 
+// 8.0·8.4 가 모두 건너뛰는 표지인가 (다섯 자리 80500 이상) — 거부하지 않고 가른다
+const skippedByBoth = (m: VersionMark): boolean => m.digits.length === VERSION_DIGITS && Number(m.digits) >= FIRST_SKIPPED_BY_BOTH;
+
+// 표지 뒤 내용이 시작하는 원문 자리 ('/*!' 와 번호 다음)
+const contentStart = (m: VersionMark): number => m.at + '/*!'.length + m.digits.length;
+
 // 건너뛰는 실행 주석의 자리: 표지부터 첫 '*/' 까지 (MySQL 은 그 안의 따옴표를 보지 않는다). 문장 안에서 닫히지 않으면 — 구분자가 주석 안에 있어 mysql 클라이언트가 주석
-// 가운데서 문장을 끊었다 — MySQL 은 닫히지 않은 주석으로 1064 다. 그 안의 주석(MySQL 은 한 겹을 받는다)은 렉서와 끝을 다르게 읽을 수 있어 받지 않는다
+// 가운데서 문장을 끊었다 — MySQL 은 닫히지 않은 주석으로 1064 다. 그 안의 주석(MySQL 은 한 겹을 받는다)은 렉서와 끝을 다르게 읽을 수 있고, 줄 주석은 mysql 클라이언트가
+// 떼고 보내는지에 따라 건너뛰는 글이 갈려 받지 않는다 (lineCommentReason)
 function skippedRegion(script: string, s: ApplyStatement, m: VersionMark): Region {
-  const content = m.at + 3 + m.digits.length;
+  const content = contentStart(m);
   const close = script.indexOf('*/', content);
   const end = close + 2;
   if (close < 0 || end > s.offset + s.ddl.length) fail(`건너뛰는 실행 주석 /*!${m.digits} 가 문장 안에서 닫히지 않았습니다 (MySQL 1064)`);
-  if (script.slice(content, close).includes('/*')) fail(`건너뛰는 실행 주석 /*!${m.digits} 안의 주석은 받지 않습니다 — ${RE_EXPORT}`);
+  const skipped = script.slice(content, close);
+  if (skipped.includes('/*')) fail(`건너뛰는 실행 주석 /*!${m.digits} 안의 주석은 받지 않습니다 — ${RE_EXPORT}`);
+  if (LINE_COMMENT.test(skipped)) fail(lineCommentReason(m));
   return { start: m.at, end };
+}
+
+// 줄 주석의 시작: '#', 또는 공백·제어 문자가 뒤따르는 '--' (렉서·mysql 클라이언트와 같다). 건너뛰는 주석 안에서는 따옴표 안의 것도 함께 본다 (보수적)
+const LINE_COMMENT = /#|--[\x00-\x20\x7f]/;
+
+// 건너뛰는 실행 주석 안의 줄 주석 (리뷰 12회차 R12-3·Claude F3, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 서버는 첫 '*/' 까지 건너뛰지만 mysql 클라이언트는 '/*!' 안에서도
+// 줄 주석을 줄 끝까지 떼고 보내거나(8.0 기본) 그대로 보내(8.4 기본·--comments), 같은 스크립트가 판에 따라 1064 이거나 다른 DDL 을 실행한다. 렉서는 줄 주석으로 읽어 닫는
+// '*/' 와 뒤 DDL 을 삼킬 수 있다
+export const lineCommentReason = (m: VersionMark): string => `건너뛰는 실행 주석 /*!${m.digits} 안의 줄 주석('#'·'-- ')은 받지 않습니다 — mysql 클라이언트가 판과 설정(--comments)에 `
+  + `따라 줄 주석을 떼고 보내거나 그대로 보내 MySQL 이 건너뛰는 글이 달라집니다 (줄 주석이 닫는 '*/' 와 뒤 문장을 가릴 수 있습니다) — ${RE_EXPORT}`;
+
+// 마지막 문장 뒤(trailing)에서 줄 주석이 든 건너뛰는 실행 주석 (없으면 undefined) — 렉서는 그 줄 주석에서 닫는 '*/' 와 뒤 DDL 을 삼켜 문장으로 내지 않았을 수 있다. 그 밖의
+// 것은 MySQL 이 오류를 내도 앞 DDL 을 모두 적용한 뒤라 모델이 같아 받는다. 닫히지 않았으면 원문 끝까지 본다
+export function lineCommentAfterLast(script: string, trailing: LexNotes): VersionMark | undefined {
+  return trailing.marks.find((m) => {
+    const content = contentStart(m);
+    const close = script.indexOf('*/', content);
+    return skippedByBoth(m) && LINE_COMMENT.test(script.slice(content, close < 0 ? script.length : close));
+  });
 }
 
 // ddl 에서 regions(원문 자리 — 자리 순서이고 겹치지 않는다)에 든 글자를 공백으로 바꾼다. 줄바꿈은 남기고 길이는 그대로다 — 주석처럼 앞뒤 토큰을 가른다. 조각을 모아 한 번에
