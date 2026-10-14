@@ -10,7 +10,7 @@ import { alterTable, createIndex, dropIndexOn } from './alter-table';
 import { assertUtf8Session } from './client-charset';
 import { LongComment, longCommentReason } from './comment-length';
 import { assertClientDelimiters, assertCommandsReadByBoth } from './delimiter-command';
-import { assertHintsReadAsLexed, assertNoCommandInSkipped, hintCommandAfterLast } from './client-comment';
+import { assertCommentsReadAsLexed, assertHintsReadAsLexed, assertNoCommandInSkipped, hintCommandAfterLast } from './client-comment';
 import { assertBmpText, canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
 import { noOpHandler } from './no-op';
 import { createRoutine, dropRoutine, dropView, isCreateRoutine } from './object-stmt';
@@ -110,9 +110,12 @@ function applyStatement(st: State, s: ApplyStatement, script: string): boolean {
   assertCommandsReadByBoth(script, s.leading.commands); // DELIMITER 줄 앞의 클라이언트 버퍼 (리뷰 15회차 F1·F2)
   assertLeadingSpaces(script, s, leading);
   assertClientDelimiters(script, s.leading.commands); // 클라이언트가 다르게 읽는 DELIMITER 인자 (리뷰 15회차 후속)
-  assertHintsReadAsLexed(script, s.leading.hints, (at) => afterPrevious(script, at)); // 여러 줄 힌트·힌트 안의 '\' (리뷰 15회차 F4·후속)
+  const before = (at: number): string => (at < s.offset ? afterPrevious(script, at) : ''); // 문장 앞의 것은 그 줄을 밝힌다
+  assertHintsReadAsLexed(script, s.leading.hints, (at) => afterPrevious(script, at)); // 여러 줄 힌트·힌트 안의 '\'·'/*!' (리뷰 15회차 F4·후속)
+  assertCommentsReadAsLexed(script, s.leading.comments, (at) => afterPrevious(script, at)); // 일반 주석 안의 '/*' (리뷰 15회차 후속)
   const skipped = skippedComments(script, s); // 실행 주석의 버전 번호 (리뷰 11회차 R11-2)
-  assertHintsReadAsLexed(script, s.hints, (at) => (at < s.offset ? afterPrevious(script, at) : '')); // 문장 앞의 것은 그 줄을 밝힌다
+  assertHintsReadAsLexed(script, s.hints, before);
+  assertCommentsReadAsLexed(script, s.comments, before);
   const statement = executedText(s, skipped);
   assertSameBackslashMode(st, s.ddl, noBackslashEscapes);
   const written = tokenize(s.ddl, { noBackslashEscapes });

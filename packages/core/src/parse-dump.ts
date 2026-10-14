@@ -71,13 +71,14 @@ export interface Hint {
 
 // 원문의 한 구간에서 렉서가 알린 것: marks 는 렉서가 연 실행 주석 표지, spaces 는 렉서가 공백으로 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 R11-2·Claude F5),
 // closes 는 렉서가 실행 주석을 닫은 '*/' 의 원문 자리 (따옴표·주석 안의 것은 빠진다, 리뷰 13회차), nested 는 실행 주석 안에서 연 일반 주석 (리뷰 14회차 F1), hints 는 렉서가
-// 주석으로 건너뛴 힌트 (리뷰 15회차 F4 — 여러 줄 힌트를 본다)
+// 주석으로 건너뛴 힌트 (리뷰 15회차 F4 — 여러 줄 힌트를 본다), comments 는 실행 주석 밖의 일반 블록 주석 '/*' 의 원문 자리 (리뷰 15회차 후속 — 안의 '/*' 를 본다)
 export interface LexNotes {
   readonly marks: readonly VersionMark[];
   readonly spaces: readonly number[];
   readonly closes: readonly number[];
   readonly nested: readonly NestedComment[];
   readonly hints: readonly Hint[];
+  readonly comments: readonly number[];
 }
 
 // DELIMITER 줄 (리뷰 15회차 F1·F2): at 은 DELIMITER 단어의 원문 자리, from 은 그 앞 덩어리가 시작한 자리 (앞 구분자·DELIMITER 줄 바로 뒤, 스크립트 처음) — mysql 클라이언트는
@@ -157,6 +158,7 @@ class ChunkLog implements ChunkWatch {
   private closes: number[] = [];
   private inner: NestedComment[] = [];
   private hints: Hint[] = [];
+  private comments: number[] = [];
   private ends: number[] = [];
   private commands: CommandLine[] = [];
   private delimiter = ';'; // 지금 구분자 (힌트에 붙인다)
@@ -184,6 +186,10 @@ class ChunkLog implements ChunkWatch {
     this.hints.push({ at, delimiter: this.delimiter });
   }
 
+  commented(at: number): void {
+    this.comments.push(at);
+  }
+
   space(at: number): void {
     this.spaces.push(at);
   }
@@ -197,25 +203,27 @@ class ChunkLog implements ChunkWatch {
     this.delimiter = line.delimiter;
   }
 
-  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'nested' | 'hints' | 'leading'> {
+  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'nested' | 'hints' | 'comments' | 'leading'> {
     const [leadMarks, marks] = splitAt(this.marks, (m) => m.at, from);
     const [leadSpaces, spaces] = splitAt(this.spaces, (at) => at, from);
     const [leadCloses, closes] = splitAt(this.closes, (at) => at, from);
     const [leadNested, nested] = splitAt(this.inner, (n) => n.at, from);
     const [leadHints, hints] = splitAt(this.hints, (h) => h.at, from);
-    const leading = { marks: leadMarks, spaces: leadSpaces, closes: leadCloses, nested: leadNested, hints: leadHints, ends: this.ends, commands: this.commands };
+    const [leadComments, comments] = splitAt(this.comments, (at) => at, from);
+    const leading = { marks: leadMarks, spaces: leadSpaces, closes: leadCloses, nested: leadNested, hints: leadHints, comments: leadComments, ends: this.ends, commands: this.commands };
     this.marks = [];
     this.spaces = [];
     this.closes = [];
     this.inner = [];
     this.hints = [];
+    this.comments = [];
     this.ends = [];
     this.commands = [];
-    return { marks, spaces, closes, nested, hints, leading };
+    return { marks, spaces, closes, nested, hints, comments, leading };
   }
 
   rest(): LexNotes {
-    return { marks: this.marks, spaces: this.spaces, closes: this.closes, nested: this.inner, hints: this.hints };
+    return { marks: this.marks, spaces: this.spaces, closes: this.closes, nested: this.inner, hints: this.hints, comments: this.comments };
   }
 }
 

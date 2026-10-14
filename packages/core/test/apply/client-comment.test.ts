@@ -101,3 +101,46 @@ describe("힌트·건너뛰는 실행 주석 안의 '\\'", () => {
     expect(outcome(run(script))).toBe(expected);
   });
 });
+
+// 일반 주석 안의 '/*' (리뷰 15회차 후속, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 서버와 렉서는 일반 주석을 첫 '*/' 에서 닫는데, 클라이언트는 닫는 '*/' 와 겹친 '/*/' 의 '/*' 를
+// 새 주석의 시작으로 읽어 그 '*/' 를 놓치고, 주석 안의 '/*!'·'/*+' 는 그 뒤의 첫 '*/' 를 표지의 닫힘으로 보아 주석을 다음 '*/' 까지 이어 읽는다 — 8.0 은 그 글을 지우고(--skip-comments)
+// 8.4 는 서버에 그대로 보내 판에 따라 갈린다. 힌트 안의 '/*!' 도 그 뒤를 실행 주석으로 읽어 구분자에서 끊는다. 그 밖의 겹친 '/*' 는 클라이언트·서버·렉서가 같다
+describe("일반 주석·힌트 안의 '/*'", () => {
+  it.each([
+    ["닫는 */ 와 겹친 '/*/' (8.0 은 a 만, 8.4 는 a·b·c)", 'ALTER TABLE t ADD a INT /* x /*/ , ADD b INT;\nALTER TABLE t ADD c INT;\n', 1, 0, "'/*/'"],
+    ["'/*/*/' (8.0 은 a 만, 8.4 는 a·b·c)", 'ALTER TABLE t ADD a INT /*/*/, ADD b INT;\nALTER TABLE t ADD c INT;\n', 1, 0, "'/*/'"],
+    ["문장 앞 줄의 '/*/' (8.0 은 a 만, 8.4 는 a·b)", 'ALTER TABLE t ADD a INT;\n/* x /*/\nALTER TABLE t ADD b INT;\n', 2, 2, "'/*/'"],
+    ["주석 안의 '/*!' (8.0 은 a·c, 8.4 는 1064)", 'ALTER TABLE t ADD a INT /* x /*! y */ , ADD b INT */;\nALTER TABLE t ADD c INT;\n', 1, 0, "'/*!'·'/*+'"],
+    ["주석 안의 '/*+' (8.0 은 a·c, 8.4 는 1064)", 'ALTER TABLE t ADD a INT /* x /*+ y */ , ADD b INT */;\nALTER TABLE t ADD c INT;\n', 1, 0, "'/*!'·'/*+'"],
+    ["힌트 안의 '/*!' 뒤 구분자 (두 클라이언트 모두 1064)", 'ALTER TABLE t ADD a INT /*+ x /*! y; */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 1, 0, "힌트 /*+ 안의 '/*!'"],
+  ])('RE_EXPORT 로 거부한다 — %s', (_name, script, index, line, part) => {
+    const r = run(script);
+    expect(r).toMatchObject({ ok: false, error: { index } });
+    if (r.ok) return;
+    expect(r.error.reason).toContain(part);
+    if (line) expect(r.error.reason.startsWith(`앞 문장 뒤(줄 ${line})의 `), r.error.reason).toBe(true);
+    expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  });
+
+  // 두 클라이언트와 렉서가 같다 (실측)
+  it.each([
+    ["닫히지 않은 안의 '/*' (a·b·c)", 'ALTER TABLE t ADD a INT /* x /* y */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 'id,a,b,c / '],
+    ["첫 글자의 '/' (a·b·c)", 'ALTER TABLE t ADD a INT /*/ x */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 'id,a,b,c / '],
+    ["문장 앞 줄의 안의 '/*' (a·b)", 'ALTER TABLE t ADD a INT;\n/* x /* y */\nALTER TABLE t ADD b INT;\n', 'id,a,b / '],
+    ["둘째 줄의 안의 '/*' (a·b·c)", 'ALTER TABLE t ADD a INT /* x\n /* y */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 'id,a,b,c / '],
+    ["루틴 본문 주석 안의 '/*' (a·b·p)", ROUTINE('1; /* x /* y */ SELECT'), 'id,a,b / p'],
+    ["힌트 안의 '/*' (a·b·c)", 'ALTER TABLE t ADD a INT /*+ x /* y */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 'id,a,b,c / '],
+    ["힌트 안의 '/*!' 뒤에 아무것도 없다 (a·b·c)", 'ALTER TABLE t ADD a INT /*+ x /*! y */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 'id,a,b,c / '],
+    ["힌트 안의 '/*' 뒤 ';' (a·b·c)", 'ALTER TABLE t ADD a INT /*+ x /* y; */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 'id,a,b,c / '],
+  ])('받는다 — %s', (_name, script, expected) => {
+    expect(outcome(run(script))).toBe(expected);
+  });
+
+  it("안의 '/*' 뒤 남는 '*/' 는 두 클라이언트 모두 1064 다 (짝 없는 '*/')", () => {
+    for (const script of ['ALTER TABLE t ADD a INT /* x /* y */ , ADD b INT */;\n', 'ALTER TABLE t ADD a INT /*+ x /* y */, ADD b INT */;\n']) {
+      const r = run(script);
+      expect(r).toMatchObject({ ok: false, error: { index: 1 } });
+      expect(!r.ok && r.error.reason).toContain("짝 없는 '*/'");
+    }
+  });
+});

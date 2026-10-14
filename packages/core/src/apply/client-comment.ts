@@ -4,6 +4,8 @@
 //   (8.0 은 지우고 8.4 는 남긴다), '/*' 를 주석으로(8.0 은 지운다) 읽는다 ('/*+ 메모' 줄바꿈 'VIP 등급입니다; 삭제 금지 */' 는 두 클라이언트 모두 1064 다). 따옴표는 서버가 다중
 //   문장으로 같게 실행하는 때도 있지만 뒤의 DELIMITER 줄까지 문자열로 묶을 수 있어 함께 거부한다 (보수적)
 // - '\': '\g'·'\G' 는 거기서 문장을 끊어 보내고(1064), '\c' 는 버퍼를 비우고, '\.' 은 파일을 읽어 그 안의 DDL 을 실행하고, 모르는 명령('\j'·'\\')은 오류로 멈춘다. '\N' 만 그대로 둔다
+// - 일반 주석 안의 '/*': 닫는 '*/' 와 겹친 '/*/' 의 '/*' 를 새 주석의 시작으로 읽어 그 '*/' 를 놓치고, 안의 '/*!'·'/*+' 는 그 뒤의 첫 '*/' 를 표지의 닫힘으로 보아 주석을 다음 '*/'
+//   까지 이어 읽는다 — 8.0 은 그 글을 지우고(--skip-comments) 8.4 는 서버에 그대로 보내 판에 따라 갈린다. 힌트 안의 '/*!' 는 그 뒤를 실행 주석으로 읽는다 (구분자에서 끊는다)
 // 14회차까지는 모두 받았다. 마지막 문장 뒤의 것은 앞 DDL 을 모두 적용한 뒤라 '\' 만 본다 ('\.' 이 DDL 을 실행한다)
 import { containsWithin } from '../delimiter-search';
 import type { Token } from '../lexer';
@@ -20,7 +22,7 @@ const CLIENT_COMMAND = /\\[^N]/;
 export function assertHintsReadAsLexed(script: string, hints: readonly Hint[], where: (at: number) => string): void {
   for (const h of hints) {
     const end = hintEnd(script, h);
-    const reason = multilineReason(script, h, end) ?? commandReason(script, h.at, end);
+    const reason = multilineReason(script, h, end) ?? commandReason(script, h.at, end) ?? conditionalReason(script, h, end);
     if (reason) fail(`${where(h.at)}${reason}`);
   }
 }
@@ -48,6 +50,25 @@ function multilineReason(script: string, h: Hint, end: number): string | undefin
   return CLIENT_SPECIAL.test(script.slice(rest, end)) || containsWithin(script, h.delimiter, rest, end) ? MULTILINE_REASON : undefined;
 }
 
+// 힌트 안의 '/*!' 뒤(닫는 '*/' 앞까지)에 클라이언트가 실행 주석의 글로 달리 다루는 것이 있으면 그 까닭 — 클라이언트는 '/*!' 부터 힌트를 실행 주석으로 본다
+function conditionalReason(script: string, h: Hint, end: number): string | undefined {
+  const inner = script.slice(h.at + 3, end).indexOf('/*!');
+  if (inner < 0) return undefined;
+  const from = h.at + 3 + inner + '/*!'.length;
+  return CLIENT_SPECIAL.test(script.slice(from, end)) || containsWithin(script, h.delimiter, from, end) ? CONDITIONAL_REASON : undefined;
+}
+
+// 일반 블록 주석(comments — '/*' 의 원문 자리)을 클라이언트가 렉서·서버와 다르게 닫으면 거부한다: 닫는 '*/' 와 겹친 '/*/', 안의 '/*!'·'/*+'. where 는 거부 안내의 앞말. 주석마다
+// 그 안만 훑는다
+export function assertCommentsReadAsLexed(script: string, comments: readonly number[], where: (at: number) => string): void {
+  for (const at of comments) {
+    const close = script.indexOf('*/', at + 2);
+    if (close < 0) continue; // 닫지 않은 주석은 렉서가 먼저 거부한다
+    if (close > at + 2 && script[close - 1] === '/') fail(`${where(at)}${OVERLAP_REASON}`);
+    if (/\/\*[!+]/.test(script.slice(at + 2, close))) fail(`${where(at)}${MARKER_REASON}`);
+  }
+}
+
 // 힌트 안(닫는 '*/' 의 '*' 까지)의 클라이언트 명령
 const commandReason = (script: string, at: number, end: number): string | undefined => (CLIENT_COMMAND.test(script.slice(at + 3, end + 1)) ? HINT_COMMAND_REASON : undefined);
 
@@ -71,6 +92,12 @@ const MAX_DIGITS = 32; // 안내에 보이는 실행 주석 번호의 최대 길
 const CLIENT_COMMAND_TEXT = "mysql 클라이언트는 따옴표·일반 주석 밖의 '\\' 를 클라이언트 명령으로 읽어, '\\g'·'\\G' 는 거기서 문장을 끊어 보내고 '\\c' 는 버퍼를 비우며 '\\.' 은 "
   + "파일을 읽어 실행하고 모르는 명령은 오류로 멈춥니다 ('\\N' 만 그대로 둡니다)";
 const HINT_COMMAND_REASON = `힌트 /*+ 안의 '\\' 는 받지 않습니다 — ${CLIENT_COMMAND_TEXT} — ${RE_EXPORT}`;
+const CONDITIONAL_REASON = "힌트 /*+ 안의 '/*!' 뒤에 구분자·따옴표·주석('#'·'-- '·'/*')·'\\' 가 있습니다 — mysql 클라이언트는 힌트 안의 '/*!' 부터 그 힌트를 실행 주석으로 보아 "
+  + `그 자리에서 문장을 끊거나 문자열·주석을 열어 MySQL 이 1064 로 멈춥니다 (힌트 안에 '/*!' 를 쓰지 말아 주세요) — ${RE_EXPORT}`;
+const OVERLAP_REASON = "주석의 닫는 '*/' 앞에 '/' 가 붙어 있습니다('/*/') — mysql 클라이언트는 그 '/*' 를 새 주석의 시작으로 읽어 닫는 '*/' 를 놓치고 뒤 글을 주석으로 보아, 8.0 은 "
+  + `지우고 8.4 는 MySQL 에 그대로 보내 판에 따라 실행하는 글이 갈립니다 ('/' 와 '*/' 사이에 공백을 두어 주세요) — ${RE_EXPORT}`;
+const MARKER_REASON = "주석 안에 실행 주석·힌트 표지('/*!'·'/*+')가 있습니다 — mysql 클라이언트는 그 뒤의 첫 '*/' 를 표지의 닫힘으로 보고 주석을 다음 '*/' 까지 이어 읽어, 8.0 은 그 사이의 "
+  + `글을 지우고 8.4 는 MySQL 에 그대로 보내 판에 따라 실행하는 글이 갈립니다 — ${RE_EXPORT}`;
 const MULTILINE_REASON = "여러 줄에 걸친 힌트 /*+ 의 둘째 줄부터 구분자·따옴표·주석('#'·'-- '·'/*')·'\\' 가 있습니다 — mysql 클라이언트는 '/*+' 를 연 줄에서만 그 안을 힌트로 보고 "
   + '다음 줄부터는 힌트 밖의 글로 읽어, 그 자리에서 문장을 끊거나 문자열·주석을 열거나 클라이언트 명령을 실행해 MySQL 이 1064 로 멈추거나 판에 따라 다른 글을 실행합니다 '
   + `(힌트는 한 줄에 쓰고, 메모라면 '/*+' 대신 '/*' 로 써 주세요) — ${RE_EXPORT}`;
