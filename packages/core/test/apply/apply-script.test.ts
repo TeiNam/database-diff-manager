@@ -46,6 +46,10 @@ describe('applyScript — 문장 처리', () => {
   it.each([
     ['ALTER TABLE 2024_sales ADD COLUMN c INT;', '2024_sales'], ['ALTER TABLE t ADD COLUMN 4x INT;', '4x'], ['CREATE TABLE 2025_sales (id INT PRIMARY KEY);', '2025_sales'],
     ['CREATE TABLE s (id INT PRIMARY KEY, 1st INT);', '1st'], ['DROP TABLE 2024_sales;', '2024_sales'], ['ALTER TABLE t RENAME COLUMN id TO 1st;', '1st'], ['ALTER TABLE t ADD INDEX 1ix (id);', '1ix'],
+    // FK 컬럼 목록 (리뷰 10회차 Claude 참고 1): 공용 파서는 토큰 수만 보고 '식별자 목록 필요' 로 거부했다
+    ['ALTER TABLE t ADD COLUMN r INT, ADD FOREIGN KEY (6ref) REFERENCES t (id);', '6ref'], ['ALTER TABLE t ADD COLUMN r INT, ADD FOREIGN KEY (r) REFERENCES t (1st);', '1st'],
+    ['CREATE TABLE x (a INT, FOREIGN KEY (6ref) REFERENCES t (id));', '6ref'], ['ALTER TABLE t ADD COLUMN r INT, ADD CONSTRAINT fk FOREIGN KEY (r, 2nd) REFERENCES t (id, 3rd);', '2nd'],
+    ['CREATE TABLE x (a INT, b INT, CONSTRAINT fk FOREIGN KEY ix (a, b) REFERENCES t (id, 9z));', '9z'],
   ])('따옴표 없는 숫자 시작 이름 %s 는 백틱으로 감싸라고 안내한다', (sql, name) => {
     expect(run(sql)).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining(`숫자로 시작하는 이름(${name})은 백틱(\`)으로 감싸 주세요`) } });
   });
@@ -56,9 +60,15 @@ describe('applyScript — 문장 처리', () => {
     expect(!r.ok && r.error.reason).not.toContain('MySQL 1064');
   });
 
-  it('백틱으로 감싼 숫자 시작 이름은 받는다', () => {
+  it('백틱으로 감싼 숫자 시작 이름은 받는다 (FK 컬럼 목록도)', () => {
     expect(run('ALTER TABLE t ADD COLUMN `4x` INT, ADD INDEX `1ix` (id);\nCREATE TABLE `2025_sales` (id INT PRIMARY KEY, `1st` INT);')).toMatchObject({ ok: true, applied: 2 });
+    expect(run('CREATE TABLE `2025_sales` (`1st` INT PRIMARY KEY);\nCREATE TABLE c (`6ref` INT, FOREIGN KEY (`6ref`) REFERENCES `2025_sales` (`1st`));')).toMatchObject({ ok: true, applied: 2 });
   });
+
+  it.each(["ALTER TABLE t ADD COLUMN r INT, ADD FOREIGN KEY (x'0A') REFERENCES t (id);", "ALTER TABLE t ADD COLUMN r INT, ADD FOREIGN KEY (r) REFERENCES t (b'1');"])(
+    'FK 컬럼 목록의 16진수·비트 리터럴 %s 는 숫자 시작 이름 안내 없이 식별자가 필요하다고 거부한다', (sql) => {
+      expect(run(sql)).toMatchObject({ ok: false, error: { index: 1, reason: '식별자 필요 (줄 1)' } });
+    });
 
   // 지수 표기 기본값도 같다: 렉서가 1e3 을 숫자와 단어로 나눈다 — 지수 없는 숫자나 (실수·DECIMAL 컬럼이면) 따옴표로 감싼 값으로 쓰라고 안내한다
   it.each(['ALTER TABLE t ADD COLUMN d DOUBLE DEFAULT 1e3;', 'ALTER TABLE t ALTER COLUMN id SET DEFAULT 1e3;', 'CREATE TABLE s (id INT PRIMARY KEY, d DECIMAL(10,2) DEFAULT -1.5E3);'])(
