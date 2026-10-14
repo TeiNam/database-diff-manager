@@ -222,6 +222,7 @@ MySQL의 모든 검사를 재현하지는 않는다. 화면 안내와 이 문서
 | `unknown-session.ts` | 모르는 세션 값(SQL_MODE·FOREIGN_KEY_CHECKS)에 기대는 문장 거부 (3.2 모르는 세션 값) |
 | `version-comment.ts`·`unicode-space.ts` | 실행 주석의 버전 번호: 8.0·8.4가 모두 실행하는 것, 모두 건너뛰는 것, 판에 따라 갈리는 것(거부)을 가르고 이 문장에서 MySQL이 실행하는 글을 만든다 (3.1). 따옴표·주석 밖의 ASCII가 아닌 공백 거부 (3.2, 리뷰 11회차) |
 | `stored-call.ts`·`native-functions.ts` | 무시하는 문장 속 저장 함수 호출 찾기, MySQL 8.0/8.4 내장 함수 이름 목록과 공백·주석·`IGNORE_SPACE` 판정 (3.2) |
+| `comment-length.ts` | 컬럼·인덱스 1024자, 테이블 2048자를 넘는 COMMENT: 정의 파서가 던지고 세션 SQL_MODE에 맞는 안내(엄격하면 MySQL 오류 번호, 아니면 RE_EXPORT)로 바꾼다 (4.1·3.2, 리뷰 11회차) |
 | `keys.ts` | 인덱스·FK 추가·삭제·자동 이름, FK 자동 인덱스, 문장 끝 검사(4.1), MySQL 키 순서 |
 | `alter-table.ts` | ALTER TABLE 절 처리(단계별 적용, 연쇄 변경), `CREATE INDEX … ON`·`DROP INDEX … ON` |
 | `table-stmt.ts` | CREATE/DROP/RENAME TABLE |
