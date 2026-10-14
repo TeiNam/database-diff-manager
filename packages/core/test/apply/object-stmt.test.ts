@@ -186,6 +186,15 @@ describe('CREATE FUNCTION·PROCEDURE', () => {
     expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);
   });
 
+  it('DELIMITER 줄 뒤의 주석·따옴표 인자도 mysql 클라이언트처럼 읽어 뒤 문장이 루틴에 딸려 가지 않는다 (리뷰 1회차 I-2)', () => {
+    for (const head of ['DELIMITER $$ -- 프로시저 시작', 'DELIMITER $$ # 프로시저', "DELIMITER '$$'"]) {
+      const r = ok(`${head}\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\nEND$$\nDELIMITER ;\nALTER TABLE orders ADD COLUMN nick VARCHAR(20);\nDROP TABLE order_audit;\n`);
+      expect(r.applied, head).toBe(3);
+      expect(r.model.routines.find((x) => x.name === 'p')!.body, head).toBe('BEGIN\n  SELECT 1;\nEND');
+      expect(r.model.tables.map((t) => `${t.name}:${t.columns.at(-1)!.name}`), head).toEqual(['orders:nick']);
+    }
+  });
+
   it('루틴 하나인 덩어리는 그대로 받는다 (라벨·끝 주석·문자열 속 ;)', () => {
     const r = ok([
       'DELIMITER //',
