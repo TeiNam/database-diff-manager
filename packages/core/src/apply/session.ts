@@ -219,11 +219,13 @@ function notAssignment(a: Cursor): string {
   return `'변수 = 값' 꼴이 아닌 SET 은 받지 않습니다: SET ${a.src.slice(a.toks[0].s, end.e)} … — ${RE_EXPORT}`;
 }
 
-// @@x 로 읽은 세션 값 (모르는 세션 값이면 그 까닭을 그대로 넘긴다). time_zone 등 그 밖의 값은 쓰지 않는다 — 되돌린 time_zone 은 UTC 로 보지 않는다
+// @@x 로 읽은 세션 값 (모르는 세션 값이면 그 까닭을 그대로 넘긴다). 이 도구가 값을 따라가지 않는 변수(time_zone — UTC 리터럴로 정했는지만 기억한다, unique_checks·
+// sql_notes·init_connect …)는 모르는 값이다 (리뷰 11회차 R11-3·Claude F6): '' 로 지어내면 'SET sql_mode = @@unique_checks'(MySQL 은 정수 1 이라 REAL_AS_FLOAT)·
+// 한정하지 않은 전역 전용 변수 'SET sql_mode = @@init_connect' 뒤의 루틴이 틀린 SQL_MODE 를 기억한다. 값을 버리는 변수에 옮기면 지금처럼 받는다
 function current(st: State, name: string): SessionValue {
   if (name === 'foreign_key_checks') return st.fkChecksUnknown !== undefined ? { unknown: st.fkChecksUnknown } : st.fkChecks ? '1' : '0';
   if (name === 'sql_mode') return st.sqlModeUnknown !== undefined ? { unknown: st.sqlModeUnknown } : st.sqlMode;
-  return '';
+  return { unknown: `시스템 변수 @@${name} 의 값은 이 도구가 따라가지 않아 알 수 없습니다` };
 }
 
 // MySQL 8.0.46 실측: 단어 ON·OFF·TRUE·FALSE(대소문자 무관)와 숫자 0·1 을 받고, 따옴표를 친 'TRUE'·'FALSE'·'0'·'1' 은 1231 로 거부한다 (받아도 해가 없어 함께 받는다).

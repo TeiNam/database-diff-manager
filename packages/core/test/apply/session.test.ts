@@ -387,9 +387,13 @@ describe('세션 time_zone 과 TIMESTAMP 리터럴 기본값', () => {
     "SET @@session.time_zone = 'UTC';", "SET LOCAL time_zone = 'gmt';", 'SET time_zone = UTC;', "SET NAMES utf8mb4, time_zone = '+00:00';", "SET time_zone = '+09:00'; SET time_zone = '+00:00';",
   ];
   const OTHER_ZONES = [
-    "SET time_zone = '+09:00';", "SET @@session.time_zone = 'SYSTEM';", "SET LOCAL TIME_ZONE = 'Asia/Seoul';", "SET time_zone = '+00:30';", 'SET @@time_zone = @@time_zone;',
+    "SET time_zone = '+09:00';", "SET @@session.time_zone = 'SYSTEM';", "SET LOCAL TIME_ZONE = 'Asia/Seoul';", "SET time_zone = '+00:30';",
     "SET GLOBAL time_zone = '+00:00';", "SET time_zone = '+00:00'; SET time_zone = DEFAULT;", "SET @tz = '+00:00'; SET time_zone = @tz;",
-    "/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */; /*!40103 SET TIME_ZONE='+00:00' */; /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;",
+  ];
+  // @@time_zone 으로 되돌린 시간대: 이 도구는 time_zone 의 값을 따라가지 않아 @@time_zone 은 모르는 값이고, 안내는 그 값으로 정한 SET 을 밝힌다 (리뷰 11회차 R11-3) — [시간대 문장, 정한 SET]
+  const UNKNOWN_ZONES: [string, string][] = [
+    ['SET @@time_zone = @@time_zone;', 'SET @@time_zone = @@time_zone'],
+    ["/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */; /*!40103 SET TIME_ZONE='+00:00' */; /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;", 'SET TIME_ZONE=@OLD_TIME_ZONE'],
   ];
   // [문장, 테이블, 컬럼, 모델에 남는 기본값]
   const LITERALS: [string, string, string, string][] = [
@@ -418,6 +422,13 @@ describe('세션 time_zone 과 TIMESTAMP 리터럴 기본값', () => {
 
   it.each(OTHER_ZONES.flatMap((zone) => LITERALS.map(([stmt]) => [zone, stmt])))('%s 뒤의 %s 는 RE_EXPORT 로 거부한다', (zone, stmt) => {
     expectUnknownZone(run(`${zone}\n${stmt}`), statementCount(zone) + 1);
+  });
+
+  it.each(UNKNOWN_ZONES.flatMap(([zone, set]) => LITERALS.map(([stmt]) => [zone, set, stmt])))('%s 뒤의 %s 문장이 정한 시간대에서 %s 는 RE_EXPORT 로 거부한다', (zone, set, stmt) => {
+    const r = run(`${zone}\n${stmt}`);
+    expect(r).toMatchObject({ ok: false, error: { index: statementCount(zone) + 1, reason: expect.stringContaining(`앞의 \`${set}\` 문장이 세션 시간대를 알 수 없는 값으로 정해`) } });
+    if (!r.ok) expect(r.error.reason).toContain('시스템 변수 @@time_zone 의 값은 이 도구가 따라가지 않아 알 수 없습니다');
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
   });
 
   it('거부 안내는 스크립트를 고치라고 하지 않는다 — 스크립트는 이미 서버 시간대로 실행됐다', () => {

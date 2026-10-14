@@ -165,3 +165,40 @@ describe('모르는 세션 FOREIGN_KEY_CHECKS', () => {
     expectRejected(run(`SET FOREIGN_KEY_CHECKS = @@global.foreign_key_checks;\n${MISSING}`), 2, CHECKED, '서버 변수 값(@@global·@@persist 의 foreign_key_checks)은 알 수 없습니다');
   });
 });
+
+// 리뷰 11회차 R11-3·Claude F6: 이 도구가 값을 따라가지 않는 시스템 변수(@@init_connect·@@unique_checks·@@sql_notes·@@time_zone …)를 읽으면 '' 가 아니라 모르는 값이다.
+// 한정하지 않은 @@init_connect 는 전역 값을 읽고(전역 전용 변수), @@unique_checks 는 정수 1 이라 sql_mode 가 REAL_AS_FLOAT 가 된다 — 지어낸 '' 로 정하면 루틴의 SQL_MODE 가 틀린다
+describe('추적하지 않는 시스템 변수 읽기', () => {
+  const PROC = 'CREATE PROCEDURE p() SELECT 1;';
+  const UNTRACKED = '시스템 변수 @@init_connect 의 값은 이 도구가 따라가지 않아 알 수 없습니다';
+
+  it('R11-3: SET GLOBAL init_connect 뒤 @@init_connect 로 정한 sql_mode 는 모르는 값이라 뒤 루틴을 거부한다', () => {
+    expectRejected(run(`SET GLOBAL init_connect='STRICT_TRANS_TABLES';\nSET sql_mode=@@init_connect;\n${PROC}`), 3, '앞의 `SET sql_mode=@@init_connect` 문장이', UNTRACKED);
+  });
+
+  it.each([
+    'SET sql_mode = @@init_connect;', 'SET SESSION sql_mode = @@init_connect;', 'SET LOCAL sql_mode = @@init_connect;', 'SET @@sql_mode = @@init_connect;',
+    'SET @@SESSION.sql_mode = @@init_connect;', 'SET @@LOCAL.sql_mode = @@init_connect;', 'SET @a = @@init_connect;\nSET @b = @a;\nSET sql_mode = @b;',
+    'SET @a = @@session.init_connect;\nSET SESSION sql_mode = @a;',
+  ])('%s 뒤의 루틴은 거부하고, 그 SET 과 SQL_MODE 에 기대지 않는 문장은 받는다', (set) => {
+    const at = set.split('\n').length + 1;
+    expectRejected(run(`${set}\n${PROC}`), at, UNTRACKED);
+    expect(run(`${set}\nALTER TABLE t ADD COLUMN y INT;`)).toMatchObject({ ok: true, applied: 1 });
+  });
+
+  it('@@unique_checks·@@sql_notes 를 sql_mode·FOREIGN_KEY_CHECKS 에 옮겨도 모르는 값이다 (Claude F6)', () => {
+    expectRejected(run(`SET sql_mode = @@unique_checks;\n${PROC}`), 2, '시스템 변수 @@unique_checks 의 값은 이 도구가 따라가지 않아 알 수 없습니다');
+    expectRejected(run(`SET @x = @@sql_notes;\nSET sql_mode = @x;\n${PROC}`), 3, '사용자 변수 @x 에 앞의 `SET @x = @@sql_notes` 문장이 알 수 없는 값을 넣었습니다');
+    const fk = run('SET FOREIGN_KEY_CHECKS = @@unique_checks;\nALTER TABLE t ADD FOREIGN KEY (v) REFERENCES missing (id);');
+    expectRejected(fk, 2, '세션 FOREIGN_KEY_CHECKS 를 알 수 없습니다', '@@unique_checks');
+  });
+
+  it('@@time_zone 도 값을 따라가지 않는다: 되돌린 시간대는 UTC 로 보지 않고 그 SET 을 밝혀 거부한다', () => {
+    const r = run("SET time_zone = '+00:00';\nSET @tz = @@time_zone;\nSET time_zone = @tz;\nALTER TABLE t ADD ts TIMESTAMP NULL DEFAULT '2020-01-01 00:00:00';");
+    expectRejected(r, 4, '앞의 `SET time_zone = @tz` 문장이 세션 시간대를 알 수 없는 값으로 정해', '@@time_zone');
+  });
+
+  it('값을 버리는 세션 변수에 옮기는 것은 지금처럼 받는다', () => {
+    expect(run('SET unique_checks = @@sql_notes, @@session.sql_notes = @@init_connect;\nALTER TABLE t ADD COLUMN y INT;')).toMatchObject({ ok: true, applied: 1 });
+  });
+});
