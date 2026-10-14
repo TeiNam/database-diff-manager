@@ -168,6 +168,34 @@ describe('CREATE FUNCTION·PROCEDURE', () => {
     expect(off.characteristics.comment).toBe('C:\new');
   });
 
+  // mysql 클라이언트는 구분자 덩어리를 다중 문장으로 보내고 서버는 루틴 뒤 문장을 따로 실행한다 (routine-body.ts). 덩어리 전체를 루틴 하나로 읽으면
+  // 뒤 DDL 이 본문에 들어가 조용히 사라지므로, 덩어리에 루틴 하나만 있지 않으면 받지 않는다 (리뷰 1회차 I-1·F1)
+  it.each([
+    ['DELIMITER ;; 를 되돌리지 않음', 'DELIMITER ;;\nCREATE FUNCTION f() RETURNS INT RETURN 1; ALTER TABLE orders ADD c INT;\n'],
+    ['DELIMITER ;; 를 되돌리지 않음 (DETERMINISTIC)', 'DELIMITER ;;\nCREATE FUNCTION f() RETURNS INT DETERMINISTIC RETURN 1; ALTER TABLE orders ADD c INT;'],
+    ['구분자 앞에 다른 문장', 'DELIMITER //\nCREATE FUNCTION f() RETURNS INT RETURN 1; DROP TABLE orders;\n//\nDELIMITER ;\n'],
+    ['구분자 앞 다음 줄에 다른 문장', 'DELIMITER //\nCREATE FUNCTION f() RETURNS INT RETURN 1;\nDROP TABLE orders;\n//\nDELIMITER ;\n'],
+    ['BEGIN … END 뒤에 다른 문장', 'DELIMITER ;;\nCREATE PROCEDURE p() BEGIN SELECT 1; END; ALTER TABLE orders ADD c INT;\n'],
+    ['BEGIN … END 뒤에 다른 문장 ($$)', 'DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END; ALTER TABLE orders ADD c INT;\n'],
+    ['한 덩어리에 루틴 둘', 'DELIMITER //\nCREATE FUNCTION f() RETURNS INT DETERMINISTIC RETURN 1;\nCREATE FUNCTION g() RETURNS INT DETERMINISTIC RETURN 2;\n//\nDELIMITER ;\n'],
+    ["mysql 클라이언트 명령 '\\g' 로 끊은 뒤 문장", 'CREATE FUNCTION f() RETURNS INT RETURN 1\\g ALTER TABLE orders ADD c INT;'],
+    ['IF NOT EXISTS 로 이미 있는 루틴', 'DELIMITER ;;\nCREATE FUNCTION IF NOT EXISTS tax(a INT) RETURNS INT RETURN a; DROP TABLE orders;\n'],
+  ])('구분자 덩어리에 루틴 하나만 받는다: %s', (_name, script) => {
+    const r = apply(script);
+    expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('루틴 하나') } });
+    expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);
+  });
+
+  it('루틴 하나인 덩어리는 그대로 받는다 (라벨·끝 주석·문자열 속 ;)', () => {
+    const r = ok([
+      'DELIMITER //',
+      "CREATE PROCEDURE sp_l() lbl: BEGIN SELECT ';'; END lbl //",
+      'CREATE FUNCTION fn_c2() RETURNS INT DETERMINISTIC RETURN 1; -- 끝\n//',
+      'DELIMITER ;',
+    ].join('\n'));
+    expect(['sp_l', 'fn_c2'].map((n) => r.model.routines.find((x) => x.name === n)!.body)).toEqual(["lbl: BEGIN SELECT ';'; END lbl", 'RETURN 1; -- 끝']);
+  });
+
   it('isCreateRoutine: FUNCTION·PROCEDURE 만 (DEFINER 가 있어도, 소문자여도) 루틴 생성문으로 본다', () => {
     for (const ddl of ['CREATE FUNCTION f() RETURNS INT RETURN 1', "create definer = 'a'@'b' procedure p() select 1", 'CREATE\n  PROCEDURE p() SELECT 1']) expect(isCreateRoutine(ddl), ddl).toBe(true);
     for (const ddl of ['CREATE TABLE function (a INT)', 'CREATE AGGREGATE FUNCTION f RETURNS INT SONAME "x.so"', 'CREATE FUNCTIONS_X', 'CREATE VIEW v AS SELECT 1', 'DROP FUNCTION f']) expect(isCreateRoutine(ddl), ddl).toBe(false);
