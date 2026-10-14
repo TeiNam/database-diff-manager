@@ -292,7 +292,27 @@ describe('문장 없이 끝난 덩어리의 실행 주석', () => {
     const r = run('ALTER TABLE t ADD a INT;\nDELIMITER ;; /*!99999\nALTER TABLE t ADD c INT;;\n*/ ALTER TABLE t ADD d INT;;\nDELIMITER ;');
     expect(r).toMatchObject({ ok: false, error: { index: 3, line: 4 } });
   });
+
+  // 리뷰 14회차 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 버퍼가 비었을 때만 DELIMITER 줄을 명령으로 읽는다 (8.4 는 버퍼가 공백·블록 주석뿐일 때도 — 실행 주석도
+  // 블록 주석으로 보고 버린다). 구분자 없이 그 앞에 둔 실행 주석은 8.0 클라이언트가 버퍼에 남겨 DELIMITER 줄을 문장의 글로 보내 1064 이고, 8.4 클라이언트는 그 주석을 버리고 뒤
+  // 루틴·ALTER 를 실행한다 (뒤에 줄 주석을 두면 8.4 도 1064). 판에 따라 갈려 거부한다 — 13회차까지는 받았다. ';' 로 끝낸 것은 두 클라이언트 모두 받는다
+  it.each([
+    ['실행하는 주석', 'ALTER TABLE t ADD a INT;\n/*!40101 */\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;\nALTER TABLE t ADD b INT;', 2, 2],
+    ['건너뛰는 주석', 'ALTER TABLE t ADD a INT;\n/*!99999 */\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;\nALTER TABLE t ADD b INT;', 2, 2],
+    ['DELIMITER 줄 사이', 'ALTER TABLE t ADD a INT;\nDELIMITER ;;\n/*!99999 */\n\nDELIMITER $$\nCREATE PROCEDURE p() SELECT 1$$\nDELIMITER ;\nALTER TABLE t ADD b INT;', 2, 3],
+    ['뒤에 줄 주석 (두 클라이언트 모두 1064)', 'ALTER TABLE t ADD a INT;\n/*!80400 */ -- memo\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;\nALTER TABLE t ADD b INT;', 2, 2],
+    ['스크립트 맨 앞', '/*!40101 */\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;', 1, 1],
+  ])('구분자 없이 실행 주석 바로 뒤에 둔 DELIMITER 줄은 RE_EXPORT 로 거부한다 — %s', (_name, script, index, line) => {
+    expectReExport(run(script), index, `앞 문장 뒤(줄 ${line})의 실행 주석 /*!`, 'DELIMITER 줄');
+  });
+
+  it("';' 로 끝낸 실행 주석 뒤의 DELIMITER 줄은 받는다 (넷 모두 a·b 와 루틴 p)", () => {
+    const r = run('ALTER TABLE t ADD a INT;\n/*!40101 */;\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;\nALTER TABLE t ADD b INT;');
+    expect(columnsOf(r)).toEqual(['id', 'a', 'b']);
+    expect(r.ok && r.model.routines.map((x) => x.name)).toEqual(['p']);
+  });
 });
+
 
 // 리뷰 14회차 F1 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 '/*!' 를 연 줄에서 그 뒤에 연 일반 주석을 둘째 '*/' 까지 주석으로 보고, 8.0 기본(--skip-comments)은
 // 그 글을 지우고 보낸다 (8.4 기본은 그대로 보낸다). 서버와 렉서는 첫 '*/' 에서 닫아 같은 스크립트가 클라이언트에 따라 다른 DDL 을 실행한다 — 문장 안의 첫째는 8.0 이 a·b·d·e,
