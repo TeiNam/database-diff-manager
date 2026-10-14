@@ -10,7 +10,7 @@ import { alterTable, createIndex, dropIndexOn } from './alter-table';
 import { assertUtf8Session } from './client-charset';
 import { LongComment, longCommentReason } from './comment-length';
 import { assertClientDelimiters, assertCommandsReadByBoth } from './delimiter-command';
-import { assertSingleLineHints } from './multiline-hint';
+import { assertHintsReadAsLexed, assertNoCommandInSkipped, hintCommandAfterLast } from './client-comment';
 import { assertBmpText, canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
 import { noOpHandler } from './no-op';
 import { createRoutine, dropRoutine, dropView, isCreateRoutine } from './object-stmt';
@@ -62,7 +62,8 @@ export function applyScript(base: SchemaModel, script: string, opts: ApplyOption
       throw e;
     }
   }
-  const hidden = hiddenAfterLast(text, split.trailing); // 마지막 문장 뒤에서 렉서가 뒤 DDL 을 삼켰을 수 있는 실행 주석 (리뷰 12회차 R12-3·13회차 F2)
+  // 마지막 문장 뒤에서 렉서가 뒤 DDL 을 삼켰을 수 있는 실행 주석 (리뷰 12회차 R12-3·13회차 F2)과 클라이언트 명령이 든 힌트 (리뷰 15회차 후속 — '\.' 이 DDL 을 실행한다)
+  const hidden = hiddenAfterLast(text, split.trailing) ?? hintCommandAfterLast(text, split.trailing.hints);
   if (hidden) return hiddenFailure(text, hidden, split.statements.length > 0);
   if (applied === 0) return failure(0, 1, '', '적용할 DDL 문장이 없습니다');
   return { ok: true, model: st.model, applied, renames: collectRenames(st), defaults };
@@ -109,12 +110,13 @@ function applyStatement(st: State, s: ApplyStatement, script: string): boolean {
   assertCommandsReadByBoth(script, s.leading.commands); // DELIMITER 줄 앞의 클라이언트 버퍼 (리뷰 15회차 F1·F2)
   assertLeadingSpaces(script, s, leading);
   assertClientDelimiters(script, s.leading.commands); // 클라이언트가 다르게 읽는 DELIMITER 인자 (리뷰 15회차 후속)
-  assertSingleLineHints(script, s.leading.hints, (at) => afterPrevious(script, at)); // 여러 줄 힌트 (리뷰 15회차 F4)
+  assertHintsReadAsLexed(script, s.leading.hints, (at) => afterPrevious(script, at)); // 여러 줄 힌트·힌트 안의 '\' (리뷰 15회차 F4·후속)
   const skipped = skippedComments(script, s); // 실행 주석의 버전 번호 (리뷰 11회차 R11-2)
-  assertSingleLineHints(script, s.hints, (at) => (at < s.offset ? afterPrevious(script, at) : '')); // 문장 앞의 것은 그 줄을 밝힌다
+  assertHintsReadAsLexed(script, s.hints, (at) => (at < s.offset ? afterPrevious(script, at) : '')); // 문장 앞의 것은 그 줄을 밝힌다
   const statement = executedText(s, skipped);
   assertSameBackslashMode(st, s.ddl, noBackslashEscapes);
   const written = tokenize(s.ddl, { noBackslashEscapes });
+  assertNoCommandInSkipped(script, s, written, skipped); // 건너뛰는 실행 주석 안의 '\' (리뷰 15회차 후속)
   assertNoStrayClose(s, written); // 짝 없는 '*/' — applyTokens 는 문장 끝의 '*/' 를 감싼 주석의 닫힘으로 뗀다 (리뷰 14회차)
   assertModeIndependentText(st, s.ddl, written); // 세션 SQL_MODE 를 모르면 모드에 따라 달리 읽히는 백슬래시·큰따옴표 (리뷰 10회차)
   const tokens = statement === s.ddl ? written : tokenize(statement, { noBackslashEscapes });

@@ -53,3 +53,51 @@ describe('둘째 줄부터 mysql 클라이언트가 달리 읽는 글이 든 여
     expect(outcome(run(script))).toBe(expected);
   });
 });
+
+// 힌트·건너뛰는 실행 주석 안의 '\' (리뷰 15회차 후속, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 클라이언트는 따옴표와 일반 주석 밖이면 힌트·실행 주석 안에서도 '\' 를 클라이언트 명령으로
+// 읽는다 — '\g'·'\G' 는 거기서 문장을 끊어 보내 1064, '\c' 는 버퍼를 비우고, 모르는 명령('\j'·'\\')은 오류로 멈추며, '\.' 은 파일을 읽어 그 안의 DDL 을 실행한다. '\N' 만 그대로 둔다.
+// 렉서는 힌트를 주석으로, 건너뛰는 실행 주석은 지울 글로 보아 14회차까지는 받았다 (마지막 문장 뒤의 힌트도 '\.' 이 DDL 을 실행해 본다)
+describe("힌트·건너뛰는 실행 주석 안의 '\\'", () => {
+  it.each([
+    ["'\\g' (두 클라이언트 모두 1064)", 'ALTER TABLE t ADD a INT /*+ \\g */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 1, 0],
+    ["'\\G' (1064)", 'ALTER TABLE t ADD a INT /*+ \\G */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 1, 0],
+    ["'\\c' (버퍼를 비워 1064)", 'ALTER TABLE t ADD a INT /*+ \\c */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 1, 0],
+    ["모르는 명령 '\\j' (오류로 멈춘다)", 'ALTER TABLE t ADD a INT /*+ \\j */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 1, 0],
+    ["'\\\\' (오류로 멈춘다)", 'ALTER TABLE t ADD a INT /*+ \\\\ */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 1, 0],
+    ["루틴 본문 힌트의 '\\g' (a 뒤 1064)", ROUTINE('/*+ \\g */'), 2, 0],
+    ["문장 없는 덩어리 힌트의 '\\g' (a 뒤 1064)", 'ALTER TABLE t ADD a INT;\n/*+ \\g */;\nALTER TABLE t ADD b INT;\n', 2, 2],
+  ])('힌트 안의 것은 RE_EXPORT 로 거부한다 — %s', (_name, script, index, line) => {
+    const r = run(script);
+    expect(r).toMatchObject({ ok: false, error: { index } });
+    if (r.ok) return;
+    expect(r.error.reason.startsWith(line ? `앞 문장 뒤(줄 ${line})의 힌트 /*+ 안` : '힌트 /*+ 안'), r.error.reason).toBe(true);
+    expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  });
+
+  it.each([
+    ["'\\g' (1064)", '/*!99999 \\g */ ALTER TABLE t ADD a INT;\nALTER TABLE t ADD b INT;\n', 1],
+    ["'\\c' (1064)", '/*!99999 \\c */;\nALTER TABLE t ADD a INT;\n', 1],
+    ["파일을 읽는 '\\.' (그 안의 ALTER 를 실행한다)", 'ALTER TABLE t ADD a INT;\n/*!99999 \\. /tmp/x.sql\n*/;\n', 2],
+  ])('건너뛰는 실행 주석 안의 것도 RE_EXPORT 로 거부한다 — %s', (_name, script, index) => {
+    const r = run(script);
+    expect(r).toMatchObject({ ok: false, error: { index } });
+    expect(!r.ok && r.error.reason).toContain("건너뛰는 실행 주석 /*!99999 안의 '\\'");
+    expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);
+  });
+
+  it("마지막 문장 뒤 힌트의 파일을 읽는 '\\.' 도 거부하고 그 줄을 밝힌다 (그 파일의 ALTER 를 실행한다)", () => {
+    const r = run('ALTER TABLE t ADD a INT;\n/*+ \\. /tmp/x.sql\n*/\n');
+    expect(r).toMatchObject({ ok: false, error: { index: 0, line: 2 } });
+    expect(!r.ok && r.error.reason.startsWith('마지막 문장 뒤(줄 2)의 힌트 /*+ 안')).toBe(true);
+    expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);
+  });
+
+  // 두 클라이언트 모두 렉서와 같다 (실측): '\N' 은 그대로 두고, 일반 주석 안의 '\' 는 읽지 않는다
+  it.each([
+    ["힌트 안의 '\\N'", 'ALTER TABLE t ADD a INT /*+ \\N */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 'id,a,b,c / '],
+    ["일반 주석 안의 '\\g'", 'ALTER TABLE t ADD a INT /* \\g */, ADD b INT;\nALTER TABLE t ADD c INT;\n', 'id,a,b,c / '],
+    ["건너뛰는 실행 주석 안의 '\\N'", '/*!99999 \\N */ ALTER TABLE t ADD a INT;\nALTER TABLE t ADD b INT;\n', 'id,a,b / '],
+  ])('받는다 — %s', (_name, script, expected) => {
+    expect(outcome(run(script))).toBe(expected);
+  });
+});

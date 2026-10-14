@@ -34,7 +34,7 @@ interface Place {
 const IN_STATEMENT: Place = { where: () => '', until: '문장 안에서' };
 const beforeStatement = (script: string, until: string): Place => ({ where: (at) => afterPrevious(script, at), until });
 
-// 문장 앞 덩어리의 거부 안내 앞말: 그 자리의 줄을 밝힌다 (delimiter-command.ts·multiline-hint.ts 도 쓴다)
+// 문장 앞 덩어리의 거부 안내 앞말: 그 자리의 줄을 밝힌다 (delimiter-command.ts·client-comment.ts 도 쓴다)
 export const afterPrevious = (script: string, at: number): string => `앞 문장 뒤(줄 ${lineOf(script, at)})의 `;
 
 // 이 문장의 덩어리에서 MySQL 이 건너뛰는 실행 주석의 자리. 실행 여부가 버전에 따라 갈리면 거부하고, 실행하는 주석이 문장 끝까지 닫히지 않았으면 1064 다 (assertRunsClosed).
