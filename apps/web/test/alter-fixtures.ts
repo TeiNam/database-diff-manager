@@ -1,3 +1,5 @@
+import { screen } from '@testing-library/react';
+import type userEvent from '@testing-library/user-event';
 import type { PreviewBase, VersionSummary } from '../src/api/types';
 import { mockApi } from './render';
 
@@ -32,3 +34,27 @@ export const SAVED = { status: 'ok', versionId: 10, versionNo: 2, applied: 1, ch
 // 기준 버전 id 로 간 ALTER 요청의 본문들 (보낸 순서)
 export const alterBodies = (calls: ReturnType<typeof mockApi>, id: number) =>
   calls.filter((c) => c.url === `/api/versions/${id}/alter`).map((c) => JSON.parse(String(c.init.body)));
+
+// 대화상자의 칸·단추와 미리보기 한 번 (스크립트를 지우고 다시 써서 미리보기 결과가 나올 때까지)
+export type User = ReturnType<typeof userEvent.setup>;
+export const SCRIPT = 'ALTER TABLE a ADD b INT;';
+export const editor = () => screen.getByLabelText('ALTER 스크립트');
+export const previewButton = () => screen.getByRole('button', { name: '미리보기' });
+export const saveButton = () => screen.getByRole('button', { name: '저장' });
+export const charsetField = () => screen.getByLabelText('스키마 기본 문자셋');
+export const baseSelect = () => screen.getByLabelText('기준 버전');
+export const previewList = () => screen.queryByRole('list', { name: '미리보기 결과' });
+export const runPreview = async (user: User, script = SCRIPT) => {
+  await user.clear(editor());
+  await user.type(editor(), script);
+  await user.click(previewButton());
+  await screen.findByRole('list', { name: '미리보기 결과' });
+};
+export const isSaveRequest = (init: RequestInit) => !JSON.parse(String(init.body)).dryRun;
+
+// 실제 목록 쿼리(useVersions)를 쓰는 버전 이력 화면 (스키마 7)
+export const route = { route: '/db/1/schema/7/history', path: '/db/:dbId/schema/:schemaId/history' };
+export const pageRoutes = {
+  '/api/auth/me': { id: 3, username: 'park', role: 'dba' },
+  '/api/schemas/7': { id: 7, name: 'shop', databaseId: 1, databaseName: 'db' },
+};
