@@ -124,15 +124,21 @@ function assertSameBackslashMode(st: State, ddl: string, noBackslashEscapes: boo
 }
 
 // NO_BACKSLASH_ESCAPES 세션에서 ENUM·SET 값에 백슬래시가 있으면 거부한다: 타입 정규화가 타입 원문을 보통 이스케이프 규칙으로 다시 읽어 값이 바뀐다.
-// 같은 세션의 COMMENT·DEFAULT 는 토큰 값을 그대로 써서 백슬래시가 MySQL 과 같게 남는다 (8.4.11 실측)
+// 같은 세션의 COMMENT·DEFAULT 는 토큰 값을 그대로 써서 백슬래시가 MySQL 과 같게 남는다 (8.4.11 실측). 토큰을 한 번만 돌며 열린 괄호마다 ENUM·SET 인자 괄호인지 기억해,
+// 그런 괄호 안(더 깊이 중첩된 괄호 안 포함)의 문자열만 본다 — ENUM( 마다 짝 괄호까지 다시 훑으면 중첩 괄호에서 제곱 시간이다 (리뷰 1회차 M-2)
 function assertNoBackslashTypeValues(toks: readonly Token[], ddl: string): void {
+  const opened: boolean[] = []; // 열린 괄호마다: ENUM·SET 바로 뒤의 괄호인가
+  let typeArgs = 0; // 열린 ENUM·SET 인자 괄호 수
   toks.forEach((t, k) => {
-    const opensTypeArgs = t.t === 'word' && /^(ENUM|SET)$/i.test(t.v) && toks[k + 1]?.t === 'op' && toks[k + 1].v === '(';
-    if (!opensTypeArgs) return;
-    for (let j = k + 2, depth = 1; j < toks.length && depth > 0; j++) {
-      const x = toks[j];
-      if (x.t === 'op' && (x.v === '(' || x.v === ')')) depth += x.v === '(' ? 1 : -1;
-      else if (x.t === 'string' && ddl.slice(x.s, x.e).includes('\\')) fail(`NO_BACKSLASH_ESCAPES 세션에서 백슬래시가 든 ENUM·SET 값은 받을 수 없습니다 — ${RE_EXPORT}`);
+    if (t.t === 'op' && t.v === '(') {
+      const prev = toks[k - 1];
+      const isTypeArgs = prev?.t === 'word' && /^(ENUM|SET)$/i.test(prev.v);
+      opened.push(isTypeArgs);
+      if (isTypeArgs) typeArgs++;
+    } else if (t.t === 'op' && t.v === ')') {
+      if (opened.pop()) typeArgs--;
+    } else if (typeArgs > 0 && t.t === 'string' && ddl.slice(t.s, t.e).includes('\\')) {
+      fail(`NO_BACKSLASH_ESCAPES 세션에서 백슬래시가 든 ENUM·SET 값은 받을 수 없습니다 — ${RE_EXPORT}`);
     }
   });
 }
