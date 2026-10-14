@@ -191,7 +191,7 @@ describe('문장 나누기와 렉서 (덤프 파서와 함께 쓴다)', () => {
     expect(statements.map((s) => [text.slice(s.offset, s.offset + 3), s.marks.map((m) => [text.slice(m.at, m.at + 3), m.digits])])).toEqual([
       ['SET', [['/*!', '40101']]], ['ALT', [['/*!', '99999']]], ['ALT', [['/*!', '90000']]],
     ]);
-    expect(trailing).toEqual({ marks: [{ at: text.lastIndexOf('/*!'), digits: '99999' }], spaces: [], closes: [text.lastIndexOf('*/')], nested: [] });
+    expect(trailing).toEqual({ marks: [{ at: text.lastIndexOf('/*!'), digits: '99999' }], spaces: [], closes: [text.lastIndexOf('*/')], nested: [], hints: [] });
     // 렉서가 실행 주석을 닫은 '*/' 와 문장 없이 끝난 덩어리의 구분자 (리뷰 13회차): 따옴표 안의 '*/' 는 닫지 않는다
     const quoted = "/*!99999 */;\n;\n/*!40101 ALTER TABLE t COMMENT '*/' */;";
     const [s] = splitForApply(quoted).statements;
@@ -211,6 +211,7 @@ describe('문장 나누기와 렉서 (덤프 파서와 함께 쓴다)', () => {
     const [s] = splitForApply(text).statements;
     const mark = (digits: string) => ({ at: text.indexOf(`/*!${digits}`), digits });
     expect(s.nested).toEqual([{ at: text.indexOf('/* x'), mark: mark('40101') }, { at: text.indexOf('/* w'), mark: mark('99999') }]);
+    expect(s.hints).toEqual([text.indexOf('/*+')]); // 힌트는 따로 알린다 (DELIMITER 줄 앞의 것을 거부한다)
   });
 
   it('렉서는 버전 번호와 상관없이 실행 주석의 내용을 토큰으로 읽는다 (덤프의 /*!80023 INVISIBLE */)', () => {
@@ -304,6 +305,13 @@ describe('문장 없이 끝난 덩어리의 실행 주석', () => {
     ['스크립트 맨 앞', '/*!40101 */\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;', 1, 1],
   ])('구분자 없이 실행 주석 바로 뒤에 둔 DELIMITER 줄은 RE_EXPORT 로 거부한다 — %s', (_name, script, index, line) => {
     expectReExport(run(script), index, `앞 문장 뒤(줄 ${line})의 실행 주석 /*!`, 'DELIMITER 줄');
+  });
+
+  // 힌트('/*+ … */')도 같다 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 8.0 클라이언트는 버퍼에 남겨 DELIMITER 줄을 문장으로 보내 1064 이고, 8.4 클라이언트는 블록 주석으로 보고 버려
+  // a·b 와 루틴 p 를 더한다. 렉서는 일반 주석으로 건너뛰어 13회차까지는 받았다
+  it('구분자 없이 힌트 바로 뒤에 둔 DELIMITER 줄도 RE_EXPORT 로 거부한다', () => {
+    const script = 'ALTER TABLE t ADD a INT;\n/*+ x */\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;\nALTER TABLE t ADD b INT;';
+    expectReExport(run(script), 2, '앞 문장 뒤(줄 2)의 힌트 /*+', 'DELIMITER 줄');
   });
 
   it("';' 로 끝낸 실행 주석 뒤의 DELIMITER 줄은 받는다 (넷 모두 a·b 와 루틴 p)", () => {

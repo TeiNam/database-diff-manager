@@ -63,12 +63,14 @@ export interface NestedComment {
 }
 
 // 원문의 한 구간에서 렉서가 알린 것: marks 는 렉서가 연 실행 주석 표지, spaces 는 렉서가 공백으로 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 R11-2·Claude F5),
-// closes 는 렉서가 실행 주석을 닫은 '*/' 의 원문 자리 (따옴표·주석 안의 것은 빠진다, 리뷰 13회차), nested 는 실행 주석 안에서 연 일반 주석 (리뷰 14회차 F1)
+// closes 는 렉서가 실행 주석을 닫은 '*/' 의 원문 자리 (따옴표·주석 안의 것은 빠진다, 리뷰 13회차), nested 는 실행 주석 안에서 연 일반 주석 (리뷰 14회차 F1), hints 는 렉서가
+// 주석으로 건너뛴 힌트 '/*+' 의 원문 자리 (리뷰 14회차 — DELIMITER 줄 앞의 것을 거부한다)
 export interface LexNotes {
   readonly marks: readonly VersionMark[];
   readonly spaces: readonly number[];
   readonly closes: readonly number[];
   readonly nested: readonly NestedComment[];
+  readonly hints: readonly number[];
 }
 
 // 문장 앞(앞 문장 뒤부터)의 것: ends 는 그 안의 문장 없이 끝난 덩어리를 끝낸 구분자의 원문 자리 — 실행 주석이 덩어리 안에서 닫혔는지 본다 (리뷰 13회차)
@@ -133,6 +135,7 @@ class ChunkLog implements ChunkWatch {
   private spaces: number[] = [];
   private closes: number[] = [];
   private inner: NestedComment[] = [];
+  private hints: number[] = [];
   private ends: number[] = [];
   // 렉서가 열려 있다고 보는 표지 (가장 안쪽이 끝). DELIMITER 줄 뒤에서 렉서를 새로 읽혀도(afterCommand) 그 앞의 것은 남지만, 렉서는 새로 연 것만 닫고 그 안에서만 nested 를
   // 알리므로 끝의 것은 늘 렉서의 가장 안쪽 것이다
@@ -154,6 +157,10 @@ class ChunkLog implements ChunkWatch {
     if (mark) this.inner.push({ at, mark });
   }
 
+  hinted(at: number): void {
+    this.hints.push(at);
+  }
+
   space(at: number): void {
     this.spaces.push(at);
   }
@@ -162,22 +169,24 @@ class ChunkLog implements ChunkWatch {
     this.ends.push(at);
   }
 
-  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'nested' | 'leading'> {
+  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'nested' | 'hints' | 'leading'> {
     const [leadMarks, marks] = splitAt(this.marks, (m) => m.at, from);
     const [leadSpaces, spaces] = splitAt(this.spaces, (at) => at, from);
     const [leadCloses, closes] = splitAt(this.closes, (at) => at, from);
     const [leadNested, nested] = splitAt(this.inner, (n) => n.at, from);
-    const leading = { marks: leadMarks, spaces: leadSpaces, closes: leadCloses, nested: leadNested, ends: this.ends };
+    const [leadHints, hints] = splitAt(this.hints, (at) => at, from);
+    const leading = { marks: leadMarks, spaces: leadSpaces, closes: leadCloses, nested: leadNested, hints: leadHints, ends: this.ends };
     this.marks = [];
     this.spaces = [];
     this.closes = [];
     this.inner = [];
+    this.hints = [];
     this.ends = [];
-    return { marks, spaces, closes, nested, leading };
+    return { marks, spaces, closes, nested, hints, leading };
   }
 
   rest(): LexNotes {
-    return { marks: this.marks, spaces: this.spaces, closes: this.closes, nested: this.inner };
+    return { marks: this.marks, spaces: this.spaces, closes: this.closes, nested: this.inner, hints: this.hints };
   }
 }
 
