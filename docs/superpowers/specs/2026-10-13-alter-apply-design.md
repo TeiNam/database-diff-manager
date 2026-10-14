@@ -125,7 +125,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 - **문자셋:**
   - 새 문자열 컬럼(그리고 문자셋 없이 쓴 `MODIFY`·`CHANGE`)은 테이블 기본 문자셋·콜레이션을 물려받는다. 예전 컬럼의 문자셋을 물려받지 않는 것도 MySQL과 같다.
   - 저장 표기는 `SHOW CREATE` 규칙을 따른다(8.0/8.4 실측). 컬럼에 `CHARACTER SET`이나 `COLLATE`를 하나라도 쓰면 둘 다 붙는다. 문자셋만 쓰면 그 문자셋의 기본 콜레이션, `COLLATE`만 쓰면 그 콜레이션의 문자셋이다. 둘 다 안 쓰면 테이블 기본을 물려받고, 콜레이션이 그 문자셋의 기본 콜레이션이 아닐 때만 `COLLATE`를 붙인다.
-  - `CHARACTER SET binary`·`COLLATE binary`는 MySQL이 타입을 VARBINARY·BLOB으로 바꾸므로 1차에서 거부한다.
+  - `CHARACTER SET binary`·`COLLATE binary`는 MySQL이 타입을 VARBINARY·BLOB으로 바꾸므로 1차에서 거부한다. 기본 문자셋이 binary인 기준 테이블에 문자셋 없이 더하거나 바꾼 CHAR·VARCHAR·TEXT도 MySQL이 BINARY·VARBINARY·BLOB으로 바꾸므로 거부한다(8.0/8.4 실측: `VARCHAR(10)`→`varbinary(10)`, ENUM·SET은 그대로다).
   - 새 테이블은 옵션에 쓴 문자셋·콜레이션을 쓰고, 없으면 2장의 스키마 기본값을 쓴다. 문자셋만 쓰면 그 문자셋의 기본 콜레이션, 콜레이션만 쓰면 그 콜레이션의 문자셋이다.
   - 테이블 옵션 표기(8.0/8.4 실측): `SHOW CREATE TABLE`은 utf8mb4의 콜레이션은 늘 찍고(기본 `utf8mb4_0900_ai_ci`도), 그 밖의 문자셋은 콜레이션이 그 문자셋의 기본이면 `COLLATE`를 찍지 않는다. 예를 들어 `DEFAULT CHARSET=utf8`은 `DEFAULT CHARSET=utf8mb3`이고, `utf8_unicode_ci`는 `DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci`이다(시나리오 `create-table-charsets`·`schema-defaults-latin1`).
 - **자동 이름:**

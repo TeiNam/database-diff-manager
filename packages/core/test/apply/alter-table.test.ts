@@ -500,6 +500,15 @@ describe('ALTER TABLE — ENUM·SET 기본값과 재현하지 않는 콜레이�
     expect(run("ALTER TABLE b ADD f ENUM('x','y') DEFAULT 'Y';")).toMatchObject({ ok: false, error: { reason: expect.stringContaining('(MySQL 1067)') } });
   });
 
+  // 기본 문자셋이 binary 인 테이블에 문자셋 없이 더한 CHAR·VARCHAR·TEXT 는 MySQL 이 BINARY·VARBINARY·BLOB 으로 바꾼다 (8.0.46·8.4.11 실측: ADD v VARCHAR(10) → varbinary(10)).
+  // ENUM·SET 은 그대로다. CREATE TABLE 의 테이블 문자셋 binary 처럼 RE_EXPORT 로 거부한다
+  it.each([["ALTER TABLE b ADD v VARCHAR(10);"], ["ALTER TABLE b ADD c CHAR(3);"], ["ALTER TABLE b ADD t TEXT;"], ["ALTER TABLE b MODIFY e VARCHAR(5);"]])(
+    'binary 문자셋 테이블에 문자셋 없이 쓴 문자열 컬럼은 RE_EXPORT 로 거부한다: %s', (script) => {
+      const r = run(script);
+      expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('binary') } });
+      if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+    });
+
   it('언어별 콜레이션도 글자까지 같은 멤버는 받는다', () => {
     expect(defaultOf("ALTER TABLE tr ALTER COLUMN e SET DEFAULT 'ı';", 'tr', 'e')).toBe("'ı'");
     expect(defaultOf("ALTER TABLE tr ADD t ENUM('i','ı') COLLATE utf8mb4_turkish_ci DEFAULT 'i';", 'tr', 't')).toBe("'i'");

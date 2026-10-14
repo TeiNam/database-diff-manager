@@ -16,6 +16,7 @@ export const INT_TYPES: ReadonlySet<string> = new Set(['tinyint', 'smallint', 'm
 const NUMERIC: ReadonlySet<string> = new Set([...INT_TYPES, 'decimal', 'float', 'double']);
 // 문자셋·콜레이션이 붙는 타입
 export const CHARSET_TYPES: ReadonlySet<string> = new Set(['char', 'varchar', 'tinytext', 'text', 'mediumtext', 'longtext', 'enum', 'set']);
+const ENUM_SET: ReadonlySet<string> = new Set(['enum', 'set']);
 export const BLOB_TYPES: ReadonlySet<string> = new Set(['tinytext', 'text', 'mediumtext', 'longtext', 'tinyblob', 'blob', 'mediumblob', 'longblob']);
 // 리터럴 기본값을 쓸 수 없는 타입 (MySQL 1101). 그중 TEXT·BLOB 계열(BLOB_TYPES)만 NULL 허용이어도 SHOW CREATE 에 DEFAULT NULL 이 없고, JSON·GEOMETRY 계열은 찍힌다
 export const NO_LITERAL_DEFAULT: ReadonlySet<string> = new Set([...BLOB_TYPES, 'json',
@@ -156,7 +157,11 @@ export function tableCharset(options: readonly TableOption[], defaults: TableCha
 // 쓰지 않은 컬럼은 테이블 기본을 물려받고, 그 콜레이션이 문자셋의 기본(primary)이 아닐 때만 COLLATE 하나가 남는다. MODIFY·CHANGE 도 옛 컬럼의 문자셋을 물려받지 않는다
 export function columnCharset(type: string, written: Pick<ColumnSpec, 'charset' | 'collation'>, table: TableCharset): Pick<Column, 'charset' | 'collation'> {
   if (!CHARSET_TYPES.has(baseType(type))) return written.charset || written.collation ? fail(`문자열이 아닌 타입에는 CHARACTER SET·COLLATE 를 쓸 수 없습니다: ${type}`) : {};
-  if (!written.charset && !written.collation) return table.collation === primaryCollation(table.charset) ? {} : { collation: table.collation };
+  if (!written.charset && !written.collation) {
+    // 기본 문자셋이 binary 인 테이블: MySQL 은 CHAR·VARCHAR·TEXT 를 BINARY·VARBINARY·BLOB 으로 바꾼다 (8.0.46·8.4.11 실측: VARCHAR(10) → varbinary(10), ENUM·SET 은 그대로)
+    if (table.charset === 'binary' && !ENUM_SET.has(baseType(type))) fail(`기본 문자셋이 binary 인 테이블의 ${type} 은 MySQL 이 BINARY·VARBINARY·BLOB 으로 바꿔 1차 지원 범위가 아닙니다 (이진 타입을 직접 쓰세요) — ${RE_EXPORT}`);
+    return table.collation === primaryCollation(table.charset) ? {} : { collation: table.collation };
+  }
   const charset = written.charset ? canonicalCharset(written.charset) : charsetOfCollation(canonicalCollation(written.collation!));
   const collation = written.collation ? canonicalCollation(written.collation) : primaryCollation(charset);
   if (charsetOfCollation(collation) !== charset) fail(`COLLATE ${collation} 은 문자셋 ${charset} 의 콜레이션이 아닙니다 (MySQL 1253)`);
