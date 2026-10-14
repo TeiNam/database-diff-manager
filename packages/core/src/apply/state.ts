@@ -63,9 +63,13 @@ export interface State {
   sqlModeUnknown: string | undefined;
   // 처음 세션 SQL_MODE (ApplyOptions.sqlMode, 주지 않았으면 MySQL 기본 모드) — 스크립트를 실행한 서버의 sql_mode 다. SET sql_mode = DEFAULT 가 이 값으로 되돌린다 (session.ts)
   readonly initialSqlMode: string;
-  // 세션 SQL_MODE 를 마지막으로 정한 SET 이 리터럴로 썼는가 ('…'·숫자·따옴표 없는 모드 이름 — DEFAULT·변수는 아니다). 아니면서 값이 처음 세션 SQL_MODE 와 같으면 서버가 짐작한
-  // 값일 수 있다 — 그 IGNORE_SPACE 는 내장 함수 판정에 믿지 않는다 (stored-call.ts, 리뷰 11회차 R11-1)
-  sqlModeLiteral: boolean;
+  // 세션 SQL_MODE 의 값이 처음 세션 SQL_MODE(서버가 짐작한 값)에서 왔는가: SET 없이 시작했거나, DEFAULT 로 되돌렸거나, 짐작한 값을 담은 @@sql_mode·사용자 변수(guessedSqlModes)에서
+  // 정했다. 스크립트가 리터럴로 정한 값은 @@sql_mode·사용자 변수로 옮겨 되돌려도 아니다 — 짐작한 값의 IGNORE_SPACE 만 내장 함수 판정에 믿지 않는다 (stored-call.ts,
+  // 리뷰 11회차 R11-1·12회차 R12-1)
+  sqlModeGuessed: boolean;
+  // 짐작한 세션 SQL_MODE 를 담은 사용자 변수 (소문자, '@' 포함) — 그 값을 읽은 @@sql_mode 나 그런 변수에서 저장했다. 다시 저장하면 빼고, 저장 함수 호출이 사용자 변수를
+  // 잊게 하면 함께 비운다 (session.ts·stored-call.ts)
+  readonly guessedSqlModes: Set<string>;
   // 스크립트가 서버(GLOBAL·PERSIST) sql_mode 를 바꿨는가 — 바꾼 뒤의 SET sql_mode = DEFAULT 는 바뀐 전역 값을 읽는데 그 값은 알 수 없어 세션 SQL_MODE 를 모르는 값으로 둔다
   // (session.ts sqlModeDefault, 리뷰 7회차 R7-1·10회차)
   serverSqlModeChanged: boolean;
@@ -115,8 +119,8 @@ export function initialState(base: SchemaModel, schemaName: string, defaults: Ap
     if (!tableAt.has(t.name)) tableAt.set(t.name, k); // 같은 이름이 둘이면 앞의 것 (find 와 같다)
   });
   const st: State = {
-    model, schemaName, defaults, fkChecks: true, fkChecksUnknown: undefined, sqlMode, sqlModeUnknown: undefined, initialSqlMode: sqlMode, sqlModeLiteral: false,
-    serverSqlModeChanged: false, clientCharset: CLIENT_DEFAULTS.charset, connectionCharset: CLIENT_DEFAULTS.charset,
+    model, schemaName, defaults, fkChecks: true, fkChecksUnknown: undefined, sqlMode, sqlModeUnknown: undefined, initialSqlMode: sqlMode, sqlModeGuessed: true,
+    guessedSqlModes: new Set(), serverSqlModeChanged: false, clientCharset: CLIENT_DEFAULTS.charset, connectionCharset: CLIENT_DEFAULTS.charset,
     connectionCollation: CLIENT_DEFAULTS.collation, resultsCharset: CLIENT_DEFAULTS.charset, timeZoneUtc: false, timeZoneUnknown: undefined, saved: new Map(),
     forgotten: new Set(), storedCall: undefined, origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)),
   };

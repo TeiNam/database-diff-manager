@@ -204,7 +204,8 @@ describe('추적하지 않는 시스템 변수 읽기', () => {
 });
 
 // 리뷰 11회차 R11-1 (10회차 R10-1 남은 가지): 처음 세션 SQL_MODE(서버가 기준 버전 루틴에서 짐작한 값)에서 온 IGNORE_SPACE 는 믿지 않지만, 스크립트가 SET SQL_MODE = '…'
-// 리터럴로 정한 뒤에는 짐작한 값과 같아도 그 모드로 내장 함수를 가른다. DEFAULT·변수로 짐작한 값에 돌아오면 다시 믿지 않는다 (보수적)
+// 리터럴로 정한 뒤에는 짐작한 값과 같아도 그 모드로 내장 함수를 가른다 — @@sql_mode·사용자 변수로 옮겨 되돌려도 같다 (12회차 R12-1). DEFAULT 나 짐작한 값을 저장한 변수로
+// 돌아오면 다시 믿지 않는다 (보수적)
 describe('처음 세션 SQL_MODE 의 IGNORE_SPACE', () => {
   const withSink = parseSqlDump(tdExport('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\nCREATE TABLE `sink` (\n  `v` longtext\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;')).model;
   const NOW_FN = 'CREATE FUNCTION `now`() RETURNS INT DETERMINISTIC NO SQL RETURN 1;';
@@ -220,6 +221,29 @@ describe('처음 세션 SQL_MODE 의 IGNORE_SPACE', () => {
   it('SET 없이 처음 값 그대로이거나 DEFAULT 로 돌아온 세션의 NOW () 는 저장 함수 호출로 센다 (짐작한 값)', () => {
     expectRejected(runIgnoreSpace(...TAIL), TAIL.length + 1, '무시한 문장의 저장 함수 호출(`NOW`)');
     expectRejected(runIgnoreSpace("SET sql_mode='IGNORE_SPACE';", 'SET sql_mode = DEFAULT;', ...TAIL), TAIL.length + 3, '무시한 문장의 저장 함수 호출(`NOW`)');
+  });
+
+  // 리뷰 12회차 R12-1: 리터럴로 정한 SQL_MODE 를 @@sql_mode·사용자 변수로 옮겨 되돌려도 리터럴로 정한 값이다 — 11회차는 변수에서 되돌리면 짐작한 값으로 보았다
+  it.each([
+    ['@m 으로 되돌림 (Codex 재현)', ['SET @m=@@sql_mode;', 'SET sql_mode=@m;']], ['@@sql_mode 로 되돌림', ['SET sql_mode=@@sql_mode;']],
+    ['@m 을 옮긴 @copy 로 되돌림', ['SET @m=@@sql_mode;', 'SET @copy=@m;', 'SET sql_mode=@copy;']], ['@@session.sql_mode 를 옮긴 변수', ['SET @s=@@session.sql_mode;', 'SET @@sql_mode=@s;']],
+  ])("SET sql_mode='IGNORE_SPACE' 뒤 %s 해도 NOW () 는 내장 함수다", (_name, restore) => {
+    const r = runIgnoreSpace("SET sql_mode='IGNORE_SPACE';", ...restore, ...TAIL);
+    expect(r).toMatchObject({ ok: true, applied: 3 });
+    expect(sqlModeOf(r, 'p')).toBe('IGNORE_SPACE');
+  });
+
+  it('리터럴을 담은 사용자 변수에서 정한 값도 리터럴이다 — 짐작한 값을 담았던 변수도 다시 저장하면 그 값을 따른다', () => {
+    expect(sqlModeOf(runIgnoreSpace("SET @lit='IGNORE_SPACE';", 'SET sql_mode=@lit;', ...TAIL), 'p')).toBe('IGNORE_SPACE');
+    expect(sqlModeOf(runIgnoreSpace('SET @m=@@sql_mode;', "SET @m='IGNORE_SPACE';", 'SET sql_mode=@m;', ...TAIL), 'p')).toBe('IGNORE_SPACE');
+  });
+
+  it('짐작한 값을 저장한 변수(옮긴 변수·같은 SET 의 앞 대입 전 값 포함)로 되돌리면 지금처럼 짐작한 값이다', () => {
+    const counted = '무시한 문장의 저장 함수 호출(`NOW`)';
+    expectRejected(runIgnoreSpace('SET @g=@@sql_mode;', 'SET @copy=@g;', "SET sql_mode='IGNORE_SPACE';", 'SET sql_mode=@copy;', ...TAIL), TAIL.length + 5, counted);
+    expectRejected(runIgnoreSpace("SET sql_mode='IGNORE_SPACE', @g=@@sql_mode;", 'SET sql_mode=@g;', ...TAIL), TAIL.length + 3, counted);
+    expectRejected(runIgnoreSpace("SET @g=@@sql_mode, sql_mode='IGNORE_SPACE';", 'SET sql_mode=@g;', ...TAIL), TAIL.length + 3, counted);
+    expectRejected(runIgnoreSpace('SET sql_mode=DEFAULT;', 'SET sql_mode=@@sql_mode;', ...TAIL), TAIL.length + 3, counted);
   });
 });
 
