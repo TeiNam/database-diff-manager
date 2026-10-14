@@ -3,7 +3,7 @@ import { generateDdl, renderDdl } from '../src/ddl';
 import { diffSchemas } from '../src/diff';
 import type { Routine, SchemaModel } from '../src/model';
 import { normalizeDdl } from '../src/normalize';
-import { parseSqlDump, splitStatements } from '../src/parse-dump';
+import { parseSqlDump, splitDump, splitStatements } from '../src/parse-dump';
 import { parseMdDump } from '../src/parse-md';
 import { parseRoutine } from '../src/parse-routine';
 import { printRoutine } from '../src/print';
@@ -33,6 +33,28 @@ describe('splitStatements: DELIMITER', () => {
   it('주석 안의 구분자와 다른 구분자($$)도 처리한다', () => {
     const text = 'DELIMITER $$\nCREATE PROCEDURE `p`() BEGIN /* $$ */ SELECT 1; END $$\ndelimiter ;\nSELECT 2;\n';
     expect(splitStatements(text).map((s) => s.ddl)).toEqual(['CREATE PROCEDURE `p`() BEGIN /* $$ */ SELECT 1; END', 'SELECT 2']);
+  });
+
+  // mysql 클라이언트(com_delimiter·get_arg)는 인자를 따옴표(' " `)로 감쌌으면 짝 따옴표 안을, 아니면 첫 공백(' ') 앞까지를 구분자로 읽고 줄의 나머지는 버린다
+  // (8.4.11 실측: 'DELIMITER $$ -- 시작'·'# 시작' 은 $$, CRLF 의 \r 은 줄 끝). 줄 나머지를 통째로 구분자로 삼으면 그 글이 다시 나오지 않아 파일 끝까지가
+  // 한 덩어리가 된다 (리뷰 1회차 I-2)
+  it.each([
+    ['뒤에 -- 주석', 'DELIMITER $$ -- 프로시저 시작', '$$'],
+    ['뒤에 # 주석', 'DELIMITER $$ # 프로시저', '$$'],
+    ['작은따옴표', "DELIMITER '$$'", '$$'],
+    ['큰따옴표와 뒤 주석', 'DELIMITER "//" -- c', '//'],
+    ['백틱', 'DELIMITER `@@`', '@@'],
+    ['CRLF', 'DELIMITER $$\r', '$$'],
+  ])('DELIMITER 인자는 mysql 클라이언트처럼 읽는다: %s', (_name, line, delimiter) => {
+    const text = `${line}\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\nEND${delimiter}\nDELIMITER ;\nALTER TABLE member ADD COLUMN nick VARCHAR(20);\nDROP TABLE orders;\n`;
+    expect(splitStatements(text).map((s) => s.ddl)).toEqual(['CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\nEND', 'ALTER TABLE member ADD COLUMN nick VARCHAR(20)', 'DROP TABLE orders']);
+  });
+
+  // 공백이 없으면 주석 표지도 구분자의 일부다 (8.4.11 실측: 'DELIMITER $$#x' 는 '$$#x', 탭은 인자를 끝내지 않아 'DELIMITER $$<탭>--' 는 '$$<탭>--').
+  // 문장 나누기는 토큰으로 구분자를 찾으므로 주석 표지가 든 구분자는 찾지 못한다 — 다른 자리에서 끊지 않고 파일 끝까지 끝나지 않은 문장 하나로 남는다
+  it.each([['$$#x'], ['$$\t--']])('주석 표지가 든 구분자 %j 는 찾지 못해 끝나지 않은 문장 하나로 남는다', (delimiter) => {
+    const text = `DELIMITER ${delimiter}\nCREATE PROCEDURE p() BEGIN SELECT 1; END${delimiter}\nDELIMITER ;\nDROP TABLE orders;\n`;
+    expect(splitDump(text).map((s) => s.terminated)).toEqual([false]);
   });
 });
 

@@ -93,6 +93,15 @@ describe('FLOAT·DOUBLE 기본값 — (M,D)', () => {
     expect(message.endsWith(RE_EXPORT), message).toBe(true);
   });
 
+  // (M,D) 기본값은 소수 D 자리로 0 을 채우므로, 한도를 보기 전에 찍으면 56자 스크립트가 1,000만 자 기본값을 만든다 (리뷰 1회차 F4).
+  // 기준 덤프의 컬럼에 ALTER COLUMN … SET DEFAULT 를 써도 같은 검사를 거친다 (8.0.46·8.4.11 실측 오류 번호: D > 30 은 1425, D > M 은 1427, M 이 0 이나 255 초과면 1439)
+  it.each([['double(255,10000000)', '1425'], ['double(10,31)', '1425'], ['float(5,10)', '1427'], ['double(0,0)', '1439'], ['double(256,2)', '1439']])(
+    '%s 의 기본값은 찍기 전에 크기 한도로 거부한다 (MySQL %s)', (type, errno) => {
+      const started = performance.now();
+      expect(messageOf(num('0'), type)).toContain(`(MySQL ${errno})`);
+      expect(performance.now() - started).toBeLessThan(50);
+    });
+
   it('긴 숫자 문자열도 선형 시간에 판정한다', () => {
     const started = performance.now();
     const zeros = '0'.repeat(200000);

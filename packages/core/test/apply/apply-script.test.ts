@@ -125,6 +125,27 @@ describe('applyScript — 실행 주석(/*!NNNNN … */)으로 감싼 문장', (
     expect(run('ALTER TABLE t ADD COLUMN x INT /* note */;')).toMatchObject({ ok: true, applied: 1 });
     expect(run('ALTER TABLE t ADD COLUMN x INT COMMENT \'a */\';')).toMatchObject({ ok: true, applied: 1 });
   });
+
+  // MySQL 은 루틴 본문을 실행 주석 표지를 지운 글로 저장한다 (8.0.46·8.4.11 실측: '/*!80000 CREATE FUNCTION g() … RETURN 1 */' 의 본문은 'RETURN 1').
+  // 루틴을 통째로 감싼 꼴은 닫는 '*/' 를 원문에서도 떼어 같게 읽는다 (리뷰 1회차 F2)
+  it('루틴을 통째로 감싼 실행 주석은 닫는 */ 를 본문에 남기지 않는다', () => {
+    const r = run('/*!80000 CREATE FUNCTION g() RETURNS INT DETERMINISTIC RETURN 1 */;\nDELIMITER //\n/*!50003 CREATE PROCEDURE p() BEGIN SELECT 1; END */ //\nDELIMITER ;');
+    expect(r).toMatchObject({ ok: true, applied: 2 });
+    if (r.ok) expect(r.model.routines.map((x) => [x.name, x.body])).toEqual([['g', 'RETURN 1'], ['p', 'BEGIN SELECT 1; END']]);
+  });
+
+  // 본문 안의 실행 주석은 MySQL 이 표지만 지운다 ('BEGIN /*!80000 SELECT 1; */ SELECT 2; END' → 'BEGIN  SELECT 1;  SELECT 2; END', 버전이 높으면 안의 글까지 —
+  // 8.0.46·8.4.11 실측). 본문은 쓴 그대로 저장하므로 받지 않는다. 머리에서 열어 본문에서 닫는 꼴, 감싼 주석 뒤에 글이 더 있는 꼴도 같다
+  it.each([
+    ['본문 안', 'DELIMITER //\nCREATE PROCEDURE p() BEGIN /*!80000 SELECT 1; */ SELECT 2; END //\nDELIMITER ;'],
+    ['번호 없는 /*! 도', 'DELIMITER //\nCREATE PROCEDURE p() BEGIN /*! SELECT 1; */ SELECT 2; END //\nDELIMITER ;'],
+    ['머리에서 열고 본문에서 닫음', 'CREATE FUNCTION h() RETURNS INT DETERMINISTIC /*!80000 RETURN 1 */;'],
+    ['감싼 주석 뒤에 글', '/*!80000 CREATE FUNCTION f() RETURNS INT DETERMINISTIC RETURN 1 */ + 1;'],
+  ])('루틴 정의 안의 실행 주석은 RE_EXPORT 로 거부한다: %s', (_name, script) => {
+    const r = run(script);
+    expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('실행 주석') } });
+    expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);
+  });
 });
 
 // 4바이트 문자(이모지 등, U+10000 이상): MySQL 8.0.46·8.4.11 의 SHOW CREATE 는 COMMENT·ENUM·SET 값의 그 문자를 '?' 로, 문자열 DEFAULT 는 통째로 16진수(0xF09F9880)로 바꿔 찍는다.

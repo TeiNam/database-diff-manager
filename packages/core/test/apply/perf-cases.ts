@@ -5,6 +5,7 @@
 import { expect } from 'vitest';
 import { applyScript } from '../../src/apply';
 import { RE_EXPORT } from '../../src/apply/types';
+import type { SchemaModel } from '../../src/model';
 import { parseSqlDump } from '../../src/parse-dump';
 import { fixture } from '../helpers';
 
@@ -37,13 +38,14 @@ export const tableNames = (n: number) => Array.from({ length: n }, (_, i) => `a$
 export type Expected = { ok: true } | { index: number; errno: string };
 export type Case = [string, () => string, Expected];
 
-export function checkCase(make: () => string, expected: Expected): void {
+// on: 기준 모델 (없으면 _base.sql), boundMs: 시간 한도 (없으면 TIME_BOUND_MS)
+export function checkCase(make: () => string, expected: Expected, on: SchemaModel = base, boundMs = TIME_BOUND_MS): void {
   const script = make();
   expect(script.length).toBeLessThanOrEqual(MAX_SCRIPT);
   expect(script.length).toBeGreaterThan(MAX_SCRIPT * 0.6);
   const started = performance.now();
-  const r = applyScript(base, script, { schemaName: 'shop' });
-  expect(performance.now() - started).toBeLessThan(TIME_BOUND_MS);
+  const r = applyScript(on, script, { schemaName: 'shop' });
+  expect(performance.now() - started).toBeLessThan(boundMs);
   const outcome = r.ok ? 'ok' : `${r.error.index} ${r.error.reason}`;
   if ('ok' in expected) expect(outcome).toBe('ok');
   else if (expected.errno === RE_EXPORT_ERRNO) expect(outcome).toMatch(new RegExp(`^${expected.index} .*${RE_EXPORT}$`));

@@ -60,16 +60,35 @@ describe('printSqlDump', () => {
     roundTrip(r.model);
   });
 
-  it('루틴 구분자: ;; 가 본문에 있으면 $$, 둘 다 있으면 //, 셋 다 있으면 쓸 수 없어 실패한다', () => {
+  it('루틴 구분자: ;; 가 본문에 있으면 $$, 둘 다 있으면 //', () => {
     const semicolons = "BEGIN SELECT ';;'; END";
     const dollars = "BEGIN SELECT ';;', '$$'; END";
-    const all = "BEGIN SELECT ';;', '$$', '//'; END";
     expect(printSqlDump(withRoutines(procedure('BEGIN SELECT 1; END')))).toContain('DELIMITER ;;\n');
     roundTrip(withRoutines(procedure(semicolons)));
     expect(printSqlDump(withRoutines(procedure(semicolons)))).toContain('DELIMITER $$\n');
     roundTrip(withRoutines(procedure(dollars)));
     expect(printSqlDump(withRoutines(procedure(dollars)))).toContain('DELIMITER //\n');
-    expect(() => printSqlDump(withRoutines(procedure(all)))).toThrow(/구분자/);
+  });
+
+  // 셋 다 있으면 출력하지 못해 그 스키마의 모든 ALTER 가 400 이었다 (리뷰 1회차 M-6). 본문에 없는 '$$<번호>' 를 만들고, 덤프 파서가 그대로 읽는다.
+  // '$$12' 가 있으면 '$$1' 도 본문 안에서 먼저 나오므로 쓰지 않는다
+  it('루틴 구분자: ;;·$$·// 가 모두 본문에 있으면 본문에 없는 $$1·$$2 … 를 쓴다', () => {
+    const all = "BEGIN SELECT ';;', '$$', '//'; END";
+    expect(printSqlDump(withRoutines(procedure(all)))).toContain('DELIMITER $$1\nCREATE PROCEDURE `p`()\nBEGIN SELECT \';;\', \'$$\', \'//\'; END$$1\nDELIMITER ;\n');
+    roundTrip(withRoutines(procedure(all)));
+    const numbered = "BEGIN SELECT ';;', '$$', '//', '$$12'; END";
+    expect(printSqlDump(withRoutines(procedure(numbered)))).toContain('DELIMITER $$2\n');
+    roundTrip(withRoutines(procedure(numbered)));
+  });
+
+  it('번호 구분자를 찾는 데 드는 시간이 본문 길이에 비례한다 ($$1 … $$N 이 든 본문)', () => {
+    const count = 20000;
+    const body = `BEGIN SELECT ';;', '$$', '//', ${Array.from({ length: count }, (_, i) => `'$$${i + 1}'`).join(', ')}; END`;
+    const started = performance.now();
+    const text = printSqlDump(withRoutines(procedure(body)));
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(text).toContain(`DELIMITER $$${count + 1}\n`);
+    roundTrip(withRoutines(procedure(body)));
   });
 
   it('본문이 구분자의 첫 글자로 끝나면(END; 뒤에 ;;) 끝 표시가 앞당겨 읽히므로 다른 구분자를 쓴다', () => {

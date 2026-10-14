@@ -303,6 +303,127 @@ describe('ALTER TABLE — 컬럼 정의 안의 PRIMARY KEY·UNIQUE', () => {
 
 // MySQL 8.0.46·8.4.11 실측: ALTER COLUMN … DROP DEFAULT 는 컬럼 종류와 상관없이 DEFAULT 절을 없앤다 (NULL 허용 컬럼도 `DEFAULT NULL` 이 사라진다).
 // 그 뒤 SET DEFAULT NULL 이면 `DEFAULT NULL` 이 다시 보인다
+// 자기 테이블을 참조하는 FK 를 ALTER 로 더할 때 (8.0.46·8.4.11 실측, 리뷰 1회차 M-3): 8.4 의 UNIQUE 검사(6125)는 이 문장의 키를 모두 더한 뒤의 테이블로 하지만,
+// InnoDB 는 참조 컬럼의 인덱스를 문장 앞 테이블에서 찾는다 — 같은 ALTER 에서 더한 PRIMARY KEY·UNIQUE 만 있으면 절 순서와 상관없이 1215 (시나리오 error-self-fk-same-alter)
+describe('ALTER TABLE — 자기 참조 FK 의 부모 키', () => {
+  const e = (name: string, defs: string) => `CREATE TABLE ${name} (${defs});\n`;
+  it.each([
+    ['문장 앞 일반 인덱스 + 같은 문장의 UNIQUE (FK 를 먼저 씀)', `${e('e12', 'id INT NOT NULL, mgr INT, KEY k (id)')}ALTER TABLE e12 ADD FOREIGN KEY (mgr) REFERENCES e12 (id), ADD UNIQUE KEY u (id);`, 'e12', 'u k mgr'],
+    ['문장 앞부터 있던 PRIMARY KEY', `${e('e8', 'id INT NOT NULL, mgr INT, PRIMARY KEY (id)')}ALTER TABLE e8 ADD FOREIGN KEY (mgr) REFERENCES e8 (id);`, 'e8', 'PRIMARY mgr'],
+    ['지우고 다시 더한 PRIMARY KEY', `${e('e10', 'id INT NOT NULL, mgr INT, PRIMARY KEY (id)')}ALTER TABLE e10 DROP PRIMARY KEY, ADD PRIMARY KEY (id), ADD FOREIGN KEY (mgr) REFERENCES e10 (id);`, 'e10', 'PRIMARY mgr'],
+  ])('받는다: %s', (_name, script, table, keys) => {
+    const r = apply(script);
+    if (!r.ok) throw new Error(r.error.reason);
+    expect(tbl(r, table).indexes.map((i) => i.name).join(' ')).toBe(keys);
+  });
+
+  it.each([
+    ['같은 문장의 PRIMARY KEY (FK 를 먼저 씀)', `${e('e3', 'id INT NOT NULL, mgr INT')}ALTER TABLE e3 ADD FOREIGN KEY (mgr) REFERENCES e3 (id), ADD PRIMARY KEY (id);`, '(MySQL 1215)'],
+    ['같은 문장의 PRIMARY KEY (키를 먼저 씀)', `${e('e3', 'id INT NOT NULL, mgr INT')}ALTER TABLE e3 ADD PRIMARY KEY (id), ADD FOREIGN KEY (mgr) REFERENCES e3 (id);`, '(MySQL 1215)'],
+    ['같은 문장의 UNIQUE', `${e('e7', 'id INT NOT NULL, code INT, mgr INT, PRIMARY KEY (id)')}ALTER TABLE e7 ADD UNIQUE KEY uq (code), ADD FOREIGN KEY (mgr) REFERENCES e7 (code);`, '(MySQL 1215)'],
+    ['키가 아예 없음', `${e('e11', 'id INT NOT NULL, mgr INT')}ALTER TABLE e11 ADD FOREIGN KEY (mgr) REFERENCES e11 (id);`, '(MySQL 8.4 6125'],
+    ['UNIQUE 가 아닌 인덱스뿐', `${e('e13', 'id INT NOT NULL, mgr INT, KEY k (id)')}ALTER TABLE e13 ADD FOREIGN KEY (mgr) REFERENCES e13 (id);`, '(MySQL 8.4 6125'],
+  ])('거부한다: %s', (_name, script, needle) => {
+    expect(apply(script)).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining(needle) } });
+  });
+});
+
+// 함수 식 UNIQUE 키의 NULL 허용은 식에 따라 다르다 (IFNULL(a,0) 은 NOT NULL, NULLIF(a,0) 은 NULL 허용) — 짐작하지 않는다 (리뷰 1회차 F6).
+// 문장 앞부터 있던 키는 순서를 정하는 속성이 그대로면 원래 순서를 지키고, 새 키·바뀐 키의 자리가 그 NULL 허용에 달리면 RE_EXPORT 로 거부한다
+const fnBase = (keys: string, cols = '`a` int DEFAULT NULL') => parseSqlDump(tdExport(
+  `CREATE TABLE \`member\` (\n  \`id\` int NOT NULL,\n  ${cols},\n  PRIMARY KEY (\`id\`),\n  ${keys}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`)).model;
+const IFNULL_BASE = fnBase('UNIQUE KEY `uf` ((ifnull(`a`,0))),\n  UNIQUE KEY `ua` (`a`)');
+const NULLIF_BASE = fnBase('UNIQUE KEY `ub` (`b`),\n  UNIQUE KEY `uf` ((nullif(`a`,0)))', '`a` int NOT NULL,\n  `b` int DEFAULT NULL');
+const keyOrder = (base: SchemaModel, script: string) => {
+  const r = applyScript(base, script, { schemaName: 'shop' });
+  return r.ok ? r.model.tables[0].indexes.map((i) => i.name).join(' ') : r.error.reason;
+};
+
+describe('ALTER TABLE — 함수 식 UNIQUE 키의 순서', () => {
+  it('상관없는 ALTER 는 함수 식 UNIQUE 키를 다시 정렬하지 않는다 (IFNULL·NULLIF)', () => {
+    expect(keyOrder(IFNULL_BASE, 'ALTER TABLE member ADD c INT;')).toBe('PRIMARY uf ua');
+    expect(keyOrder(NULLIF_BASE, 'ALTER TABLE member ADD c INT;')).toBe('PRIMARY ub uf');
+    expect(keyOrder(IFNULL_BASE, "ALTER TABLE member COMMENT 'x', ADD INDEX ic (id);")).toBe('PRIMARY uf ua ic');
+  });
+
+  it('새 키의 자리가 함수 식의 NULL 허용과 상관없으면 받는다', () => {
+    expect(keyOrder(IFNULL_BASE, 'ALTER TABLE member ADD d INT NOT NULL, ADD UNIQUE KEY ud (d);')).toBe('PRIMARY ud uf ua');
+    // 바뀐 키라도 어느 쪽이든 순서가 같으면 받는다: a 가 NOT NULL 이 된 ua 는 VIRTUAL 인 uf 보다 늘 앞
+    expect(keyOrder(IFNULL_BASE, 'ALTER TABLE member MODIFY a INT NOT NULL;')).toBe('PRIMARY ua uf');
+  });
+
+  it.each([
+    ['NULL 허용 UNIQUE 를 새로 더함', IFNULL_BASE, 'ALTER TABLE member ADD c INT, ADD UNIQUE KEY uc (c);'],
+    ['식이 쓰는 컬럼의 정의가 바뀜', IFNULL_BASE, 'ALTER TABLE member MODIFY a BIGINT;'],
+    ['다른 키가 NULL 허용이 됨', fnBase('UNIQUE KEY `ub` (`b`),\n  UNIQUE KEY `uf` ((ifnull(`a`,0)))', '`a` int DEFAULT NULL,\n  `b` int NOT NULL'), 'ALTER TABLE member MODIFY b INT NULL;'],
+  ])('새 키·바뀐 키의 자리가 함수 식의 NULL 허용에 달리면 RE_EXPORT 로 거부한다: %s', (_name, base, script) => {
+    const reason = keyOrder(base, script);
+    expect(reason).toContain('NULL 허용');
+    expect(reason.endsWith(RE_EXPORT), reason).toBe(true);
+  });
+});
+
+// 부모 → 자식 참조 색인 (State.refTables, 리뷰 1회차 M-1): 부모를 바꾸는 문장이 모든 테이블을 훑지 않고 색인으로 자식 FK 를 찾는다.
+// 컬럼·테이블 이름을 바꾸거나 자식을 다시 만든 뒤에도 색인이 맞아야 MySQL 처럼 거부한다 (색인이 낡으면 참조되는 컬럼을 조용히 지운다)
+const REF_BASE = parseSqlDump(tdExport([
+  'CREATE TABLE `p` (\n  `id` int NOT NULL,\n  `code` int NOT NULL,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `uq` (`code`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+  'CREATE TABLE `c` (\n  `id` int NOT NULL,\n  `x` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `x` (`x`),\n  CONSTRAINT `c_ibfk_1` FOREIGN KEY (`x`) REFERENCES `p` (`code`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+].join('\n\n'))).model;
+const applyRef = (script: string) => applyScript(REF_BASE, script, { schemaName: 'shop' });
+
+describe('ALTER TABLE — 부모 → 자식 참조 색인', () => {
+  it.each([
+    ['참조 컬럼 이름을 바꾼 뒤 지우기', 'ALTER TABLE p RENAME COLUMN code TO code2;\nALTER TABLE p DROP COLUMN code2;', 2, '`c` 의 FK `c_ibfk_1` 가 참조하는 컬럼 `code2` 은 지울 수 없습니다 (MySQL 1829)'],
+    ['참조 컬럼 이름을 바꾼 뒤 받치는 키 지우기', 'ALTER TABLE p RENAME COLUMN code TO code2;\nALTER TABLE p DROP INDEX uq;', 2, '`c` 의 FK `c_ibfk_1` 가 쓰는 인덱스를 지울 수 없습니다 (MySQL 1553)'],
+    ['부모 이름을 바꾼 뒤 참조 컬럼 지우기', 'RENAME TABLE p TO p2;\nALTER TABLE p2 DROP COLUMN code;', 2, '(MySQL 1829)'],
+    ['자식 이름을 바꾼 뒤 부모 키 지우기', 'RENAME TABLE c TO c2;\nALTER TABLE p DROP INDEX uq;', 2, '`c2` 의 FK `c2_ibfk_1` 가 쓰는 인덱스'],
+    ['자식을 지우고 다시 만든 뒤 부모 지우기', 'DROP TABLE c;\nCREATE TABLE c (x INT, FOREIGN KEY (x) REFERENCES p (code));\nDROP TABLE p;', 3, '(MySQL 3730)'],
+    ['참조 컬럼 이름을 바꾼 뒤 타입 바꾸기', 'ALTER TABLE p RENAME COLUMN code TO code2;\nALTER TABLE p MODIFY code2 BIGINT NOT NULL;', 2, RE_EXPORT],
+  ])('%s', (_name, script, index, reason) => {
+    expect(applyRef(script)).toMatchObject({ ok: false, error: { index, reason: expect.stringContaining(reason) } });
+  });
+
+  it('자식 FK 를 지운 뒤에는 막지 않는다 (색인에서도 빠진다)', () => {
+    expect(applyRef('ALTER TABLE c DROP FOREIGN KEY c_ibfk_1;\nALTER TABLE p DROP INDEX uq, DROP COLUMN code;\nDROP TABLE p;')).toMatchObject({ ok: true, applied: 3 });
+  });
+
+  it('부모 이름·참조 컬럼 이름을 바꾸면 자식 FK 가 따라간다', () => {
+    const r = applyRef('RENAME TABLE p TO p2;\nALTER TABLE p2 RENAME COLUMN code TO code2;');
+    expect(r.ok && r.model.tables.find((t) => t.name === 'c')!.foreignKeys[0]).toMatchObject({ refTable: 'p2', refColumns: ['code2'] });
+  });
+});
+
+// 문자열 컬럼의 숫자 리터럴 기본값은 MySQL 이 수로 읽어 다시 쓴 글자로, ENUM·SET 의 숫자는 순번·비트로 저장된다 (8.0.46·8.4.11 실측, 시나리오 string-number-defaults).
+// 쓴 글자 그대로 저장하면 그 모델로 만든 DDL 이 다른 기본값을 만든다 (리뷰 1회차 F3)
+describe('ALTER TABLE — 문자열 컬럼의 숫자 기본값', () => {
+  it('CHAR·VARCHAR·VARBINARY 의 숫자 리터럴 기본값은 MySQL 이 찍는 글자로 저장한다 (ADD·ALTER COLUMN SET DEFAULT)', () => {
+    const r = ok('ALTER TABLE member ADD code VARCHAR(10) DEFAULT 001, ADD c2 CHAR(5) DEFAULT -0.0, ADD c3 VARCHAR(5) DEFAULT TRUE, ADD c4 VARBINARY(5) DEFAULT +5;\nALTER TABLE member ALTER code SET DEFAULT 0010.50;');
+    expect(['code', 'c2', 'c3', 'c4'].map((n) => col(r, 'member', n).default)).toEqual(["'10.50'", "'0.0'", "'1'", "'5'"]);
+  });
+
+  it('ENUM·SET 의 숫자 기본값은 RE_EXPORT 로 거부한다', () => {
+    for (const script of ["ALTER TABLE member ADD s ENUM('2','1') DEFAULT 1;", "ALTER TABLE member ADD f SET('2','a') DEFAULT 2;", "ALTER TABLE member ADD s ENUM('a','b') DEFAULT TRUE;"]) {
+      const r = apply(script);
+      expect(r, script).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('순번') } });
+      expect(!r.ok && r.error.reason.endsWith(RE_EXPORT), script).toBe(true);
+    }
+    expect(col(ok("ALTER TABLE member ADD s ENUM('2','1') DEFAULT '1';"), 'member', 's').default).toBe("'1'"); // 따옴표로 쓴 값은 멤버 이름이다
+  });
+});
+
+// 56자 스크립트가 1,000만 자 기본값을 만들어 서버 힙을 다 쓰던 문제 (리뷰 1회차 F4): 타입의 (M,D) 를 기본값을 찍기 전에 MySQL 한도로 본다
+describe('ALTER TABLE — FLOAT·DOUBLE(M,D) 크기 한도', () => {
+  it('아주 큰 D 는 기본값을 찍기 전에 1425 로 거부한다 (기준 덤프의 컬럼에 SET DEFAULT 해도)', () => {
+    const started = performance.now();
+    const script = 'ALTER TABLE member ADD x DOUBLE(255,10000000) DEFAULT 0;';
+    expect(script.length).toBeLessThan(60);
+    expect(apply(script)).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1425)') } });
+    const base = parseSqlDump(tdExport('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `x` double(10,10000000) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;')).model;
+    expect(applyScript(base, 'ALTER TABLE t ALTER x SET DEFAULT 0;', { schemaName: 'shop' })).toMatchObject({ ok: false, error: { reason: expect.stringContaining('(MySQL 1425)') } });
+    expect(performance.now() - started).toBeLessThan(200);
+  });
+});
+
 describe('ALTER TABLE — ALTER COLUMN … DROP DEFAULT', () => {
   const DEFAULTS_BASE = parseSqlDump(tdExport(
     "CREATE TABLE `d` (\n  `id` int NOT NULL,\n  `n1` varchar(10) DEFAULT NULL,\n  `n2` varchar(10) NOT NULL,\n  `n3` text,\n  `n4` int DEFAULT '5',\n  `n5` int NOT NULL AUTO_INCREMENT,\n  `n6` json DEFAULT NULL,\n  `n7` datetime DEFAULT CURRENT_TIMESTAMP,\n  `n9` int NOT NULL DEFAULT '7',\n  `n10` varchar(5) DEFAULT 'x',\n  `n11` timestamp NULL DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `n5` (`n5`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",

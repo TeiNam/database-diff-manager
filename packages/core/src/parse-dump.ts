@@ -50,7 +50,7 @@ export interface DumpScan {
   truncated: boolean;
 }
 
-// 문장 끝: 기본은 ';', 'DELIMITER x' 줄 뒤로는 x ('DELIMITER ;' 로 복귀). 문자열·주석 안의 구분자는 토큰화에서 이미 빠진다.
+// 문장 끝: 기본은 ';', 'DELIMITER x' 줄 뒤로는 x ('DELIMITER ;' 로 복귀, x 는 delimiterArg). 문자열·주석 안의 구분자는 토큰화에서 이미 빠진다.
 // DELIMITER 줄은 클라이언트 명령이라 문장으로 내보내지 않는다
 export function splitStatements(text: string): { ddl: string; line: number }[] {
   return splitDump(text).map(({ ddl, line }) => ({ ddl, line }));
@@ -86,7 +86,7 @@ function scan(text: string, lenient: boolean): DumpScan {
       if (t.e <= skipUntil) continue;
       if (!start && isDelimiterCommand(text, t)) {
         const end = lineEnd(text, t.s);
-        delimiter = text.slice(t.e, end).trim() || ';';
+        delimiter = delimiterArg(text.slice(t.e, end));
         skipUntil = end;
         continue;
       }
@@ -153,6 +153,14 @@ const lineEnd = (text: string, pos: number): number => {
   const end = text.indexOf('\n', pos);
   return end < 0 ? text.length : end;
 };
+
+// DELIMITER 의 인자 (mysql 클라이언트 com_delimiter·get_arg, 8.4.11 실측): 앞 공백을 건너뛰고, 따옴표(' " `)로 시작하면 짝 따옴표 앞까지(짝이 없으면 줄 끝까지),
+// 아니면 첫 공백(' ') 앞까지다 — 탭은 인자를 끝내지 않는다. 줄의 나머지('-- …'·'# …' 주석)는 버리고, CRLF 의 '\r' 은 줄 끝으로 본다. 인자가 없으면 ';'
+function delimiterArg(line: string): string {
+  const rest = line.replace(/\r$/, '').replace(/^\s+/, '');
+  const quote = /^['"`]/.exec(rest)?.[0];
+  return (quote ? rest.slice(1).split(quote, 1)[0] : rest.split(' ', 1)[0]) || ';';
+}
 
 // 줄 맨 앞(공백 제외)의 DELIMITER 단어
 function isDelimiterCommand(text: string, t: Token): boolean {

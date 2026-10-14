@@ -61,9 +61,10 @@ export function resolveDefaults(given: Partial<ApplyDefaults> = {}): ApplyDefaul
 }
 
 // DDL 을 적용했으면 true, 세션 문장(SET·USE)과 무시하는 문장(isNoOp)이면 false
-function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): boolean {
-  assertSameBackslashMode(st, ddl, noBackslashEscapes);
-  const c = new Cursor(withoutCommentEnd(tokenize(ddl, { noBackslashEscapes })), ddl);
+function applyStatement(st: State, statement: string, noBackslashEscapes: boolean): boolean {
+  assertSameBackslashMode(st, statement, noBackslashEscapes);
+  const { toks, ddl } = withoutCommentEnd(statement, tokenize(statement, { noBackslashEscapes }));
+  const c = new Cursor(toks, ddl);
   if (c.isWord('SET') || c.isWord('USE') || isNoOp(c)) assertOneStatement(c.toks);
   if (c.isWord('SET')) {
     applySet(st, c);
@@ -123,15 +124,21 @@ function assertSameBackslashMode(st: State, ddl: string, noBackslashEscapes: boo
 }
 
 // NO_BACKSLASH_ESCAPES 세션에서 ENUM·SET 값에 백슬래시가 있으면 거부한다: 타입 정규화가 타입 원문을 보통 이스케이프 규칙으로 다시 읽어 값이 바뀐다.
-// 같은 세션의 COMMENT·DEFAULT 는 토큰 값을 그대로 써서 백슬래시가 MySQL 과 같게 남는다 (8.4.11 실측)
+// 같은 세션의 COMMENT·DEFAULT 는 토큰 값을 그대로 써서 백슬래시가 MySQL 과 같게 남는다 (8.4.11 실측). 토큰을 한 번만 돌며 열린 괄호마다 ENUM·SET 인자 괄호인지 기억해,
+// 그런 괄호 안(더 깊이 중첩된 괄호 안 포함)의 문자열만 본다 — ENUM( 마다 짝 괄호까지 다시 훑으면 중첩 괄호에서 제곱 시간이다 (리뷰 1회차 M-2)
 function assertNoBackslashTypeValues(toks: readonly Token[], ddl: string): void {
+  const opened: boolean[] = []; // 열린 괄호마다: ENUM·SET 바로 뒤의 괄호인가
+  let typeArgs = 0; // 열린 ENUM·SET 인자 괄호 수
   toks.forEach((t, k) => {
-    const opensTypeArgs = t.t === 'word' && /^(ENUM|SET)$/i.test(t.v) && toks[k + 1]?.t === 'op' && toks[k + 1].v === '(';
-    if (!opensTypeArgs) return;
-    for (let j = k + 2, depth = 1; j < toks.length && depth > 0; j++) {
-      const x = toks[j];
-      if (x.t === 'op' && (x.v === '(' || x.v === ')')) depth += x.v === '(' ? 1 : -1;
-      else if (x.t === 'string' && ddl.slice(x.s, x.e).includes('\\')) fail(`NO_BACKSLASH_ESCAPES 세션에서 백슬래시가 든 ENUM·SET 값은 받을 수 없습니다 — ${RE_EXPORT}`);
+    if (t.t === 'op' && t.v === '(') {
+      const prev = toks[k - 1];
+      const isTypeArgs = prev?.t === 'word' && /^(ENUM|SET)$/i.test(prev.v);
+      opened.push(isTypeArgs);
+      if (isTypeArgs) typeArgs++;
+    } else if (t.t === 'op' && t.v === ')') {
+      if (opened.pop()) typeArgs--;
+    } else if (typeArgs > 0 && t.t === 'string' && ddl.slice(t.s, t.e).includes('\\')) {
+      fail(`NO_BACKSLASH_ESCAPES 세션에서 백슬래시가 든 ENUM·SET 값은 받을 수 없습니다 — ${RE_EXPORT}`);
     }
   });
 }
@@ -142,11 +149,12 @@ function assertBmpStrings(toks: readonly Token[]): void {
 }
 
 // 실행 주석(/*!NNNNN … */)으로 감싼 문장 ('/*!40101 SET … */;' — mysqldump 머리·꼬리): 문장 나누기가 여는 표지만 떼고 닫는 '*/' 를 문장 끝에 남긴다.
-// 문장 끝에 붙은 '*' '/' 는 올바른 문장에 있을 수 없으므로 실행 주석의 끝으로 보고 뗀다. 안의 문장은 MySQL 이 그대로 실행한다
-function withoutCommentEnd(toks: Token[]): Token[] {
+// 문장 끝에 붙은 '*' '/' 는 올바른 문장에 있을 수 없으므로 실행 주석의 끝으로 보고 토큰과 원문에서 함께 뗀다 (원문은 루틴 본문이 된다 — 리뷰 1회차 F2).
+// 안의 문장은 MySQL 이 그대로 실행한다
+function withoutCommentEnd(statement: string, toks: Token[]): { toks: Token[]; ddl: string } {
   const [star, slash] = toks.slice(-2);
   const closes = star?.t === 'op' && star.v === '*' && slash?.t === 'op' && slash.v === '/' && star.e === slash.s;
-  return closes ? toks.slice(0, -2) : toks;
+  return closes ? { toks: toks.slice(0, -2), ddl: statement.slice(0, star.s).trimEnd() } : { toks, ddl: statement };
 }
 
 function unsupported(ddl: string): string {
