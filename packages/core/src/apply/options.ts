@@ -2,6 +2,7 @@
 import type { Cursor } from '../cursor';
 import { quoteString } from '../lexer';
 import type { Table, TableOption } from '../model';
+import { assertCommentLength } from './comment-length';
 import { fail, RE_EXPORT } from './types';
 
 // Map: 객체 조회는 'constructor'·'__proto__' 같은 Object.prototype 이름을 '있는 키'로 읽는다
@@ -52,6 +53,7 @@ export function parseCommonOption(c: Cursor): { key: string; value: string | und
   if (c.acceptWord('COMMENT')) {
     c.acceptOp('=');
     const v = c.string();
+    assertCommentLength('table', '', v); // 2048자 (리뷰 11회차 Claude F1)
     return { key: 'COMMENT', value: v === '' ? undefined : quoteString(v) };
   }
   if (c.acceptWord('ROW_FORMAT')) {

@@ -7,6 +7,8 @@ import { routineLexMode } from '../normalize';
 import { splitForApply, type ApplyStatement } from '../parse-dump';
 import { UnsafeValueError } from '../sql-safety';
 import { alterTable, createIndex, dropIndexOn } from './alter-table';
+import { assertUtf8Session } from './client-charset';
+import { LongComment, longCommentReason } from './comment-length';
 import { assertBmpText, canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
 import { noOpHandler } from './no-op';
 import { createRoutine, dropRoutine, dropView, isCreateRoutine } from './object-stmt';
@@ -14,9 +16,8 @@ import { applySet, resolveSqlMode } from './session';
 import { initialState, type State } from './state';
 import { createTable, dropTable, renameTables } from './table-stmt';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
-import { assertKnownRealType, assertModeIndependentText } from './unknown-session';
-import { assertUtf8Session } from './client-charset';
 import { assertAsciiSpaces } from './unicode-space';
+import { assertKnownRealType, assertModeIndependentText } from './unknown-session';
 import { executedText, skippedComments } from './version-comment';
 
 export { MYSQL_DEFAULTS, type ApplyDefaults, type ApplyError, type ApplyOptions, type ApplyResult } from './types';
@@ -123,8 +124,18 @@ function applyTokens(st: State, statement: string, tokens: Token[], noBackslashE
     assertKnownRealType(st, c.toks);
     if (noBackslashEscapes) assertNoBackslashTypeValues(c.toks, ddl);
   }
-  handler(st, c);
+  runHandler(st, handler, c);
   return !session;
+}
+
+// 처리기를 부른다. 정의 파서가 던진 긴 COMMENT(LongComment)는 세션 SQL_MODE 에 맞는 안내로 바꾼다 — 파서는 세션을 모른다 (comment-length.ts, 리뷰 11회차 Claude F1)
+function runHandler(st: State, handler: Handler, c: Cursor): void {
+  try {
+    handler(st, c);
+  } catch (e) {
+    if (e instanceof LongComment) fail(longCommentReason(st, e));
+    throw e;
+  }
 }
 
 // 문장 종류에 맞는 DDL 처리기 (지원하지 않는 문장이면 undefined). c 는 처리기가 읽기 시작할 자리로 옮긴다
