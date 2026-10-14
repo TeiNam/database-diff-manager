@@ -66,12 +66,15 @@ type Handler = (st: State, c: Cursor) => void;
 // 그 밖의 문장은 끝의 ';' 를 뗀 덩어리에 문장이 하나만 있어야 한다 (assertOneStatement — 지원하지 않는 문장은 그보다 먼저 지원 범위 안내로 거부한다)
 function applyStatement(st: State, statement: string, noBackslashEscapes: boolean): boolean {
   assertSameBackslashMode(st, statement, noBackslashEscapes);
-  const { toks, ddl } = withoutCommentEnd(statement, tokenize(statement, { noBackslashEscapes }));
-  if (isCreateRoutine(ddl)) {
-    createRoutine(st, ddl, noBackslashEscapes);
+  const tokens = tokenize(statement, { noBackslashEscapes });
+  const routine = withoutCommentEnd(statement, tokens).ddl;
+  if (isCreateRoutine(routine)) {
+    createRoutine(st, routine, noBackslashEscapes);
     return true;
   }
-  const c = new Cursor(withoutTrailingSemicolons(toks), ddl);
+  // 끝의 ';' 를 먼저 떼고 실행 주석의 닫는 '*/' 를 찾는다: 구분자를 바꾼 동안의 '/*!40101 ALTER … */;' 도 안의 문장이다 (리뷰 3회차 M-2)
+  const { toks, ddl } = withoutCommentEnd(statement, withoutTrailingSemicolons(tokens));
+  const c = new Cursor(toks, ddl);
   const isSession = c.isWord('SET') || c.isWord('USE') || isNoOp(c);
   const handler = isSession ? undefined : (ddlHandler(c) ?? fail(unsupported(ddl)));
   assertOneStatement(c.toks);

@@ -172,6 +172,14 @@ describe('applyScript — 실행 주석(/*!NNNNN … */)으로 감싼 문장', (
     if (r.ok) expect(r.model.tables[0].columns.map((c) => c.name)).toEqual(['id', 'x', 'y']);
   });
 
+  // 구분자를 바꾼 동안 '*/;' 로 끝낸 덩어리 (리뷰 3회차 M-2): mysql 클라이언트는 '/*!40101 ALTER … */;' 를 그대로 보내고 MySQL 은 ALTER 를 실행한다 (8.0.46·8.4.11 에서
+  // mysql 클라이언트로 실측 — ';;' 도 같다). 끝의 ';' 를 먼저 떼어야 닫는 '*/' 를 찾는다
+  it('구분자를 바꾼 동안 */; 로 끝낸 실행 주석 문장도 안의 문장으로 적용한다', () => {
+    const r = run('DELIMITER $$\n/*!40101 ALTER TABLE t ADD COLUMN x INT */;$$\n/*!40101 ALTER TABLE t ADD COLUMN y INT */;;$$\n/*!40014 SET FOREIGN_KEY_CHECKS=0 */;$$\nDELIMITER ;');
+    expect(r).toMatchObject({ ok: true, applied: 2 });
+    if (r.ok) expect(r.model.tables[0].columns.map((c) => c.name)).toEqual(['id', 'x', 'y']);
+  });
+
   it('문장 끝의 일반 주석 */ 는 건드리지 않는다', () => {
     expect(run('ALTER TABLE t ADD COLUMN x INT /* note */;')).toMatchObject({ ok: true, applied: 1 });
     expect(run('ALTER TABLE t ADD COLUMN x INT COMMENT \'a */\';')).toMatchObject({ ok: true, applied: 1 });
