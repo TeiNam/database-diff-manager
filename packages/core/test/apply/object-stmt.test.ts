@@ -334,6 +334,21 @@ describe('처음 세션 SQL_MODE (ApplyOptions.sqlMode)', () => {
     expect(routineOf(`${head}\n${proc}`, 'p_new').sqlMode).toBe(DEFAULT_SQL_MODE); // 처음 값을 주지 않으면 지금처럼 MySQL 기본 모드다
   });
 
+  // 리뷰 7회차 R7-1 재현 (session-boundaries default-after-global): SET GLOBAL 은 세션을 바꾸지 않지만 그 뒤의 SET SESSION sql_mode = DEFAULT 는 바뀐 서버 값을 읽는다.
+  // 처음 세션 SQL_MODE 를 붙이면 루틴의 sqlMode 가 실제와 달라지므로 거부한다. DEFAULT 를 쓰지 않았거나 서버 값을 바꾸기 전에 썼으면 세션 값은 처음 값 그대로다
+  it.each(['SET GLOBAL sql_mode', 'SET PERSIST sql_mode', 'SET @@global.sql_mode'])('%s 뒤의 SET SESSION sql_mode = DEFAULT 는 루틴에 처음 세션 SQL_MODE 를 붙이지 않고 RE_EXPORT 로 거부한다', (set) => {
+    const script = `${set} = 'NO_ENGINE_SUBSTITUTION';\nSET SESSION sql_mode = DEFAULT;\nCREATE PROCEDURE p() SELECT 1;`;
+    for (const r of [withMode(script, RELAXED), apply(script)]) {
+      expect(r).toMatchObject({ ok: false, error: { index: 2, line: 2, reason: expect.stringContaining('전역') } });
+      expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);
+    }
+  });
+
+  it('SET GLOBAL sql_mode 는 세션을 바꾸지 않아, DEFAULT 를 쓰지 않았거나 그 전에 썼으면 뒤에 만든 루틴은 처음 세션 SQL_MODE 를 쓴다', () => {
+    expect(routineIn(withMode(`SET GLOBAL sql_mode = 'NO_ENGINE_SUBSTITUTION';\n${PROC}`, RELAXED), 'p1').sqlMode).toBe(RELAXED);
+    expect(routineIn(withMode(`SET sql_mode = DEFAULT;\nSET GLOBAL sql_mode = '';\n${PROC}`, RELAXED), 'p1').sqlMode).toBe(RELAXED);
+  });
+
   it("빈 모드('')도 받고, 주지 않으면 지금처럼 MySQL 8.0/8.4 기본 모드다", () => {
     expect(routineIn(withMode(PROC, ''), 'p1').sqlMode).toBe('');
     expect(routineOf(PROC, 'p1').sqlMode).toBe(DEFAULT_SQL_MODE);

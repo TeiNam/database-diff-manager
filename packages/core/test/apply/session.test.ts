@@ -293,6 +293,82 @@ describe('SET 범위', () => {
   });
 });
 
+// 리뷰 7회차 R7-1: GLOBAL·PERSIST 로 서버 sql_mode 를 바꾸면 세션 값은 그대로지만, 그 뒤의 세션 sql_mode = DEFAULT 는 바뀐 서버 값을 읽는다. 이 도구가 아는 DEFAULT 값은
+// 처음 세션 SQL_MODE(짐작한 서버 값)뿐이라 바뀐 값을 알 수 없으므로 RE_EXPORT 로 거부한다. 서버 sql_mode 를 바꾸기 전의 DEFAULT 와 세션 값을 직접 정하는 대입은 그대로 받는다
+describe('서버 sql_mode 를 바꾼 뒤의 SET sql_mode = DEFAULT', () => {
+  const RELAXED = 'STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+  const SERVER_CHANGES = [
+    "SET GLOBAL sql_mode = 'NO_ENGINE_SUBSTITUTION'", 'SET GLOBAL sql_mode = DEFAULT', "SET PERSIST sql_mode = ''", "SET PERSIST_ONLY sql_mode = 'STRICT_TRANS_TABLES'",
+    "SET @@global.sql_mode = 'NO_ENGINE_SUBSTITUTION'", "SET @@PERSIST.sql_mode = ''", "SET GLOBAL max_connections = 10, sql_mode = 'NO_ZERO_DATE'",
+    "SET GLOBAL sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_DATE', '')",
+  ];
+  const SESSION_DEFAULTS = [
+    'SET sql_mode = DEFAULT', 'SET SESSION sql_mode = DEFAULT', 'SET LOCAL sql_mode = default', 'SET @@sql_mode = DEFAULT', 'SET @@SESSION.sql_mode = DEFAULT',
+    'SET NAMES utf8mb4, sql_mode = DEFAULT',
+  ];
+  const stateWith = (sql: string): State => {
+    const st = initialState(empty, 'shop', MYSQL_DEFAULTS, RELAXED);
+    setIn(st, sql);
+    return st;
+  };
+
+  it.each(SERVER_CHANGES)('%s 뒤의 세션 DEFAULT 는 전역 값을 바꿨음을 알리고 RE_EXPORT 로 거부한다 (세션 값은 그대로)', (change) => {
+    for (const sql of SESSION_DEFAULTS) {
+      const st = stateWith(change);
+      const message = messageOf(() => setIn(st, sql));
+      expect(message, sql).toContain('전역');
+      expect(message, sql).toContain('바꿨');
+      expect(message.endsWith(RE_EXPORT), sql).toBe(true);
+      expect(st.sqlMode, sql).toBe(RELAXED);
+    }
+  });
+
+  it.each([
+    ["SET GLOBAL sql_mode = 'NO_ENGINE_SUBSTITUTION', SESSION sql_mode = DEFAULT"], ["SET PERSIST sql_mode = '', @@session.sql_mode = DEFAULT"],
+    ["SET @@global.sql_mode = '', SESSION sql_mode = DEFAULT"],
+  ])('한 문장 안에서도 서버 값을 바꾼 뒤(%s)의 세션 DEFAULT 는 거부한다', (sql) => {
+    const st = initialState(empty, 'shop', MYSQL_DEFAULTS, RELAXED);
+    expect(messageOf(() => setIn(st, sql))).toContain(RE_EXPORT);
+    expect(st.sqlMode).toBe(RELAXED);
+  });
+
+  it('여러 문장에 걸쳐 간 뒤에도 거부한다 (서버 값을 바꾼 사실을 기억한다)', () => {
+    const st = stateWith("SET GLOBAL sql_mode = 'NO_ENGINE_SUBSTITUTION'");
+    setIn(st, "SET sql_mode = 'NO_ZERO_DATE'");
+    setIn(st, 'SET GLOBAL max_connections = 10');
+    expect(() => setIn(st, 'SET SESSION sql_mode = DEFAULT')).toThrow(ApplyFailure);
+    expect(st.sqlMode).toBe('NO_ZERO_DATE');
+  });
+
+  it('서버 sql_mode 를 바꾸기 전의 DEFAULT 는 처음 세션 SQL_MODE 로 되돌린다', () => {
+    const st = initialState(empty, 'shop', MYSQL_DEFAULTS, RELAXED);
+    setIn(st, "SET sql_mode = 'NO_ZERO_DATE'");
+    setIn(st, 'SET SESSION sql_mode = DEFAULT');
+    expect(st.sqlMode).toBe(RELAXED);
+    setIn(st, "SET GLOBAL sql_mode = 'NO_ENGINE_SUBSTITUTION'");
+    expect(st.sqlMode).toBe(RELAXED);
+  });
+
+  it('서버 sql_mode 를 바꾼 뒤에도 세션 값을 직접 정하는 대입·@OLD_ 복원·SET GLOBAL sql_mode = DEFAULT 는 받는다', () => {
+    const st = stateWith("SET @OLD_MODE = @@SQL_MODE, GLOBAL sql_mode = 'NO_ENGINE_SUBSTITUTION'");
+    setIn(st, "SET SESSION sql_mode = 'NO_ZERO_DATE'");
+    expect(st.sqlMode).toBe('NO_ZERO_DATE');
+    setIn(st, 'SET sql_mode = @OLD_MODE');
+    expect(st.sqlMode).toBe(RELAXED);
+    setIn(st, 'SET GLOBAL sql_mode = DEFAULT');
+    expect(st.sqlMode).toBe(RELAXED);
+  });
+
+  it.each([
+    ['SET GLOBAL max_connections = 10'], ['SET PERSIST foreign_key_checks = 0'], ['SET @@global.default_storage_engine = MyISAM'], ["SET GLOBAL time_zone = '+00:00'"],
+    ["SET SESSION sql_mode = 'NO_ZERO_DATE'"], ['SET GLOBAL max_connections = 10, SESSION sql_mode = DEFAULT'],
+  ])('서버 sql_mode 를 바꾸지 않은 %s 뒤의 세션 DEFAULT 는 그대로 받는다', (change) => {
+    const st = stateWith(change);
+    setIn(st, 'SET SESSION sql_mode = DEFAULT');
+    expect(st.sqlMode).toBe(RELAXED);
+  });
+});
+
 // 세션 time_zone 과 TIMESTAMP 리터럴 기본값 (리뷰 3회차 M-1·4회차 M-1, 8.0.46·8.4.11 실측): MySQL 은 TIMESTAMP 리터럴 기본값을 쓰는 세션의 시간대에서 UTC 로 바꿔 저장하고,
 // SHOW CREATE 는 읽는 세션의 시간대로 다시 바꿔 찍는다 ('+09:00' 세션의 DEFAULT '2020-01-01 09:00:00' 을 UTC 세션에서 읽으면 '2020-01-01 00:00:00'). td-export 는 UTC 세션
 // (sqlx 기본값 time_zone='+00:00')에서 읽으므로 기준 버전의 값은 UTC 글자다. 스크립트가 앞에서 세션 time_zone 을 UTC 로 정한 뒤의 값은 쓴 그대로 받고, 그 밖(정하지 않아 서버

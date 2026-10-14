@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { applyScript, MYSQL_DEFAULTS, resolveDefaults } from '../../src/apply';
 import { ApplyFailure, RE_EXPORT } from '../../src/apply/types';
 import { parseSqlDump } from '../../src/parse-dump';
-import { tdExport } from '../helpers';
+import { fixture, tdExport } from '../helpers';
 
 const base = parseSqlDump(tdExport('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\n')).model;
 const run = (script: string) => applyScript(base, script, { schemaName: 'shop' });
+const SHOP = parseSqlDump(fixture('td-export-0152/shop.sql')).model; // 함수 tax, 프로시저 mark_paid, 테이블 orders·order_audit
 // 구분자를 ';;' 로 바꾼 뒤 되돌리지 않은 스크립트의 머리: 뒤에 쓴 ';' 는 문장을 끝내지 않아 다음 ';;' 나 파일 끝까지가 한 덩어리다
 const NO_DELIMITER_RESET = 'DELIMITER ;;\nCREATE FUNCTION f1() RETURNS INT DETERMINISTIC RETURN 1;;\n';
 
@@ -141,6 +142,58 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
     const r = run(script);
     expect(r).toMatchObject({ ok: false, error: { index: 2, line: 2 } });
     if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  });
+
+  // 리뷰 7회차 R7-2: 무시하는 문장이 저장 함수를 부르면 함수가 SET @m = … 으로 바꾼 사용자 변수를 알 수 없다 — 문장을 실행하지 않아 함수의 결과를 평가할 수 없고, 뒤 SET 이
+  // 그 변수를 읽으면 옛 값을 쓴다. 현재 모델에 있는(같은 스크립트에서 앞서 만든 것 포함) 저장 함수 이름(대소문자 무시) 바로 뒤에 '(' 가 오면 RE_EXPORT 로 거부한다.
+  // 내장 함수와 그 밖의 이름은 그대로 무시한다
+  const FN = 'CREATE FUNCTION fn_one() RETURNS INT DETERMINISTIC NO SQL RETURN 1;';
+  const expectStoredFunctionRejected = (r: ReturnType<typeof run>, index: number, name: string): void => {
+    expect(r).toMatchObject({ ok: false, error: { index, reason: expect.stringMatching(new RegExp(name, 'i')) } }); // 이름은 쓴 그대로 안내한다 (대소문자 무시로 맞는다)
+    if (r.ok) return;
+    expect(r.error.reason).toContain('저장 함수');
+    expect(r.error.reason).toContain('평가할 수 없');
+    expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  };
+
+  it.each([
+    'SELECT fn_one();', 'select FN_ONE ();', 'SELECT `fn_one`();', 'SELECT shop.fn_one();', 'SELECT 1 + fn_one() AS x FROM t;', 'SELECT * FROM t WHERE id IN (1, fn_one());',
+    'SELECT /* 주석 */ fn_one /* 주석 */ ();', 'DO fn_one();', 'EXPLAIN SELECT fn_one();', 'INSERT INTO t VALUES (fn_one());', 'INSERT INTO t VALUES (1), (fn_one());',
+    'REPLACE INTO t (id) VALUES (fn_one());', 'UPDATE t SET id = fn_one();', 'DELETE FROM t WHERE id = fn_one();', '/*!40000 SELECT fn_one() */;',
+  ])('같은 스크립트에서 만든 저장 함수를 부르는 무시 문장 %s 는 RE_EXPORT 로 거부한다', (sql) => {
+    expectStoredFunctionRejected(run(`${FN}\n${sql}\nALTER TABLE t ADD COLUMN y INT;`), 2, 'fn_one');
+  });
+
+  it('기준 버전에 있는 저장 함수(대소문자 무시)를 부르는 무시 문장도 거부한다', () => {
+    for (const sql of ['SELECT tax(100);', 'SELECT TAX (1.5) AS x;', 'INSERT INTO orders (amount) VALUES (Tax(5));', 'DO `tax`(1);']) {
+      expectStoredFunctionRejected(applyScript(SHOP, `${sql}\nALTER TABLE orders ADD COLUMN y INT;`, { schemaName: 'shop' }), 1, 'tax');
+    }
+  });
+
+  it('저장 함수가 SET @m 으로 바꾼 사용자 변수를 SET SQL_MODE = @m 이 읽기 전에 거부한다 (R7-2 재현)', () => {
+    const script = [
+      "SET @m = 'STRICT_TRANS_TABLES';", 'DELIMITER $$', 'CREATE FUNCTION set_m() RETURNS INT DETERMINISTIC NO SQL', 'BEGIN', " SET @m = 'NO_ENGINE_SUBSTITUTION';", ' RETURN 1;', 'END$$',
+      'DELIMITER ;', 'SELECT set_m();', 'SET SQL_MODE = @m;', 'CREATE PROCEDURE p() SELECT 1;',
+    ].join('\n');
+    const r = run(script);
+    expectStoredFunctionRejected(r, 3, 'set_m');
+    expect(r).toMatchObject({ ok: false, error: { line: 9, statement: 'SELECT set_m()' } });
+  });
+
+  it("내장 함수·저장 함수가 아닌 이름·프로시저·문자열과 주석 속 글자는 저장 함수가 있어도 그대로 무시한다 (INSERT … VALUES (NOW(), CONCAT('a','b')))", () => {
+    for (const sql of [
+      "INSERT INTO t VALUES (NOW(), CONCAT('a','b'));", "INSERT INTO t (id) VALUES (1), (2) ON DUPLICATE KEY UPDATE id = VALUES(id);", 'SELECT COUNT(*), MAX(id), IFNULL(NULL, 1) FROM t WHERE id IN (1, 2);',
+      'SELECT fn_one FROM t;', 'SELECT unknown_fn(1);', "SELECT 'fn_one(1)' AS s;", 'SELECT 1 /* fn_one() */;', "INSERT INTO t VALUES ('x'); -- fn_one(1)",
+    ]) {
+      expect(run(`${FN}\n${sql}\nALTER TABLE t ADD COLUMN y INT;`), sql).toMatchObject({ ok: true, applied: 2 });
+    }
+    // 저장 함수가 아닌 프로시저는 이름이 테이블과 같아도 무시한다 (CREATE PROCEDURE t …; INSERT INTO t (id) …)
+    expect(run('CREATE PROCEDURE t() SELECT 1;\nINSERT INTO t (id) VALUES (1);\nALTER TABLE t ADD COLUMN y INT;')).toMatchObject({ ok: true, applied: 2 });
+    expect(applyScript(SHOP, "INSERT INTO orders (amount, status) VALUES (1, CONCAT('n', 'ew'));\nALTER TABLE orders ADD COLUMN y INT;", { schemaName: 'shop' })).toMatchObject({ ok: true, applied: 1 });
+  });
+
+  it('지운 저장 함수는 더 이상 저장 함수 호출이 아니다', () => {
+    expect(run(`${FN}\nDROP FUNCTION fn_one;\nSELECT fn_one();\nALTER TABLE t ADD COLUMN y INT;`)).toMatchObject({ ok: true, applied: 3 });
   });
 
   it('없는 테이블의 DISABLE KEYS 는 1146, 다른 스키마의 테이블은 거부한다', () => {

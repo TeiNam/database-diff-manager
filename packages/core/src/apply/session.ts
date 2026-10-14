@@ -1,6 +1,6 @@
 // SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
 // (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, unique_checks 등)는 스키마에 영향이 없어 무시한다.
-// 서버 변수(SET GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)는 이 스크립트의 세션을 바꾸지 않아 무시한다.
+// 서버 변수(SET GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)는 이 스크립트의 세션을 바꾸지 않아 무시한다 (서버 sql_mode 를 바꾼 사실만 기억해 뒤의 SET sql_mode = DEFAULT 를 거부한다).
 // td-export·마이그레이션 스크립트의 'SET @OLD_X = @@X, X = 0' 저장과 'SET X = @OLD_X' 복원을 따른다
 import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
@@ -50,7 +50,12 @@ function assign(st: State, a: Cursor, inherited: Scope): Scope {
   if (a.isWord('NAMES') || a.isWord('CHARACTER') || a.isWord('CHARSET')) return inherited;
   const scope = scopeWord(a) ?? inherited;
   const variable = target(a);
-  if (!variable.name.startsWith('@') && (variable.scope ?? scope) === 'server') return scope; // 서버 변수: 값이 식이어도, 스키마에 영향을 주는 변수여도 이 세션과 상관없다
+  if (!variable.name.startsWith('@') && (variable.scope ?? scope) === 'server') {
+    // 서버 변수: 값이 식이어도, 스키마에 영향을 주는 변수여도 이 세션과 상관없다. 다만 서버 sql_mode 를 바꾼 사실은 기억한다 (sessionSqlMode).
+    // PERSIST_ONLY 는 실행 중인 값을 바꾸지 않지만 범위를 가르지 않고 함께 본다 (드물어 보수적으로 거부)
+    if (variable.name === 'sql_mode') st.serverSqlModeChanged = true;
+    return scope;
+  }
   assignSession(st, a, variable.name);
   return scope;
 }
@@ -136,8 +141,13 @@ function foreignKeyChecksOf(value: string): boolean {
 }
 
 // 세션 sql_mode 에 쓴 값. DEFAULT 는 MySQL 이 세션 값을 전역 값, 곧 스크립트를 실행한 서버의 sql_mode 로 되돌린다 — 이 도구에서는 처음 세션 SQL_MODE 다
-// (서버가 기준 버전 루틴에서 짐작한 값. 주지 않았으면 MySQL 기본 모드 — 리뷰 6회차 M-2). 컴파일 기본값(DEFAULT_SQL_MODE)으로 두면 SET 없이 만든 루틴과 어긋난다
-const sessionSqlMode = (st: State, value: string): string => (value === 'DEFAULT' ? st.initialSqlMode : resolveSqlMode(value));
+// (서버가 기준 버전 루틴에서 짐작한 값. 주지 않았으면 MySQL 기본 모드 — 리뷰 6회차 M-2). 컴파일 기본값(DEFAULT_SQL_MODE)으로 두면 SET 없이 만든 루틴과 어긋난다.
+// 다만 스크립트가 앞에서 GLOBAL·PERSIST 로 서버 sql_mode 를 바꿨으면 DEFAULT 가 읽는 전역 값은 바뀐 값이라 처음 세션 SQL_MODE 와 다르다 — 그 값을 알 수 없어 받지 않는다 (리뷰 7회차 R7-1)
+function sessionSqlMode(st: State, value: string): string {
+  if (value !== 'DEFAULT') return resolveSqlMode(value);
+  if (st.serverSqlModeChanged) fail(`SET sql_mode = DEFAULT 는 받을 수 없습니다 — 이 스크립트가 앞에서 전역(GLOBAL·PERSIST) sql_mode 를 바꿨습니다. DEFAULT 는 바뀐 전역 값으로 되돌리므로 처음 세션 SQL_MODE 와 달라지는데 그 값을 알 수 없습니다 — ${RE_EXPORT}`);
+  return st.initialSqlMode;
+}
 
 // 쓴 모드를 MySQL 순서로 줄 세워 대문자로 돌려준다 (루틴이 기억하는 sql_mode 가 SHOW CREATE 와 같아야 한다). 같은 이름은 한 번만 쓰고,
 // 빈 항목('A,' · ',A')은 MySQL 처럼 건너뛴다. ANSI·TRADITIONAL 같은 묶음 이름과 REAL_AS_FLOAT·ANSI_QUOTES 는 받지 않는다 (ApplyFailure).
