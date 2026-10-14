@@ -15,6 +15,17 @@ const heading = (name: string): string[] => (UNSAFE_COMMENT.test(name) ? [] : [`
 // 마지막 줄에 주석 표지가 있으면 새 줄에 둔다 (문자열 안의 표지에서도 새 줄이 들어가지만 공백만 바뀐다 — 파서가 문장을 trim 한다)
 const terminate = (text: string, end: string): string => (/--|#/.test(text.slice(text.lastIndexOf('\n') + 1)) ? `${text}\n${end}` : `${text}${end}`);
 
+// ;;·$$·// 가 모두 본문에 있으면 본문에 없는 '$$<번호>' 를 쓴다 (리뷰 1회차 M-6 — 덤프 파서와 mysql 클라이언트가 그대로 읽는다). '$$12' 가 있으면 '$$1' 도 본문 안에서
+// 먼저 나오므로, 본문의 '$$<숫자>' 마다 숫자의 앞부분을 모두 쓴 번호로 친다. 한 번 훑어 모으므로 본문 길이에 비례한다 (번호마다 fitsAfter 로 훑으면 '$$1'…'$$N' 이 든
+// 본문에서 제곱이다). 고르는 번호는 쓴 번호 수 + 1 을 넘지 않아 (1,000,000자 본문이면 일곱 자리 안) 앞부분은 아홉 자리까지만 센다
+const MAX_NUMBER_DIGITS = 9;
+
+function numberedDelimiter(ddl: string): string {
+  const used = new Set<string>();
+  for (const [, digits] of ddl.matchAll(/\$\$(\d+)/g)) for (let k = 1; k <= Math.min(digits.length, MAX_NUMBER_DIGITS); k++) used.add(digits.slice(0, k));
+  for (let n = 1; ; n++) if (!used.has(String(n)) && fitsAfter(ddl, `$$${n}`)) return `$$${n}`;
+}
+
 // 객체 순서는 모델 그대로 둔다. parseSqlDump 가 파일 순서를 지키므로 다시 읽으면 순서까지 같은 모델이 나온다
 // (td-export 0.1.52 덤프의 뷰·루틴은 이름순이 아니라서, 이름순으로 다시 늘어놓으면 순서가 달라진다)
 export function printSqlDump(model: SchemaModel): string {
@@ -29,7 +40,7 @@ export function printSqlDump(model: SchemaModel): string {
 // td-export 0.1.52 의 루틴 블록: SQL_MODE 저장·설정 → DELIMITER → CREATE → 복원
 function routineBlock(r: Routine): string[] {
   const ddl = printRoutine(r);
-  const delimiter = DELIMITERS.find((d) => fitsAfter(ddl, d)) ?? fail(`루틴 \`${r.name}\` 본문에 구분자로 쓸 수 있는 문자열이 없습니다`);
+  const delimiter = DELIMITERS.find((d) => fitsAfter(ddl, d)) ?? numberedDelimiter(ddl);
   const mode = r.sqlMode === undefined ? [] : [`SET @OLD_ROUTINE_SQL_MODE = @@SQL_MODE, SQL_MODE = '${r.sqlMode}';`];
   return [...mode, `DELIMITER ${delimiter}`, terminate(ddl, delimiter), 'DELIMITER ;', ...(mode.length ? ['SET SQL_MODE = @OLD_ROUTINE_SQL_MODE;'] : [])];
 }

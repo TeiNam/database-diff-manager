@@ -44,4 +44,18 @@ describe('NO_BACKSLASH_ESCAPES — 문장 나누기와 세션 SQL_MODE 가 어�
       expect(reasonOf(`ALTER TABLE t ADD e ${type};`)).toBe('ok');
     }
   });
+
+  // ENUM( 마다 짝 괄호까지 다시 훑으면 중첩 괄호에서 제곱 시간이다 (리뷰 1회차 M-2: 중첩 4만 개 4.4 초, 8만 개 16 초). 토큰을 한 번만 돌며 열린 ENUM·SET 인자 괄호를 센다
+  it('ENUM·SET 백슬래시 검사는 중첩 괄호에서도 선형이고, 중첩 안·뒤의 값도 본다', () => {
+    const nested = 40000;
+    const started = performance.now();
+    const reason = reasonOf(`SET SQL_MODE = 'NO_BACKSLASH_ESCAPES';\nALTER TABLE t ADD c ${'ENUM('.repeat(nested)}${')'.repeat(nested)};`);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(reason).toMatch(/^2: ENUM·SET 값은 문자열이어야 합니다/);
+    for (const type of ["ENUM(SET('a\\b'), 'c')", "ENUM(x(1), 'a\\b')", "SET('a', ENUM('b'), 'c\\d')"]) {
+      const r = reasonOf(`SET SQL_MODE = 'NO_BACKSLASH_ESCAPES';\nALTER TABLE t ADD e ${type};`);
+      expect(r.endsWith(RE_EXPORT), `${type}: ${r}`).toBe(true);
+    }
+    expect(reasonOf("SET SQL_MODE = 'NO_BACKSLASH_ESCAPES';\nALTER TABLE t ADD e ENUM('a','b') COMMENT 'x\\y';")).toBe('ok'); // ENUM 인자 밖의 백슬래시는 그대로 받는다
+  });
 });

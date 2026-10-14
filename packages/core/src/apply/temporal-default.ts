@@ -53,5 +53,6 @@ function timeDefault(fsp: number, text: string): TemporalResult {
   if (frac === undefined) return UNSUPPORTED;
   const isZero = hours === 0 && minutes === 0 && seconds === 0 && !/[1-9]/.test(frac); // 소수 초만 0 이 아니어도 부호가 남는다 ('-00:00:00.123', 8.0.46·8.4.11 실측)
   const sign = m[1] === '-' && !isZero ? '-' : '';
-  return { value: `${sign}${m[2].padStart(2, '0')}:${m[3]}:${m[4] ?? '00'}${frac}` };
+  // 시는 값으로 찍는다: '001' 은 '01', '1' 은 '01', '100' 은 그대로 (8.0.46·8.4.11 실측 — 쓴 글자를 채우기만 하면 '001' 이 남는다, 리뷰 1회차 F8)
+  return { value: `${sign}${String(hours).padStart(2, '0')}:${m[3]}:${m[4] ?? '00'}${frac}` };
 }

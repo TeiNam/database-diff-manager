@@ -7,7 +7,7 @@ import { addKeys, checkSetNullFks, checkTable, columnKeyItems, enforcePrimaryKey
 import { splitList } from './lists';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, finalizeColumn, primaryCollation, tableCharset } from './normalize-mysql';
 import { innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
-import { appendTable, forgetOrigins, moveOrigins, moveRefTable, nameTaken, needTable, objectName, objectNameList, removeTables, replaceTable, sameName, trackNew, type State } from './state';
+import { appendTable, childNames, forgetOrigins, moveOrigins, moveRefTable, nameTaken, needTable, objectName, objectNameList, removeTables, replaceTable, sameName, trackNew, type State } from './state';
 import { assertColumnCount, assertKeyCount } from './limits';
 import { fail, RE_EXPORT, type ConstraintItem } from './types';
 
@@ -32,7 +32,7 @@ export function renameTable(st: State, from: string, to: string): void {
   replaceTable(st, from, renamed);
   if (st.refTables.has(from)) {
     st.model.tables = withRefTableRenamed(st.model.tables, from, to);
-    moveRefTable(st, from, to);
+    moveRefTable(st, from, to); // 자식 테이블 이름과 FK 이름·참조 컬럼은 그대로라 참조 색인은 부모 이름만 옮긴다
   }
   moveOrigins(st.origins, from, to);
 }
@@ -46,12 +46,14 @@ function withRefTableRenamed(tables: readonly Table[], from: string, to: string)
 }
 
 // 테이블 이름을 바꾸면 자동 FK 이름 '<옛>_ibfk_N' 이 '<새>_ibfk_N' 이 된다. FK 이름은 스키마 안에서 유일하고 대소문자를 구분하지 않으므로, 바뀐 이름이 같은 테이블의 다른 FK 나
-// 다른 테이블의 FK 와 겹치면 1826 이다 (MySQL 8.0.46·8.4.11 실측: RENAME TABLE·ALTER TABLE … RENAME TO 모두)
+// 다른 테이블의 FK 와 겹치면 1826 이다 (MySQL 8.0.46·8.4.11 실측: RENAME TABLE·ALTER TABLE … RENAME TO 모두). 다른 테이블의 FK 이름은 FK 이름 색인(st.fkNames — t 의 FK 도
+// 들어 있다)으로 본다 (리뷰 1회차 M-1: 모든 테이블의 FK 이름을 모으지 않는다)
 function assertRenamedFkNamesFree(st: State, t: Table, to: string): void {
   const names = t.foreignKeys.map((f) => renamedAutoName(f.name, t.name, to, 'ibfk'));
   if (names.every((name, k) => name === t.foreignKeys[k].name)) return; // 바뀌는 이름이 없다
-  const others = st.model.tables.filter((x) => x.name !== t.name).flatMap((x) => x.foreignKeys.map((f) => f.name));
-  const clash = names.find((name, k) => name !== t.foreignKeys[k].name && [...others, ...names.filter((_, j) => j !== k)].some((n) => sameName(n, name)));
+  const own = t.foreignKeys.map((f) => f.name.toLowerCase());
+  const inOtherTable = (lower: string) => (st.fkNames.get(lower) ?? 0) > own.filter((n) => n === lower).length;
+  const clash = names.find((name, k) => name !== t.foreignKeys[k].name && (inOtherTable(name.toLowerCase()) || names.some((n, j) => j !== k && sameName(n, name))));
   if (clash !== undefined) fail(`이름을 바꾸면 자동 FK 이름 \`${clash}\` 이 다른 FK 와 겹칩니다: \`${t.name}\` → \`${to}\` (MySQL 1826)`);
 }
 
@@ -124,7 +126,8 @@ export function dropTable(st: State, c: Cursor): void {
   const ifExists = c.acceptWord('IF', 'EXISTS');
   const names = objectNameList(c, st);
   const targets = new Set(names.filter((n) => st.tableAt.has(n) || (ifExists ? false : fail(`테이블 \`${n}\` 이 없습니다 (MySQL 1051)`))));
-  if (st.fkChecks && [...targets].some((n) => st.refTables.has(n))) {
+  // 참조 색인: 지우는 테이블을 함께 지우지 않는 테이블이 참조할 때만, 알릴 FK 를 찾으려고 모든 테이블을 차례로 본다
+  if (st.fkChecks && [...targets].some((n) => [...childNames(st, n)].some((child) => !targets.has(child)))) {
     for (const child of st.model.tables) {
       if (targets.has(child.name)) continue;
       const fk = child.foreignKeys.find((f) => f.refSchema === undefined && targets.has(f.refTable));

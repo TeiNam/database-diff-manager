@@ -14,7 +14,7 @@ import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { assertColumnCount, assertForeignKeyCount, assertKeyCount } from './limits';
 import { assertInnoDbTable, innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
-import { findColumn, needTable, objectName, replaceTable, sameName, type State } from './state';
+import { childNames, childTables, findColumn, findTable, isReferencedColumn, needTable, objectName, replaceTable, replaceTables, sameName, type State } from './state';
 import { renameTable } from './table-stmt';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type DefaultSpec, type Position } from './types';
 
@@ -236,12 +236,13 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   const items = pick('key').map((x) => x.item);
   assertKeyCount(t.indexes.filter((i) => !isFlagged(flagged, i.name)).length + items.filter((i) => i.kind === 'index').length); // 버려지지 않는 키만 세어도 64개를 넘으면 1069
   const plan = planAutoKeys(t, items, flagged, shrunkIndexes(before, t, renames)); // 이 문장의 키(더한 키·DROP COLUMN 으로 줄어든 키)가 FK 자동 인덱스를 대신하는가
+  const existing = new Set(t.indexes); // 문장 앞부터 있던 키 (키 순서 — sortIndexes)
   t = addConstraints(st, before, t, items, plan); // 6) 키 추가와 FK 자동 인덱스
   assertTargetsKept(t, pick('indexVisibility').map((v) => v.name)); // 버려진 자동 인덱스에 ALTER INDEX 를 썼으면 1176
   t = enforcePrimaryKeyNotNull(t, explicitNullColumns(clauses)); // 7) PRIMARY KEY 컬럼 NOT NULL·검사·키 순서 8) 테이블 옵션
   checkNowNotNull(before, t, renamed);
   checkTable(st, t, renamed);
-  t = { ...t, indexes: sortIndexes(t) };
+  t = { ...t, indexes: sortIndexes(t, { before, existing, renames }) };
   syncIndexOrigins(st, before.name, t);
   syncProvenance(st, before.name, t, flagged);
   for (const o of pick('option')) t = { ...t, options: setOption(t.options, o.key, o.value) };
@@ -273,7 +274,7 @@ function keepKeys(before: Table, entries: readonly Entry[], clauses: readonly Cl
 
 // 6) 키 추가와 FK 자동 인덱스. 이름 없는 FK 번호는 이 문장 앞의 FK 이름(지우는 것 포함) 기준이고, FK 를 더했으면 SHOW CREATE 순서(이름 순)로 다시 놓는다
 function addConstraints(st: State, before: Table, t: Table, items: readonly ConstraintItem[], plan: AutoKeyPlan): Table {
-  const next = addKeys(st, t, items, before.foreignKeys.map((f) => f.name), plan);
+  const next = addKeys(st, t, items, before.foreignKeys.map((f) => f.name), plan, before);
   return items.some((i) => i.kind === 'fk') ? { ...next, foreignKeys: sortForeignKeys(next.foreignKeys) } : next;
 }
 
@@ -360,7 +361,8 @@ function assertNoDependents(st: State, t: Table, dropped: ReadonlySet<string>, r
   for (const name of dropped) {
     const own = t.foreignKeys.find((f) => !keyDropped('fk', f.name) && f.columns.some((c) => sameName(c, name)));
     if (own) fail(`FK \`${own.name}\` 가 쓰는 컬럼 \`${name}\` 은 지울 수 없습니다 (MySQL 1828)`);
-    for (const child of st.model.tables) {
+    if (!isReferencedColumn(st, t.name, name)) continue; // 참조 색인: 아무 FK 도 참조하지 않는 컬럼이면 자식 테이블을 훑지 않는다
+    for (const child of childTables(st, t.name)) {
       const fk = child.foreignKeys.find((f) => f.refTable === t.name && f.refSchema === undefined && !(child.name === t.name && keyDropped('fk', f.name)) && f.refColumns.some((c) => sameName(c, name)));
       if (fk) fail(`\`${child.name}\` 의 FK \`${fk.name}\` 가 참조하는 컬럼 \`${name}\` 은 지울 수 없습니다 (MySQL 1829)`);
     }
@@ -370,8 +372,7 @@ function assertNoDependents(st: State, t: Table, dropped: ReadonlySet<string>, r
 // FK 로 이어진 컬럼(자기 FK 컬럼·다른 테이블이 참조하는 컬럼)의 타입·콜레이션 변경은 1차 범위 밖 (MySQL 3780 과 허용 사례를 가르지 않는다)
 function assertRetypeAllowed(st: State, t: Table, old: Column, next: Column, charset: TableCharset): void {
   if (old.type === next.type && effectiveCollation(old, charset) === effectiveCollation(next, charset)) return;
-  const linked = t.foreignKeys.some((f) => f.columns.some((c) => sameName(c, old.name)))
-    || st.model.tables.some((x) => x.foreignKeys.some((f) => f.refTable === t.name && f.refSchema === undefined && f.refColumns.some((c) => sameName(c, old.name))));
+  const linked = t.foreignKeys.some((f) => f.columns.some((c) => sameName(c, old.name))) || isReferencedColumn(st, t.name, old.name);
   if (linked) fail(`FK 로 이어진 컬럼 \`${old.name}\` 의 타입·문자셋 변경은 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
 }
 
@@ -395,15 +396,16 @@ function syncIndexOrigins(st: State, table: string, t: Table): void {
   st.origins.indexes.set(table, new Map(t.indexes.map((i) => [i.name, m.get(i.name)])));
 }
 
-// 다른 테이블 FK 가 참조하는 이 테이블 컬럼 이름도 따라 바뀐다 (MySQL 8.0)
+// 다른 테이블 FK 가 참조하는 이 테이블 컬럼 이름도 따라 바뀐다 (MySQL 8.0). 참조 색인으로 바뀐 컬럼을 참조하는 자식 테이블만 고친다 (자기 참조는 remapKeys 가 고쳤다)
 function renameReferencedColumns(st: State, table: string, renamed: ReadonlyMap<string, string>): void {
-  if (!renamed.size || !st.refTables.has(table)) return;
+  if (![...renamed.keys()].some((old) => isReferencedColumn(st, table, old))) return;
   const rename = (n: string) => renamed.get(n.toLowerCase()) ?? n;
   const refersTable = (f: { refTable: string; refSchema?: string }) => f.refTable === table && f.refSchema === undefined;
-  st.model.tables = st.model.tables.map((x) => (x.name === table || !x.foreignKeys.some(refersTable) ? x : {
-    ...x,
-    foreignKeys: x.foreignKeys.map((f) => (refersTable(f) ? { ...f, refColumns: f.refColumns.map(rename) } : f)),
-  }));
+  const children = [...childNames(st, table)].flatMap((name) => {
+    const child = name === table ? undefined : findTable(st, name);
+    return child ? [child] : [];
+  });
+  replaceTables(st, children.map((x) => ({ ...x, foreignKeys: x.foreignKeys.map((f) => (refersTable(f) ? { ...f, refColumns: f.refColumns.map(rename) } : f)) })));
 }
 
 // 끝의 ALGORITHM [=] x · LOCK [=] x 는 스키마에 영향이 없어 뺀다

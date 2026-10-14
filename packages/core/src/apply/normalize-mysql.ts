@@ -4,7 +4,7 @@ import { Cursor } from '../cursor';
 import { quoteString, tokenize, type Token } from '../lexer';
 import type { Column, TableOption } from '../model';
 import { normalizeType } from '../normalize';
-import { floatDefault } from './float-default';
+import { assertFloatSize, floatDefault } from './float-default';
 import { splitList } from './lists';
 import { TEMPORAL_TYPES, temporalDefault, type TemporalType } from './temporal-default';
 import { fail, RE_EXPORT, type ColumnSpec, type DefaultSpec, type NowSpec } from './types';
@@ -65,6 +65,7 @@ function withArgs(name: string, inner: Token[] | undefined, src: string): string
   if (inner && !inner.length) fail(`타입 인자가 비었습니다: ${src} (MySQL 1064)`); // 빈 괄호는 splitList 보다 먼저 봐서 어느 타입인지 메시지에 남긴다
   const args = inner && splitList(inner, '타입 인자').map((part) => (part.length === 1 && part[0].t === 'number' && /^\d+$/.test(part[0].v) ? String(Number(part[0].v)) : fail(`타입 인자가 올바르지 않습니다: ${src}`)));
   if (args && args.length > (TWO_ARGS.has(name) ? 2 : 1)) fail(`타입 인자가 너무 많습니다: ${src}`);
+  if (FLOAT_TYPES.has(name) && args?.length === 2) assertFloatSize(name.toUpperCase(), Number(args[0]), Number(args[1]));
   switch (name) {
     case 'decimal': return `decimal(${args?.[0] ?? 10},${args?.[1] ?? 0})`;
     case 'char': case 'binary': case 'bit': return `${name}(${args?.[0] ?? 1})`;
@@ -197,13 +198,27 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   if (TEMPORAL_TYPES.has(base)) return temporalText(spec, col, base as TemporalType, bad);
   if (base === 'year') return quoteString(yearDefault(spec.value, bad, reExport));
   if (NUMERIC.has(base)) return quoteString(numericDefault(spec.value, col.type, bad, reExport));
+  // ENUM·SET 에 쓴 숫자는 값이 아니라 순번·비트다 (8.0.46·8.4.11 실측: ENUM('2','1') DEFAULT 1 → '2', SET('2','a') DEFAULT 2 → 'a')
+  if ((base === 'enum' || base === 'set') && spec.kind === 'number') return reExport(`${spec.value} 은(는) 숫자라 MySQL 이 값이 아니라 순번·비트로 읽습니다 (값을 따옴표로 감싸 쓰세요)`);
   if (base === 'enum') {
     const wanted = trimTrailingSpaces(spec.value).toLowerCase();
     return quoteString(enumMembers(col.type).find((m) => m.toLowerCase() === wanted) ?? bad(`'${spec.value}' 은 ENUM 값이 아닙니다`));
   }
   if (base === 'set') return quoteString(setDefault(spec.value, col.type, bad));
-  if (base === 'char') return quoteString(trimTrailingSpaces(spec.value)); // CHAR 는 끝 공백을 떼고 찍는다 (8.0.46·8.4.11 실측: 'ab  ' → 'ab', ' ' → '')
-  return quoteString(spec.value);
+  const text = spec.kind === 'number' ? numberText(spec.value) ?? reExport(`${spec.value} 은(는) 문자열 컬럼에 쓸 수 있는 숫자 꼴이 아닙니다`) : spec.value;
+  if (base === 'char') return quoteString(trimTrailingSpaces(text)); // CHAR 는 끝 공백을 떼고 찍는다 (8.0.46·8.4.11 실측: 'ab  ' → 'ab', ' ' → '')
+  return quoteString(text);
+}
+
+// 문자열 컬럼(CHAR·VARCHAR·BINARY·VARBINARY)에 쓴 숫자 리터럴: MySQL 은 수로 읽은 뒤 글자로 바꿔 저장한다 (8.0.46·8.4.11 실측, 시나리오 string-number-defaults:
+// 001 → '1', 001.50 → '1.50', 1. → '1', -0 → '0', -0.0 → '0.0', -001 → '-1'). 정수부 앞 0 을 떼고, 소수부는 쓴 그대로 두며 (빈 소수부는 점까지 뗀다), 값이 0 이면
+// 부호를 뗀다. parseDefault 가 만드는 꼴([-]정수[.소수])이 아니면 undefined
+function numberText(value: string): string | undefined {
+  const m = /^(-?)(\d+)(?:\.(\d*))?$/.exec(value);
+  if (!m) return undefined;
+  const [, sign, whole, frac = ''] = m;
+  const text = `${whole.replace(/^0+(?=\d)/, '')}${frac ? `.${frac}` : ''}`;
+  return sign && /[1-9]/.test(whole + frac) ? `-${text}` : text;
 }
 
 // BIT 기본값: MySQL 은 앞쪽 0 을 떼고 찍는다 (8.0.46·8.4.11 실측: b'00000101' → b'101', b'00000000' → b'0')

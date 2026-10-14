@@ -31,6 +31,18 @@ describe('normalizeUserType', () => {
     expect(() => normalizeUserType(src)).toThrow(ApplyFailure);
   });
 
+  // FLOAT·DOUBLE(M,D) 의 크기 한도 (MySQL 8.0.46·8.4.11 실측, 검사 순서도 같다): D > 30 은 1425, D > M 은 1427, M 이 0 이나 255 를 넘으면 1439 (리뷰 1회차 F4)
+  it.each([
+    ['DOUBLE(255,10000000)', '1425'], ['DOUBLE(256,300)', '1425'], ['FLOAT(10,31)', '1425'], ['DOUBLE(5,10)', '1427'], ['DOUBLE(0,5)', '1427'],
+    ['DOUBLE(0,0)', '1439'], ['DOUBLE(256,2)', '1439'], ['FLOAT(256,1)', '1439'], ['REAL(99999999999,1)', '1439'],
+  ])('%s 는 거부 (MySQL %s)', (src, errno) => {
+    expect(messageOf(() => normalizeUserType(src))).toContain(`(MySQL ${errno})`);
+  });
+
+  it.each([['DOUBLE(255,30)', 'double(255,30)'], ['FLOAT(255,30)', 'float(255,30)'], ['DOUBLE(1,1)', 'double(1,1)']])('%s → %s (한도 안)', (src, out) => {
+    expect(normalizeUserType(src)).toBe(out);
+  });
+
   it.each([['VARCHAR()'], ['INT()'], ['DATETIME()'], ['DECIMAL()'], ['CHAR VARYING()']])('%s: 빈 괄호는 거부', (src) => {
     expect(() => normalizeUserType(src)).toThrow(/타입 인자가 비었습니다.*\(MySQL 1064\)/);
   });
@@ -136,6 +148,22 @@ describe('normalizeDefault', () => {
 
   it.each([[''], ['.'], ['+'], ['e5'], ['1e'], ['1e+'], ['1..2'], ['1.2.3'], ['0x10'], ['1 2']])('숫자가 아닌 문자열 %j 은 거부 (1067)', (value) => {
     expect(() => normalizeDefault({ kind: 'string', value }, col('double'))).toThrow(/\(MySQL 1067\)/);
+  });
+
+  // 문자열 컬럼에 쓴 숫자 리터럴은 MySQL 이 수로 읽은 뒤 글자로 바꿔 저장한다 (8.0.46·8.4.11 실측): 정수부 앞 0 을 떼고 소수부는 쓴 그대로 두며,
+  // 빈 소수부는 점까지 떼고, 값이 0 이면 부호를 뗀다. 쓴 글자를 그대로 저장하면 다른 DB 에 다른 기본값을 만든다 (리뷰 1회차 F3)
+  it.each([
+    ['001', 'varchar(10)', "'1'"], ['-0', 'varchar(10)', "'0'"], ['-001', 'varchar(10)', "'-1'"], ['1.50', 'varchar(10)', "'1.50'"],
+    ['001.50', 'varchar(10)', "'1.50'"], ['1.', 'varchar(10)', "'1'"], ['-0.0', 'varchar(10)', "'0.0'"], ['-0.5', 'varchar(10)', "'-0.5'"],
+    ['00.00', 'varchar(10)', "'0.00'"], ['0001.000100', 'varchar(20)', "'1.000100'"], ['007', 'char(10)', "'7'"], ['1.0', 'char(10)', "'1.0'"],
+    ['007', 'varbinary(10)', "'7'"], ['123456789012345678901234567890', 'varchar(40)', "'123456789012345678901234567890'"],
+  ])('숫자 리터럴 %s 을 %s 기본값으로 쓰면 MySQL 이 찍는 글자 %s', (value, type, out) => {
+    expect(normalizeDefault({ kind: 'number', value }, col(type))).toBe(out);
+  });
+
+  // ENUM·SET 에 쓴 숫자는 값이 아니라 순번·비트로 읽는다 (8.0.46·8.4.11 실측: ENUM('2','1') DEFAULT 1 → '2', SET('2','a') DEFAULT 2 → 'a'). 1차에서는 받지 않는다
+  it.each([[{ value: '1' }, "enum('2','1')"], [{ value: '2' }, "set('2','a')"], [{ value: '0' }, "enum('a')"], [{ value: '1.5' }, "set('a')"]])('숫자 %j 를 %s 기본값으로 쓰면 RE_EXPORT 로 거부한다', ({ value }, type) => {
+    expect(messageOf(() => normalizeDefault({ kind: 'number', value }, col(type)))).toMatch(new RegExp(`순번.*${RE_EXPORT}$`));
   });
 
   it('DEFAULT CURRENT_TIMESTAMP 가 잘못되면 1067', () => {
