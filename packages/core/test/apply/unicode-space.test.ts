@@ -43,6 +43,12 @@ describe('따옴표·주석 밖의 ASCII 가 아닌 공백', () => {
     if (r.ok) expect(r.model.tables[0].columns.map((c) => [c.name, c.comment])).toEqual([['id', undefined], [`a${NBSP}b`, `x${NBSP}y`], ['c', undefined], ['d', undefined], ['e', undefined], ['f', undefined]]);
   });
 
+  // 변이 M1 (리뷰 13회차 F4 — 건너뛰는 주석의 '*/' 바로 뒤 자리를 그 주석 안으로 본다): MySQL 은 건너뛴 주석 뒤의 NBSP 를 이름의 글자로 읽어 컬럼 '<NBSP>nick' 을 만든다
+  // (8.0.46·8.4.11 실측). 받으면 'nick' 을 만든다
+  it('건너뛰는 실행 주석의 */ 바로 뒤 NBSP 는 RE_EXPORT 로 거부한다', () => {
+    expectRejected(run(`ALTER TABLE t ADD /*!99999 x */${NBSP}nick INT;`), 1, '00A0');
+  });
+
   it('렉서는 그대로 토큰 사이의 NBSP 를 공백으로 건너뛴다 (덤프 파서)', () => {
     expect(tokenize(`ADD ${NBSP}nick INT`).map((t) => t.v)).toEqual(['ADD', 'nick', 'INT']);
   });
