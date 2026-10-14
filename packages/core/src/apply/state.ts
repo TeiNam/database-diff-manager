@@ -1,7 +1,7 @@
 // ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE), 기준 이름 추적
 import { Cursor } from '../cursor';
 import { routineNameKey } from '../diff';
-import type { Column, Routine, SchemaModel, Table } from '../model';
+import type { Column, ForeignKey, Routine, SchemaModel, Table } from '../model';
 import { splitList } from './lists';
 import { fail, RE_EXPORT, type ApplyDefaults } from './types';
 
@@ -21,6 +21,12 @@ export interface Origins {
   provenance: Map<string, Map<string, IndexProvenance>>; // 테이블(지금 이름) → (인덱스 이름 소문자 → 출처). auto-index.ts 의 markProvenance 가 적는다
 }
 
+// 부모 테이블을 같은 참조 컬럼 목록으로 참조하는 FK 들. columns: 참조 컬럼 (소문자, FK 에 쓴 차례), children: 그 FK 를 가진 테이블 → 그 테이블의 FK 수
+export interface RefList {
+  readonly columns: readonly string[];
+  readonly children: Map<string, number>;
+}
+
 export interface State {
   model: SchemaModel; // ponytail: 작업용 사본 하나를 고쳐 쓴다 (입력 모델은 그대로, 실패하면 통째로 버린다)
   readonly schemaName: string;
@@ -32,11 +38,12 @@ export interface State {
   // 테이블 이름 → st.model.tables 안의 자리. 이름 목록은 늘 정확하고 (테이블을 더하고 지우고 이름을 바꾸는 CREATE·DROP·RENAME TABLE 이 고친다),
   // 자리는 DROP TABLE 뒤에 어긋날 수 있어 tableIndex 가 확인한다. 테이블이 수만 개인 스크립트에서도 문장마다 모든 테이블을 훑어 이름을 찾지 않게 한다
   readonly tableAt: Map<string, number>;
-  // 스키마의 FK 이름(소문자) → 개수와 FK 가 참조하는 테이블 이름 → 그 FK 수 (다른 스키마를 참조하는 FK 는 세지 않는다). FK 이름은 스키마 안에서 유일해야 해서
-  // FK 를 더할 때마다 보고, 참조 수는 아무 FK 도 참조하지 않는 테이블에서 모든 테이블을 훑지 않으려고 본다. 테이블을 바꾸는 replaceTable·appendTable·removeTables 가 고치고,
-  // st.model.tables 를 직접 다시 쓰는 곳은 FK 이름을 바꾸지 않으며 참조 테이블 이름을 바꾸면 moveRefTable 을 부른다
+  // 스키마의 FK 이름(소문자) → 개수와, FK 가 참조하는 테이블(부모) 이름 → 참조 컬럼 목록(소문자 JSON) → RefList (다른 스키마를 참조하는 FK 는 세지 않는다).
+  // FK 이름은 스키마 안에서 유일해야 해서 FK 를 더하거나 이름이 바뀔 때마다 본다. 참조 색인은 부모를 바꾸는 문장이 모든 테이블을 훑지 않고 참조 컬럼 목록마다 한 번만
+  // 보게 한다 — 테이블 수천 개가 참조하는 허브 테이블도 문장마다 드는 시간이 자식 수에 비례하지 않는다 (리뷰 1회차 M-1). 테이블을 바꾸는 replaceTable·replaceTables·
+  // appendTable·removeTables 가 고치고, st.model.tables 를 직접 다시 쓰는 곳은 FK 이름·참조 컬럼을 바꾸지 않으며 참조 테이블 이름을 바꾸면 moveRefTable 을 부른다
   readonly fkNames: Map<string, number>;
-  readonly refTables: Map<string, number>;
+  readonly refTables: Map<string, Map<string, RefList>>;
   // 루틴 '<종류>:<이름 소문자>' (routineKey). CREATE·DROP FUNCTION·PROCEDURE 가 고친다
   readonly routineKeys: Set<string>;
 }
@@ -65,17 +72,66 @@ function addCount(counts: Map<string, number>, key: string, delta: number): void
 function countForeignKeys(st: State, t: Table | undefined, delta: 1 | -1): void {
   for (const f of t?.foreignKeys ?? []) {
     addCount(st.fkNames, f.name.toLowerCase(), delta);
-    if (f.refSchema === undefined) addCount(st.refTables, f.refTable, delta);
+    if (f.refSchema === undefined) countReference(st, f, t!.name, delta);
   }
 }
 
-// 모든 FK 의 참조 테이블 이름을 from 에서 to 로 바꾼 뒤 (RENAME TABLE) 참조 수를 옮긴다
-export function moveRefTable(st: State, from: string, to: string): void {
-  const n = st.refTables.get(from);
-  if (n === undefined) return;
-  st.refTables.delete(from);
-  addCount(st.refTables, to, n);
+// FK 하나를 참조 색인(부모 → 참조 컬럼 목록 → 자식)에 더하거나 뺀다. 빈 항목은 지운다 — 부모 항목이 있으면 그 부모를 참조하는 FK 가 있다
+function countReference(st: State, f: ForeignKey, child: string, delta: 1 | -1): void {
+  const columns = f.refColumns.map((c) => c.toLowerCase());
+  const key = JSON.stringify(columns);
+  const lists = st.refTables.get(f.refTable) ?? new Map<string, RefList>();
+  const list = lists.get(key) ?? { columns, children: new Map<string, number>() };
+  addCount(list.children, child, delta);
+  if (list.children.size) lists.set(key, list);
+  else lists.delete(key);
+  if (lists.size) st.refTables.set(f.refTable, lists);
+  else st.refTables.delete(f.refTable);
 }
+
+// 모든 FK 의 참조 테이블 이름을 from 에서 to 로 바꾼 뒤 (RENAME TABLE) 참조 색인을 옮긴다 (FK_CHECKS=0 으로 to 를 미리 참조한 FK 와 합친다)
+export function moveRefTable(st: State, from: string, to: string): void {
+  const lists = st.refTables.get(from);
+  if (!lists) return;
+  st.refTables.delete(from);
+  const target = st.refTables.get(to);
+  if (!target) {
+    st.refTables.set(to, lists); // 흔한 경우: 표를 그대로 옮긴다 (자식이 수천 개여도 문장마다 새로 만들지 않는다)
+    return;
+  }
+  for (const [key, list] of lists) {
+    const merged = target.get(key) ?? { columns: list.columns, children: new Map<string, number>() };
+    for (const [child, n] of list.children) addCount(merged.children, child, n);
+    target.set(key, merged);
+  }
+  st.refTables.set(to, target);
+}
+
+// 부모 테이블을 참조하는 FK 의 참조 컬럼 목록들 (자기 참조 포함)
+export const refLists = (st: State, parent: string): RefList[] => [...(st.refTables.get(parent)?.values() ?? [])];
+
+// 부모 테이블을 참조하는 FK 가 있는 테이블 이름 (자기 참조 포함)
+export function childNames(st: State, parent: string): Set<string> {
+  const names = new Set<string>();
+  for (const list of refLists(st, parent)) for (const child of list.children.keys()) names.add(child);
+  return names;
+}
+
+// childNames 의 테이블을 st.model.tables 순서로 (모든 테이블을 차례로 훑던 검사와 같은 테이블을 먼저 만난다)
+export function childTables(st: State, parent: string): Table[] {
+  const at = [...childNames(st, parent)].map((n) => tableIndex(st, n)).filter((k) => k >= 0);
+  return at.sort((a, b) => a - b).map((k) => st.model.tables[k]);
+}
+
+// 참조 컬럼 목록에 parent 말고 다른 테이블의 FK 가 있는가 (자기 참조는 그 테이블의 FK 로 따로 본다)
+export function hasOtherChild(list: RefList, parent: string): boolean {
+  for (const child of list.children.keys()) if (child !== parent) return true;
+  return false;
+}
+
+// parent 의 컬럼(이름 대소문자 무시)을 참조하는 FK 가 있는가 (자기 참조 포함)
+export const isReferencedColumn = (st: State, parent: string, column: string): boolean =>
+  refLists(st, parent).some((list) => list.columns.includes(column.toLowerCase()));
 
 // 테이블의 이름 추적을 시작한다 (fromBase: 기준 버전에 있던 테이블이면 지금 이름이 곧 기준 이름). 출처 표는 건드리지 않는다 — CREATE TABLE 은 addKeys 가 이미 적었다
 export function trackNew(origins: Origins, t: Table, fromBase: boolean): void {
@@ -134,13 +190,28 @@ export function replaceTable(st: State, name: string, next: Table): void {
   const at = tableIndex(st, name);
   if (at < 0) return;
   const tables = st.model.tables.slice();
-  countForeignKeys(st, tables[at], -1);
+  // 새 정의를 먼저 센다: 그대로인 FK 는 개수가 0 이 되지 않아 큰 표에서 항목을 지웠다 다시 넣지 않는다 (Map 의 삭제·추가 반복은 항목이 수천 개면 느리다)
   countForeignKeys(st, next, 1);
+  countForeignKeys(st, tables[at], -1);
   tables[at] = next;
   st.model.tables = tables;
   if (next.name === name) return;
   st.tableAt.delete(name);
   st.tableAt.set(next.name, at);
+}
+
+// 이름이 그대로인 테이블 여럿을 한 번에 바꾼다 (배열은 한 번만 복사한다 — 부모 컬럼 이름을 바꾸면 그 컬럼을 참조하는 자식 테이블마다 FK 가 바뀐다)
+export function replaceTables(st: State, next: readonly Table[]): void {
+  if (!next.length) return;
+  const tables = st.model.tables.slice();
+  for (const t of next) {
+    const at = tableIndex(st, t.name);
+    if (at < 0) continue;
+    countForeignKeys(st, t, 1);
+    countForeignKeys(st, tables[at], -1);
+    tables[at] = t;
+  }
+  st.model.tables = tables;
 }
 
 // 새 테이블을 맨 뒤에 둔다 (CREATE TABLE)

@@ -303,6 +303,36 @@ describe('ALTER TABLE — 컬럼 정의 안의 PRIMARY KEY·UNIQUE', () => {
 
 // MySQL 8.0.46·8.4.11 실측: ALTER COLUMN … DROP DEFAULT 는 컬럼 종류와 상관없이 DEFAULT 절을 없앤다 (NULL 허용 컬럼도 `DEFAULT NULL` 이 사라진다).
 // 그 뒤 SET DEFAULT NULL 이면 `DEFAULT NULL` 이 다시 보인다
+// 부모 → 자식 참조 색인 (State.refTables, 리뷰 1회차 M-1): 부모를 바꾸는 문장이 모든 테이블을 훑지 않고 색인으로 자식 FK 를 찾는다.
+// 컬럼·테이블 이름을 바꾸거나 자식을 다시 만든 뒤에도 색인이 맞아야 MySQL 처럼 거부한다 (색인이 낡으면 참조되는 컬럼을 조용히 지운다)
+const REF_BASE = parseSqlDump(tdExport([
+  'CREATE TABLE `p` (\n  `id` int NOT NULL,\n  `code` int NOT NULL,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `uq` (`code`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+  'CREATE TABLE `c` (\n  `id` int NOT NULL,\n  `x` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `x` (`x`),\n  CONSTRAINT `c_ibfk_1` FOREIGN KEY (`x`) REFERENCES `p` (`code`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+].join('\n\n'))).model;
+const applyRef = (script: string) => applyScript(REF_BASE, script, { schemaName: 'shop' });
+
+describe('ALTER TABLE — 부모 → 자식 참조 색인', () => {
+  it.each([
+    ['참조 컬럼 이름을 바꾼 뒤 지우기', 'ALTER TABLE p RENAME COLUMN code TO code2;\nALTER TABLE p DROP COLUMN code2;', 2, '`c` 의 FK `c_ibfk_1` 가 참조하는 컬럼 `code2` 은 지울 수 없습니다 (MySQL 1829)'],
+    ['참조 컬럼 이름을 바꾼 뒤 받치는 키 지우기', 'ALTER TABLE p RENAME COLUMN code TO code2;\nALTER TABLE p DROP INDEX uq;', 2, '`c` 의 FK `c_ibfk_1` 가 쓰는 인덱스를 지울 수 없습니다 (MySQL 1553)'],
+    ['부모 이름을 바꾼 뒤 참조 컬럼 지우기', 'RENAME TABLE p TO p2;\nALTER TABLE p2 DROP COLUMN code;', 2, '(MySQL 1829)'],
+    ['자식 이름을 바꾼 뒤 부모 키 지우기', 'RENAME TABLE c TO c2;\nALTER TABLE p DROP INDEX uq;', 2, '`c2` 의 FK `c2_ibfk_1` 가 쓰는 인덱스'],
+    ['자식을 지우고 다시 만든 뒤 부모 지우기', 'DROP TABLE c;\nCREATE TABLE c (x INT, FOREIGN KEY (x) REFERENCES p (code));\nDROP TABLE p;', 3, '(MySQL 3730)'],
+    ['참조 컬럼 이름을 바꾼 뒤 타입 바꾸기', 'ALTER TABLE p RENAME COLUMN code TO code2;\nALTER TABLE p MODIFY code2 BIGINT NOT NULL;', 2, RE_EXPORT],
+  ])('%s', (_name, script, index, reason) => {
+    expect(applyRef(script)).toMatchObject({ ok: false, error: { index, reason: expect.stringContaining(reason) } });
+  });
+
+  it('자식 FK 를 지운 뒤에는 막지 않는다 (색인에서도 빠진다)', () => {
+    expect(applyRef('ALTER TABLE c DROP FOREIGN KEY c_ibfk_1;\nALTER TABLE p DROP INDEX uq, DROP COLUMN code;\nDROP TABLE p;')).toMatchObject({ ok: true, applied: 3 });
+  });
+
+  it('부모 이름·참조 컬럼 이름을 바꾸면 자식 FK 가 따라간다', () => {
+    const r = applyRef('RENAME TABLE p TO p2;\nALTER TABLE p2 RENAME COLUMN code TO code2;');
+    expect(r.ok && r.model.tables.find((t) => t.name === 'c')!.foreignKeys[0]).toMatchObject({ refTable: 'p2', refColumns: ['code2'] });
+  });
+});
+
 // 문자열 컬럼의 숫자 리터럴 기본값은 MySQL 이 수로 읽어 다시 쓴 글자로, ENUM·SET 의 숫자는 순번·비트로 저장된다 (8.0.46·8.4.11 실측, 시나리오 string-number-defaults).
 // 쓴 글자 그대로 저장하면 그 모델로 만든 DDL 이 다른 기본값을 만든다 (리뷰 1회차 F3)
 describe('ALTER TABLE — 문자열 컬럼의 숫자 기본값', () => {

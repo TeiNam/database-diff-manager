@@ -4,7 +4,7 @@ import type { Check, Column, ForeignKey, Index, IndexKind, IndexPart, Partitioni
 import { markProvenance, planAutoKeys, type AutoKeyPlan } from './auto-index';
 import { assertForeignKeyCount, assertKeyCount } from './limits';
 import { baseType, BLOB_TYPES, CHARSET_TYPES, effectiveCollation, INT_TYPES, tableCharset } from './normalize-mysql';
-import { findColumn, findTable, sameName, type State } from './state';
+import { childTables, findColumn, findTable, hasOtherChild, refLists, sameName, type State } from './state';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type FkItem, type IndexItem } from './types';
 
 export interface KeyDrop {
@@ -469,7 +469,10 @@ export function checkTable(st: State, t: Table, renamed: ReadonlyMap<string, str
       if (!hasKey(refs)) fail(`\`${child.name}\` 의 FK \`${fk.name}\` 가 쓰는 인덱스를 지울 수 없습니다 (MySQL 1553)`);
     }
   };
-  if (st.refTables.has(t.name)) for (const child of st.model.tables) if (child.foreignKeys.length && child.name !== t.name) checkChild(child); // 아무 FK 도 참조하지 않으면 훑지 않는다
+  // 다른 테이블 FK 는 참조 컬럼 목록마다 한 번 본다 (참조 색인 — 자식 테이블이 수천 개여도 문장마다 훑지 않는다). 걸리면 모든 테이블을 차례로 보던 때와 같은 FK 를 알리려고
+  // 자식 테이블을 st.model 순서로 다시 본다
+  const broken = refLists(st, t.name).some((list) => hasOtherChild(list, t.name) && !hasKey(list.columns.map((n) => renamed.get(n) ?? n)));
+  if (broken) for (const child of childTables(st, t.name)) if (child.name !== t.name) checkChild(child);
   checkChild(t);
 }
 

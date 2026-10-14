@@ -14,7 +14,7 @@ import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { assertColumnCount, assertForeignKeyCount, assertKeyCount } from './limits';
 import { assertInnoDbTable, innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
-import { findColumn, needTable, objectName, replaceTable, sameName, type State } from './state';
+import { childNames, childTables, findColumn, findTable, isReferencedColumn, needTable, objectName, replaceTable, replaceTables, sameName, type State } from './state';
 import { renameTable } from './table-stmt';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type DefaultSpec, type Position } from './types';
 
@@ -360,7 +360,8 @@ function assertNoDependents(st: State, t: Table, dropped: ReadonlySet<string>, r
   for (const name of dropped) {
     const own = t.foreignKeys.find((f) => !keyDropped('fk', f.name) && f.columns.some((c) => sameName(c, name)));
     if (own) fail(`FK \`${own.name}\` 가 쓰는 컬럼 \`${name}\` 은 지울 수 없습니다 (MySQL 1828)`);
-    for (const child of st.model.tables) {
+    if (!isReferencedColumn(st, t.name, name)) continue; // 참조 색인: 아무 FK 도 참조하지 않는 컬럼이면 자식 테이블을 훑지 않는다
+    for (const child of childTables(st, t.name)) {
       const fk = child.foreignKeys.find((f) => f.refTable === t.name && f.refSchema === undefined && !(child.name === t.name && keyDropped('fk', f.name)) && f.refColumns.some((c) => sameName(c, name)));
       if (fk) fail(`\`${child.name}\` 의 FK \`${fk.name}\` 가 참조하는 컬럼 \`${name}\` 은 지울 수 없습니다 (MySQL 1829)`);
     }
@@ -370,8 +371,7 @@ function assertNoDependents(st: State, t: Table, dropped: ReadonlySet<string>, r
 // FK 로 이어진 컬럼(자기 FK 컬럼·다른 테이블이 참조하는 컬럼)의 타입·콜레이션 변경은 1차 범위 밖 (MySQL 3780 과 허용 사례를 가르지 않는다)
 function assertRetypeAllowed(st: State, t: Table, old: Column, next: Column, charset: TableCharset): void {
   if (old.type === next.type && effectiveCollation(old, charset) === effectiveCollation(next, charset)) return;
-  const linked = t.foreignKeys.some((f) => f.columns.some((c) => sameName(c, old.name)))
-    || st.model.tables.some((x) => x.foreignKeys.some((f) => f.refTable === t.name && f.refSchema === undefined && f.refColumns.some((c) => sameName(c, old.name))));
+  const linked = t.foreignKeys.some((f) => f.columns.some((c) => sameName(c, old.name))) || isReferencedColumn(st, t.name, old.name);
   if (linked) fail(`FK 로 이어진 컬럼 \`${old.name}\` 의 타입·문자셋 변경은 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
 }
 
@@ -395,15 +395,16 @@ function syncIndexOrigins(st: State, table: string, t: Table): void {
   st.origins.indexes.set(table, new Map(t.indexes.map((i) => [i.name, m.get(i.name)])));
 }
 
-// 다른 테이블 FK 가 참조하는 이 테이블 컬럼 이름도 따라 바뀐다 (MySQL 8.0)
+// 다른 테이블 FK 가 참조하는 이 테이블 컬럼 이름도 따라 바뀐다 (MySQL 8.0). 참조 색인으로 바뀐 컬럼을 참조하는 자식 테이블만 고친다 (자기 참조는 remapKeys 가 고쳤다)
 function renameReferencedColumns(st: State, table: string, renamed: ReadonlyMap<string, string>): void {
-  if (!renamed.size || !st.refTables.has(table)) return;
+  if (![...renamed.keys()].some((old) => isReferencedColumn(st, table, old))) return;
   const rename = (n: string) => renamed.get(n.toLowerCase()) ?? n;
   const refersTable = (f: { refTable: string; refSchema?: string }) => f.refTable === table && f.refSchema === undefined;
-  st.model.tables = st.model.tables.map((x) => (x.name === table || !x.foreignKeys.some(refersTable) ? x : {
-    ...x,
-    foreignKeys: x.foreignKeys.map((f) => (refersTable(f) ? { ...f, refColumns: f.refColumns.map(rename) } : f)),
-  }));
+  const children = [...childNames(st, table)].flatMap((name) => {
+    const child = name === table ? undefined : findTable(st, name);
+    return child ? [child] : [];
+  });
+  replaceTables(st, children.map((x) => ({ ...x, foreignKeys: x.foreignKeys.map((f) => (refersTable(f) ? { ...f, refColumns: f.refColumns.map(rename) } : f)) })));
 }
 
 // 끝의 ALGORITHM [=] x · LOCK [=] x 는 스키마에 영향이 없어 뺀다
