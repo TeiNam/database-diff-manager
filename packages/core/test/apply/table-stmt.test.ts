@@ -36,6 +36,18 @@ describe('CREATE TABLE', () => {
     expect(t.options).toEqual([{ key: 'ENGINE', value: 'InnoDB' }, { key: 'DEFAULT CHARSET', value: 'latin1' }]); // latin1 의 기본 콜레이션이라 COLLATE 옵션은 찍지 않는다 (MySQL 8.0.46·8.4.11 실측)
   });
 
+  // MySQL 은 CREATE TABLE 의 키를 모두 준비한 뒤 FK 를 준비한다: 자기 테이블을 참조하는 FK 를 PRIMARY KEY·UNIQUE 보다 앞에 써도 받는다 (8.0.46·8.4.11 실측, 리뷰 1회차 M-3,
+  // 시나리오 self-fk-key-order). 참조 컬럼에 UNIQUE 가 끝내 없으면 8.4 는 6125 다
+  it('자기 참조 FK 를 받치는 PRIMARY KEY·UNIQUE 는 FK 뒤에 써도 된다', () => {
+    const emp = tbl(ok('CREATE TABLE emp (id INT NOT NULL, mgr INT, FOREIGN KEY (mgr) REFERENCES emp (id), PRIMARY KEY (id));'), 'emp');
+    expect([emp.indexes.map((i) => i.name), emp.foreignKeys.map((f) => `${f.name} ${f.refTable}(${f.refColumns})`)]).toEqual([['PRIMARY', 'mgr'], ['emp_ibfk_1 emp(id)']]);
+    const emp2 = tbl(ok('CREATE TABLE emp2 (id INT NOT NULL, code VARCHAR(10), parent_code VARCHAR(10), CONSTRAINT fk FOREIGN KEY (parent_code) REFERENCES emp2 (code), UNIQUE KEY uq (code), PRIMARY KEY (id));'), 'emp2');
+    expect(emp2.indexes.map((i) => i.name)).toEqual(['PRIMARY', 'uq', 'fk']);
+    for (const ddl of ['CREATE TABLE e4 (id INT NOT NULL, mgr INT, FOREIGN KEY (mgr) REFERENCES e4 (id));', 'CREATE TABLE e5 (id INT NOT NULL, mgr INT, FOREIGN KEY (mgr) REFERENCES e5 (id), KEY k (id));']) {
+      expect(apply(ddl), ddl).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 8.4 6125') } });
+    }
+  });
+
   it('PRIMARY KEY 컬럼: 직접 쓴 NULL 은 1171 (컬럼 안 DEFAULT NULL PRIMARY KEY 만 1067), 안 쓰면 NOT NULL 이고 DEFAULT NULL 이 없다', () => {
     expect(apply('CREATE TABLE n1 (c INT NULL, PRIMARY KEY (c));')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1171') } });
     expect(apply('CREATE TABLE n2 (c INT DEFAULT NULL, PRIMARY KEY (c));')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1171') } });

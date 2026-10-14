@@ -274,7 +274,7 @@ function keepKeys(before: Table, entries: readonly Entry[], clauses: readonly Cl
 
 // 6) 키 추가와 FK 자동 인덱스. 이름 없는 FK 번호는 이 문장 앞의 FK 이름(지우는 것 포함) 기준이고, FK 를 더했으면 SHOW CREATE 순서(이름 순)로 다시 놓는다
 function addConstraints(st: State, before: Table, t: Table, items: readonly ConstraintItem[], plan: AutoKeyPlan): Table {
-  const next = addKeys(st, t, items, before.foreignKeys.map((f) => f.name), plan);
+  const next = addKeys(st, t, items, before.foreignKeys.map((f) => f.name), plan, before);
   return items.some((i) => i.kind === 'fk') ? { ...next, foreignKeys: sortForeignKeys(next.foreignKeys) } : next;
 }
 

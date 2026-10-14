@@ -303,6 +303,31 @@ describe('ALTER TABLE — 컬럼 정의 안의 PRIMARY KEY·UNIQUE', () => {
 
 // MySQL 8.0.46·8.4.11 실측: ALTER COLUMN … DROP DEFAULT 는 컬럼 종류와 상관없이 DEFAULT 절을 없앤다 (NULL 허용 컬럼도 `DEFAULT NULL` 이 사라진다).
 // 그 뒤 SET DEFAULT NULL 이면 `DEFAULT NULL` 이 다시 보인다
+// 자기 테이블을 참조하는 FK 를 ALTER 로 더할 때 (8.0.46·8.4.11 실측, 리뷰 1회차 M-3): 8.4 의 UNIQUE 검사(6125)는 이 문장의 키를 모두 더한 뒤의 테이블로 하지만,
+// InnoDB 는 참조 컬럼의 인덱스를 문장 앞 테이블에서 찾는다 — 같은 ALTER 에서 더한 PRIMARY KEY·UNIQUE 만 있으면 절 순서와 상관없이 1215 (시나리오 error-self-fk-same-alter)
+describe('ALTER TABLE — 자기 참조 FK 의 부모 키', () => {
+  const e = (name: string, defs: string) => `CREATE TABLE ${name} (${defs});\n`;
+  it.each([
+    ['문장 앞 일반 인덱스 + 같은 문장의 UNIQUE (FK 를 먼저 씀)', `${e('e12', 'id INT NOT NULL, mgr INT, KEY k (id)')}ALTER TABLE e12 ADD FOREIGN KEY (mgr) REFERENCES e12 (id), ADD UNIQUE KEY u (id);`, 'e12', 'u k mgr'],
+    ['문장 앞부터 있던 PRIMARY KEY', `${e('e8', 'id INT NOT NULL, mgr INT, PRIMARY KEY (id)')}ALTER TABLE e8 ADD FOREIGN KEY (mgr) REFERENCES e8 (id);`, 'e8', 'PRIMARY mgr'],
+    ['지우고 다시 더한 PRIMARY KEY', `${e('e10', 'id INT NOT NULL, mgr INT, PRIMARY KEY (id)')}ALTER TABLE e10 DROP PRIMARY KEY, ADD PRIMARY KEY (id), ADD FOREIGN KEY (mgr) REFERENCES e10 (id);`, 'e10', 'PRIMARY mgr'],
+  ])('받는다: %s', (_name, script, table, keys) => {
+    const r = apply(script);
+    if (!r.ok) throw new Error(r.error.reason);
+    expect(tbl(r, table).indexes.map((i) => i.name).join(' ')).toBe(keys);
+  });
+
+  it.each([
+    ['같은 문장의 PRIMARY KEY (FK 를 먼저 씀)', `${e('e3', 'id INT NOT NULL, mgr INT')}ALTER TABLE e3 ADD FOREIGN KEY (mgr) REFERENCES e3 (id), ADD PRIMARY KEY (id);`, '(MySQL 1215)'],
+    ['같은 문장의 PRIMARY KEY (키를 먼저 씀)', `${e('e3', 'id INT NOT NULL, mgr INT')}ALTER TABLE e3 ADD PRIMARY KEY (id), ADD FOREIGN KEY (mgr) REFERENCES e3 (id);`, '(MySQL 1215)'],
+    ['같은 문장의 UNIQUE', `${e('e7', 'id INT NOT NULL, code INT, mgr INT, PRIMARY KEY (id)')}ALTER TABLE e7 ADD UNIQUE KEY uq (code), ADD FOREIGN KEY (mgr) REFERENCES e7 (code);`, '(MySQL 1215)'],
+    ['키가 아예 없음', `${e('e11', 'id INT NOT NULL, mgr INT')}ALTER TABLE e11 ADD FOREIGN KEY (mgr) REFERENCES e11 (id);`, '(MySQL 8.4 6125'],
+    ['UNIQUE 가 아닌 인덱스뿐', `${e('e13', 'id INT NOT NULL, mgr INT, KEY k (id)')}ALTER TABLE e13 ADD FOREIGN KEY (mgr) REFERENCES e13 (id);`, '(MySQL 8.4 6125'],
+  ])('거부한다: %s', (_name, script, needle) => {
+    expect(apply(script)).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining(needle) } });
+  });
+});
+
 // 함수 식 UNIQUE 키의 NULL 허용은 식에 따라 다르다 (IFNULL(a,0) 은 NOT NULL, NULLIF(a,0) 은 NULL 허용) — 짐작하지 않는다 (리뷰 1회차 F6).
 // 문장 앞부터 있던 키는 순서를 정하는 속성이 그대로면 원래 순서를 지키고, 새 키·바뀐 키의 자리가 그 NULL 허용에 달리면 RE_EXPORT 로 거부한다
 const fnBase = (keys: string, cols = '`a` int DEFAULT NULL') => parseSqlDump(tdExport(

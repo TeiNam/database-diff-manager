@@ -264,8 +264,9 @@ export function assertReaddedKeysFit(before: Table, t: Table, readded: ReadonlyS
   }
 }
 
-// FK 를 붙인다 (받치는 인덱스는 ensureFkIndexes 가 문장 끝에 만든다). taken: 스키마에 이미 있는 FK 이름 (fkNames) — FK 이름은 스키마 안에서 유일하다
-export function addForeignKey(st: State, t: Table, item: FkItem, generatedName?: string, taken: FkNames = fkNames(st, t)): Table {
+// FK 를 붙인다 (받치는 인덱스는 ensureFkIndexes 가 문장 끝에 만든다). taken: 스키마에 이미 있는 FK 이름 (fkNames) — FK 이름은 스키마 안에서 유일하다.
+// deferSelfKey: 자기 테이블을 참조하는 FK 의 부모 UNIQUE 검사(6125)를 부른 쪽이 문장의 키를 모두 더한 뒤에 한다 (addKeys)
+export function addForeignKey(st: State, t: Table, item: FkItem, generatedName?: string, taken: FkNames = fkNames(st, t), deferSelfKey = false): Table {
   const { refSchema, ...rest } = item.fk;
   if (refSchema !== undefined && refSchema !== st.schemaName) fail(`다른 스키마 \`${refSchema}\` 를 참조하는 FK 는 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
   const columns = rest.columns.map((n) => (findColumn(t, n) ?? fail(`FK 컬럼 \`${n}\` 이 없습니다 (MySQL 1072)`)).name);
@@ -275,7 +276,8 @@ export function addForeignKey(st: State, t: Table, item: FkItem, generatedName?:
   const parent = rest.refTable === t.name ? t : findTable(st, rest.refTable);
   if (!parent && st.fkChecks) fail(`참조하는 테이블 \`${rest.refTable}\` 이 없습니다 (MySQL 1824)`);
   if (parent?.parseError) fail(`참조하는 테이블 \`${parent.name}\` 은 파싱하지 못한 정의라 FK 를 검사할 수 없습니다 — ${RE_EXPORT}`);
-  const refColumns = parent ? parentKey(st, t, columns, rest.refColumns, parent) : rest.refColumns;
+  const refColumns = parent ? parentColumns(st, t, columns, rest.refColumns, parent) : rest.refColumns;
+  if (parent && !(deferSelfKey && parent === t)) assertParentUniqueKey(parent, refColumns);
   if (taken.has(name)) fail(`FK 이름 \`${name}\` 이 이미 있습니다 (MySQL 1826)`);
   const fk: ForeignKey = { ...rest, name, columns, refColumns };
   return { ...t, foreignKeys: [...t.foreignKeys, fk] };
@@ -308,19 +310,32 @@ export function checkNowNotNull(before: Table, t: Table, renamed: ReadonlyMap<st
   checkSetNullFks(t, new Set(before.columns.filter((c) => !c.nullable).map((c) => (renamed.get(c.name.toLowerCase()) ?? c.name).toLowerCase())));
 }
 
-// 부모 쪽 검사: 참조 컬럼이 있고, 타입·콜레이션이 맞고(3780), 참조 컬럼에 정확히 맞는 PRIMARY KEY·UNIQUE 가 있어야 한다 (8.4 6125).
-// 돌려주는 값: 부모 컬럼 표기로 쓴 참조 컬럼 이름
-function parentKey(st: State, child: Table, columns: readonly string[], refNames: readonly string[], parent: Table): string[] {
+// 부모 쪽 검사: 참조 컬럼이 있고, 타입·콜레이션이 맞아야 한다 (3780). 돌려주는 값: 부모 컬럼 표기로 쓴 참조 컬럼 이름
+function parentColumns(st: State, child: Table, columns: readonly string[], refNames: readonly string[], parent: Table): string[] {
   const refs = refNames.map((n) => findColumn(parent, n) ?? fail(`참조 컬럼 \`${parent.name}\`.\`${n}\` 이 없습니다 (MySQL 3734)`));
   if (refs.length !== columns.length) fail('FK 컬럼 수와 참조 컬럼 수가 다릅니다 (MySQL 1239)');
   columns.forEach((n, k) => {
     const a = findColumn(child, n)!;
     if (!fkCompatible(st, child, a, parent, refs[k])) fail(`FK 컬럼 \`${a.name}\` 과 참조 컬럼 \`${refs[k].name}\` 의 타입·문자셋이 맞지 않습니다 (MySQL 3780)`);
   });
-  const names = refs.map((r) => r.name);
+  return refs.map((r) => r.name);
+}
+
+// 참조 컬럼에 정확히 맞는 PRIMARY KEY·UNIQUE 가 있어야 한다 (8.4 6125)
+function assertParentUniqueKey(parent: Table, names: readonly string[]): void {
   const standard = parent.indexes.some((i) => (i.kind === 'PRIMARY' || i.kind === 'UNIQUE') && i.parts.length === names.length && isFkKey(i, names));
   if (!standard) fail(`참조 컬럼 (${names.join(', ')}) 에 정확히 맞는 PRIMARY KEY·UNIQUE 인덱스가 없습니다 (MySQL 8.4 6125 — 8.0 은 일반 인덱스도 받지만 1차에서는 8.4 규칙을 따릅니다)`);
-  return names;
+}
+
+// 이 문장에서 더한 자기 참조 FK 의 부모 키 (8.0.46·8.4.11 실측, 리뷰 1회차 M-3): 8.4 의 UNIQUE 검사(6125)는 문장의 키를 모두 더한 뒤의 테이블로 한다 — CREATE TABLE 은
+// PRIMARY KEY·UNIQUE 를 FK 뒤에 써도 받는다. ALTER TABLE 은 InnoDB 가 참조 컬럼의 인덱스를 문장 앞 테이블(before)에서 찾아, 같은 문장에서 더한 키만 있으면 1215 다
+function assertSelfParentKeys(t: Table, fks: readonly ForeignKey[], before: Table | undefined): void {
+  for (const fk of fks) {
+    assertParentUniqueKey(t, fk.refColumns);
+    if (before && !before.indexes.some((i) => isFkKey(i, fk.refColumns))) {
+      fail(`자기 테이블을 참조하는 FK \`${fk.name}\` 의 참조 컬럼 (${fk.refColumns.join(', ')}) 에 문장 앞부터 있던 인덱스가 없습니다 — 같은 ALTER TABLE 에서 더한 키로는 FK 를 만들 수 없습니다 (MySQL 1215)`);
+    }
+  }
 }
 
 // 정수·DECIMAL 은 크기·부호까지 같아야 하고 (정수는 표시 폭을 보지 않는다), 문자열은 길이는 달라도 되지만 문자셋·콜레이션이 같아야 한다.
@@ -359,21 +374,23 @@ export function ensureFkIndexes(t: Table, added: readonly { name: string; indexN
 // 인덱스·FK 정의를 차례로 붙이고, 붙인 FK 에 받치는 인덱스가 없으면 만든다 (ALTER TABLE ADD·CREATE TABLE 공용).
 // fkNamesBefore: 이 문장이 시작할 때 있던 FK 이름 (지우는 FK 포함) — 이름 없는 FK 는 이 중 가장 큰 번호 + 1 부터 하나씩 번호를 받는다 (MySQL 8.0.46·8.4.11 실측: 같은 문장에서
 // 직접 쓴 이름은 번호에 영향을 주지 않고, 겹치면 1826). 같은 문장에서 지운 FK 와 같은 이름을 다시 쓰는 것도 1826. 안 주면 t 에 있는 FK 이름 (CREATE TABLE 은 빈 테이블로 부른다).
-// FK 를 붙인 뒤 sortForeignKeys 를 부르는 것은 부른 쪽의 몫이다
-export function addKeys(st: State, t: Table, items: readonly ConstraintItem[], fkNamesBefore: readonly string[] = t.foreignKeys.map((f) => f.name), plan: AutoKeyPlan = planAutoKeys(t, items)): Table {
+// before: ALTER TABLE 의 문장 앞 테이블 (자기 참조 FK 의 InnoDB 인덱스 검사 — assertSelfParentKeys). FK 를 붙인 뒤 sortForeignKeys 를 부르는 것은 부른 쪽의 몫이다
+export function addKeys(st: State, t: Table, items: readonly ConstraintItem[], fkNamesBefore: readonly string[] = t.foreignKeys.map((f) => f.name), plan: AutoKeyPlan = planAutoKeys(t, items), before?: Table): Table {
   let next: Table = { ...t, indexes: [...plan.kept] };
   let generated = highestFkNumber(t.name, fkNamesBefore);
   const taken = fkNames(st, t);
+  const selfRefs: ForeignKey[] = [];
   for (const item of items) {
     if (item.kind === 'index') {
       next = addIndex(next, item);
       markProvenance(st, t.name, [next.indexes.at(-1)!.name], 'user'); // 직접 더한 인덱스: 이 실행이 안다
       continue;
     }
-    next = addForeignKey(st, next, item, item.named ? undefined : `${t.name}_ibfk_${++generated}`, taken);
+    next = addForeignKey(st, next, item, item.named ? undefined : `${t.name}_ibfk_${++generated}`, taken, true);
     assertForeignKeyCount(next);
     const fk = next.foreignKeys.at(-1)!;
     taken.add(fk.name);
+    if (fk.refTable === t.name && fk.refSchema === undefined) selfRefs.push(fk);
     if (plan.skipped.has(item)) continue;
     const made = ensureFkIndexes(next, [{ name: fk.name, ...(item.indexName !== undefined ? { indexName: item.indexName } : {}), named: item.named }], fk);
     if (made.indexes.length > next.indexes.length) markProvenance(st, t.name, [made.indexes.at(-1)!.name], 'auto'); // FK 가 만든 인덱스
@@ -381,9 +398,10 @@ export function addKeys(st: State, t: Table, items: readonly ConstraintItem[], f
   }
   assertKeyCount(next.indexes.length);
   // 같은 문장에서 지운 FK 와 같은 이름(대소문자 무시)으로 다시 더할 수 없다 — 받치는 인덱스가 있어도 1826 (인덱스 이름 충돌 1061 이 먼저 걸린다)
-  const before = new Set(fkNamesBefore.map((n) => n.toLowerCase()));
-  const reused = items.find((i): i is FkItem => i.kind === 'fk' && i.named && before.has(i.fk.name.toLowerCase()));
+  const namesBefore = new Set(fkNamesBefore.map((n) => n.toLowerCase()));
+  const reused = items.find((i): i is FkItem => i.kind === 'fk' && i.named && namesBefore.has(i.fk.name.toLowerCase()));
   if (reused) fail(`FK 이름 \`${reused.fk.name}\` 이 이미 있습니다 — 같은 문장에서 지운 FK 와 같은 이름으로 다시 더할 수 없습니다 (MySQL 1826)`);
+  assertSelfParentKeys(next, selfRefs, before);
   return next;
 }
 
