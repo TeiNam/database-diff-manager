@@ -212,7 +212,7 @@ MySQL의 모든 검사를 재현하지는 않는다. 화면 안내와 이 문서
 
 | 파일 | 책임 |
 |---|---|
-| `index.ts` | `applyScript(model, script, { schemaName, defaults?, sqlMode? }): ApplyResult` — 문장을 나누고(기존 문장 나누기·세션 SQL_MODE 추적 재사용 — `splitForApply`는 `splitDump`에 문장의 원문 자리와 실행 주석 표지·ASCII 밖 공백을 더하고 — 앞의 문장 없는 덩어리·DELIMITER 줄의 것은 뒤 문장의 것과 갈라 둔다 — 마지막 문장 뒤의 것은 따로 넘긴다) 문장마다 처리기로 보낸다. 실패하면 즉시 `{ ok: false, error }`. `sqlMode`는 처음 세션 SQL_MODE(스크립트를 실행한 서버의 sql_mode)이고, `SET SQL_MODE` 값처럼 검사해(`resolveSqlMode`, 받지 않는 값은 특정 문장이 아닌 실패) MySQL 순서로 맞춘다. 안 주면 MySQL 기본 모드다 |
+| `index.ts` | `applyScript(model, script, { schemaName, defaults?, sqlMode? }): ApplyResult` — 문장을 나누고(기존 문장 나누기·세션 SQL_MODE 추적 재사용 — `splitForApply`는 `splitDump`에 문장의 원문 자리와 실행 주석 표지·ASCII 밖 공백을 더하는데, 앞의 문장 없는 덩어리·DELIMITER 줄의 것과 마지막 문장 뒤의 것은 따로 둔다) 문장마다 처리기로 보낸다. 실패하면 즉시 `{ ok: false, error }`. `sqlMode`는 처음 세션 SQL_MODE(스크립트를 실행한 서버의 sql_mode)이고, `SET SQL_MODE` 값처럼 검사해(`resolveSqlMode`, 받지 않는 값은 특정 문장이 아닌 실패) MySQL 순서로 맞춘다. 안 주면 MySQL 기본 모드다 |
 | `types.ts` | 공용 타입, `ApplyFailure`, `MYSQL_DEFAULTS`, `DEFAULT_SQL_MODE` |
 | `normalize-mysql.ts` | 4장의 정규화 규칙(타입·기본값·NULL·문자셋), `finalizeColumn` |
 | `options.ts` | 테이블 옵션 값 정규화와 SHOW CREATE 옵션 순서 |
