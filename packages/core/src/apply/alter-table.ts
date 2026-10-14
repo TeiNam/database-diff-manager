@@ -14,7 +14,7 @@ import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { assertColumnCount, assertForeignKeyCount, assertKeyCount } from './limits';
 import { assertInnoDbTable, innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
-import { childNames, childTables, findColumn, findTable, isReferencedColumn, needTable, objectName, replaceTable, replaceTables, sameName, type State } from './state';
+import { childTables, findColumn, isReferencedColumn, needTable, objectName, renameRefColumns, replaceTable, sameName, type State } from './state';
 import { renameTable } from './table-stmt';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type DefaultSpec, type Position } from './types';
 
@@ -77,7 +77,7 @@ function alterWith(st: State, name: string, clauses: readonly Clause[]): void {
   assertForeignKeyCount(before);
   const { table, renamed } = applyClauses(st, before, clauses);
   replaceTable(st, name, table);
-  renameReferencedColumns(st, name, renamed);
+  renameRefColumns(st, name, renamed); // 9) 다른 테이블 FK 가 참조하는 컬럼 이름 (자기 참조는 remapKeys 가 고쳤다)
   const rename = clauses.filter((x): x is Extract<Clause, { k: 'renameTable' }> => x.k === 'renameTable').at(-1);
   if (rename && rename.to !== name) renameTable(st, name, rename.to);
 }
@@ -394,18 +394,6 @@ function moveIndexOrigin(st: State, table: string, from: string, to: string): vo
 function syncIndexOrigins(st: State, table: string, t: Table): void {
   const m = st.origins.indexes.get(table) ?? new Map<string, string | undefined>();
   st.origins.indexes.set(table, new Map(t.indexes.map((i) => [i.name, m.get(i.name)])));
-}
-
-// 다른 테이블 FK 가 참조하는 이 테이블 컬럼 이름도 따라 바뀐다 (MySQL 8.0). 참조 색인으로 바뀐 컬럼을 참조하는 자식 테이블만 고친다 (자기 참조는 remapKeys 가 고쳤다)
-function renameReferencedColumns(st: State, table: string, renamed: ReadonlyMap<string, string>): void {
-  if (![...renamed.keys()].some((old) => isReferencedColumn(st, table, old))) return;
-  const rename = (n: string) => renamed.get(n.toLowerCase()) ?? n;
-  const refersTable = (f: { refTable: string; refSchema?: string }) => f.refTable === table && f.refSchema === undefined;
-  const children = [...childNames(st, table)].flatMap((name) => {
-    const child = name === table ? undefined : findTable(st, name);
-    return child ? [child] : [];
-  });
-  replaceTables(st, children.map((x) => ({ ...x, foreignKeys: x.foreignKeys.map((f) => (refersTable(f) ? { ...f, refColumns: f.refColumns.map(rename) } : f)) })));
 }
 
 // 끝의 ALGORITHM [=] x · LOCK [=] x 는 스키마에 영향이 없어 뺀다

@@ -60,40 +60,55 @@ export function resolveDefaults(given: Partial<ApplyDefaults> = {}): ApplyDefaul
   return { charset, collation };
 }
 
-// DDL 을 적용했으면 true, 세션 문장(SET·USE)과 무시하는 문장(isNoOp)이면 false
+type Handler = (st: State, c: Cursor) => void;
+
+// DDL 을 적용했으면 true, 세션 문장(SET·USE)과 무시하는 문장(isNoOp)이면 false. 루틴은 본문 안의 ';' 와 덩어리의 경계를 assertOneRoutine 이 가르고,
+// 그 밖의 문장은 끝의 ';' 를 뗀 덩어리에 문장이 하나만 있어야 한다 (assertOneStatement — 지원하지 않는 문장은 그보다 먼저 지원 범위 안내로 거부한다)
 function applyStatement(st: State, statement: string, noBackslashEscapes: boolean): boolean {
   assertSameBackslashMode(st, statement, noBackslashEscapes);
   const { toks, ddl } = withoutCommentEnd(statement, tokenize(statement, { noBackslashEscapes }));
-  const c = new Cursor(toks, ddl);
-  if (c.isWord('SET') || c.isWord('USE') || isNoOp(c)) assertOneStatement(c.toks);
-  if (c.isWord('SET')) {
-    applySet(st, c);
-    return false;
+  if (isCreateRoutine(ddl)) {
+    createRoutine(st, ddl, noBackslashEscapes);
+    return true;
   }
-  if (c.acceptWord('USE')) {
+  const c = new Cursor(withoutTrailingSemicolons(toks), ddl);
+  const isSession = c.isWord('SET') || c.isWord('USE') || isNoOp(c);
+  const handler = isSession ? undefined : (ddlHandler(c) ?? fail(unsupported(ddl)));
+  assertOneStatement(c.toks);
+  if (!handler) return applySession(st, c);
+  assertBmpStrings(c.toks);
+  if (noBackslashEscapes) assertNoBackslashTypeValues(c.toks, ddl);
+  handler(st, c);
+  return true;
+}
+
+// 문장 종류에 맞는 DDL 처리기 (지원하지 않는 문장이면 undefined). c 는 처리기가 읽기 시작할 자리로 옮긴다
+function ddlHandler(c: Cursor): Handler | undefined {
+  if (c.acceptWord('ALTER', 'TABLE')) return alterTable;
+  if (c.acceptWord('DROP', 'INDEX')) return dropIndexOn;
+  if (c.isWord('CREATE', 'INDEX') || ['UNIQUE', 'FULLTEXT', 'SPATIAL'].some((w) => c.isWord('CREATE', w, 'INDEX'))) {
+    c.next();
+    return createIndex;
+  }
+  if (c.acceptWord('CREATE', 'TABLE')) return createTable;
+  if (c.acceptWord('DROP', 'TABLE')) return dropTable;
+  if (c.acceptWord('RENAME', 'TABLE')) return renameTables;
+  if (c.acceptWord('DROP', 'VIEW')) return dropView;
+  if (c.isWord('DROP', 'FUNCTION') || c.isWord('DROP', 'PROCEDURE')) {
+    c.next();
+    return dropRoutine;
+  }
+  return undefined;
+}
+
+// SET·USE 와 무시하는 문장 (적용한 DDL 이 아니다)
+function applySession(st: State, c: Cursor): false {
+  if (c.isWord('SET')) applySet(st, c);
+  else if (c.acceptWord('USE')) {
     const db = c.ident();
     if (db !== st.schemaName || !c.done) fail(`다른 스키마로 USE 할 수 없습니다: ${db}`);
-    return false;
   }
-  if (isNoOp(c)) return false;
-  if (!isCreateRoutine(ddl)) assertBmpStrings(c.toks);
-  if (noBackslashEscapes && !isCreateRoutine(ddl)) assertNoBackslashTypeValues(c.toks, ddl);
-  if (c.acceptWord('ALTER', 'TABLE')) alterTable(st, c);
-  else if (c.acceptWord('DROP', 'INDEX')) dropIndexOn(st, c);
-  else if (c.isWord('CREATE', 'INDEX') || ['UNIQUE', 'FULLTEXT', 'SPATIAL'].some((w) => c.isWord('CREATE', w, 'INDEX'))) {
-    c.next();
-    createIndex(st, c);
-  }
-  else if (c.acceptWord('CREATE', 'TABLE')) createTable(st, c);
-  else if (c.acceptWord('DROP', 'TABLE')) dropTable(st, c);
-  else if (c.acceptWord('RENAME', 'TABLE')) renameTables(st, c);
-  else if (c.acceptWord('DROP', 'VIEW')) dropView(st, c);
-  else if (c.isWord('DROP', 'FUNCTION') || c.isWord('DROP', 'PROCEDURE')) {
-    c.next();
-    dropRoutine(st, c);
-  } else if (isCreateRoutine(ddl)) createRoutine(st, ddl, noBackslashEscapes);
-  else return fail(unsupported(ddl));
-  return true;
+  return false;
 }
 
 // 스키마(SHOW CREATE 결과)를 바꾸지 않는 문장 — 이미 MySQL 에서 돈 스크립트에 흔해 무시한다 (적용한 문장 수에 세지 않는다): 트랜잭션 제어, LOCK·UNLOCK TABLES,
@@ -106,14 +121,21 @@ function isNoOp(c: Cursor): boolean {
   return NO_OP_WORDS.has(first.v.toUpperCase()) || c.isWord('START', 'TRANSACTION') || ['LOCK', 'UNLOCK'].some((w) => c.isWord(w, 'TABLES') || c.isWord(w, 'TABLE'));
 }
 
-// 무시하는 문장(SET·USE·isNoOp)은 첫 단어만 보고 덩어리를 통째로 넘긴다. 그런데 구분자를 바꾼 뒤(DELIMITER ;; 를 되돌리지 않음)에는 ';' 가 문장을 끝내지 않고,
-// mysql 클라이언트 명령 '\g'·'\G' 도 문장을 끝내므로 한 덩어리에 문장이 여럿 들 수 있다 — 그대로 넘기면 뒤 DDL 이 조용히 사라지므로 받지 않는다 (끝의 ';' 만은 괜찮다)
+const isOp = (t: Token, v: string): boolean => t.t === 'op' && t.v === v;
+
+// 덩어리 끝의 ';' 들은 문장을 끝낼 뿐이라 뗀다: 구분자를 바꾼 동안 'ALTER TABLE …;' 로 끝낸 마지막 문장도 mysql 클라이언트가 그대로 보내고 MySQL 이 받는다 (8.0.46·8.4.11 실측, ';;' 도 같다)
+function withoutTrailingSemicolons(toks: readonly Token[]): Token[] {
+  let end = toks.length;
+  while (end > 0 && isOp(toks[end - 1], ';')) end--;
+  return toks.slice(0, end);
+}
+
+// 구분자 덩어리 하나에는 문장 하나만 받는다 (리뷰 1회차 I-1·2회차 I-1). 구분자를 바꾼 동안(DELIMITER $$)에는 ';' 가 문장을 끝내지 않고 mysql 클라이언트 명령 '\g'·'\G' 는
+// 덩어리 가운데서 문장을 끝내므로 한 덩어리에 문장이 여럿 들 수 있다. mysql 클라이언트는 그 문장을 모두 실행하는데 (8.0.46·8.4.11 실측: 이미 있는 테이블의
+// CREATE TABLE IF NOT EXISTS 뒤의 ALTER·DROP 도 실행된다), 첫 문장만 읽거나 무시하면 뒤 DDL 이 조용히 사라진다. 루틴이 아닌 문장에는 문자열 밖의 ';'·백슬래시가 올 수 없다
 function assertOneStatement(toks: readonly Token[]): void {
-  const isSemicolon = (t: Token) => t.t === 'op' && t.v === ';';
-  const end = toks.findIndex(isSemicolon);
-  const continues = end >= 0 && toks.slice(end).some((t) => !isSemicolon(t));
-  if (!continues && !toks.some((t) => t.t === 'op' && t.v === '\\')) return;
-  fail(`한 문장 뒤에 다른 문장이 이어져 있습니다 (DELIMITER 를 ';' 로 되돌리지 않았거나 '\\g' 를 썼습니다) — 무시하는 문장과 함께 뒤 문장이 버려지지 않도록 받지 않습니다 — ${RE_EXPORT}`);
+  if (!toks.some((t) => isOp(t, ';') || isOp(t, '\\'))) return;
+  fail(`한 문장 뒤에 다른 문장이 이어져 있습니다 (DELIMITER 로 바꾼 구분자 대신 ';' 로 끝냈거나, DELIMITER 를 ';' 로 되돌리지 않았거나, '\\g' 를 썼습니다) — 뒤 문장이 버려지지 않도록 받지 않습니다 — ${RE_EXPORT}`);
 }
 
 // 문장 나누기(splitDump)는 SET SQL_MODE = '…' 꼴만 따라가 NO_BACKSLASH_ESCAPES 를 켜고 끈다. SET 문(applySet)이 바꾼 세션 SQL_MODE 와 어긋나면

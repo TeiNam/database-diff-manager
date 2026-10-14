@@ -1,0 +1,24 @@
+/* Database : __DB__ */
+SET NAMES utf8mb4;
+SET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;
+SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';
+
+/* Table : e */
+CREATE TABLE `e` (
+  `id` int NOT NULL,
+  `v` enum('a','A') CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+  `s` set('a','A') CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+/* Table : inh */
+CREATE TABLE `inh` (
+  `id` int NOT NULL,
+  `v` enum('a','A') COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+
+SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;
+SET SQL_MODE = @OLD_SQL_MODE;

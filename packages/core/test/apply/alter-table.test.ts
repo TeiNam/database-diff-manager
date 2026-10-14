@@ -113,6 +113,14 @@ describe('ALTER TABLE — 키·옵션·이름', () => {
     expect(tbl(r, 'member').indexes.map((i) => i.name)).toEqual(['PRIMARY', 'email', 'uq_name']);
   });
 
+  // SHOW CREATE 는 빈 인덱스 COMMENT 를 찍지 않는다 (8.0.46·8.4.11 실측, 시나리오 index-empty-comment). 남기면 다시 뽑은 덤프와 비교할 때 인덱스를 다시 만든다 (리뷰 2회차 M-1)
+  it("인덱스의 COMMENT '' 는 속성을 남기지 않는다 (ADD INDEX·CREATE INDEX·CREATE TABLE)", () => {
+    const r = ok("ALTER TABLE member ADD INDEX ix_age (age) COMMENT '', ADD UNIQUE KEY uq_name (name) COMMENT 'x';\nCREATE INDEX ix_email ON member (email) COMMENT '';\nCREATE TABLE t (a INT, KEY ka (a) COMMENT '');");
+    const comments = (table: string) => Object.fromEntries(tbl(r, table).indexes.map((i) => [i.name, 'comment' in i ? i.comment : '(없음)']));
+    expect(comments('member')).toEqual({ PRIMARY: '(없음)', email: '(없음)', uq_name: 'x', name_age: '(없음)', ix_age: '(없음)', ix_email: '(없음)' });
+    expect(comments('t')).toEqual({ ka: '(없음)' });
+  });
+
   it('ALTER TABLE … RENAME TO 는 자식 FK 참조·자동 FK 이름을 바꾼다', () => {
     const r = ok('ALTER TABLE orders RENAME TO purchase; ALTER TABLE member RENAME TO person;');
     expect(tbl(r, 'purchase').foreignKeys[0]).toMatchObject({ name: 'purchase_ibfk_1', refTable: 'person' });
@@ -391,6 +399,26 @@ describe('ALTER TABLE — 부모 → 자식 참조 색인', () => {
     const r = applyRef('RENAME TABLE p TO p2;\nALTER TABLE p2 RENAME COLUMN code TO code2;');
     expect(r.ok && r.model.tables.find((t) => t.name === 'c')!.foreignKeys[0]).toMatchObject({ refTable: 'p2', refColumns: ['code2'] });
   });
+
+  // 참조되는 컬럼 둘을 맞바꾸면 참조 컬럼 목록 둘이 서로의 키로 옮겨 간다 — 자기 참조 FK 는 부모를 바꿀 때 이미 새 목록으로 셌다 (리뷰 2회차 I-2: 목록을 키째로 옮긴다).
+  // 8.0.46·8.4.11 실측: 맞바꾼 뒤 d 가 참조하는 code, 자기 참조 FK 가 참조하는 id 를 지우면 1829
+  const SWAP_BASE = parseSqlDump(tdExport([
+    'CREATE TABLE `p` (\n  `id` int NOT NULL,\n  `code` int NOT NULL,\n  `up` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `uq` (`code`),\n  KEY `up` (`up`),\n'
+      + '  CONSTRAINT `p_ibfk_1` FOREIGN KEY (`up`) REFERENCES `p` (`code`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    'CREATE TABLE `c` (\n  `id` int NOT NULL,\n  `x` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `x` (`x`),\n  CONSTRAINT `c_ibfk_1` FOREIGN KEY (`x`) REFERENCES `p` (`code`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    'CREATE TABLE `d` (\n  `id` int NOT NULL,\n  `y` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `y` (`y`),\n  CONSTRAINT `d_ibfk_1` FOREIGN KEY (`y`) REFERENCES `p` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+  ].join('\n\n'))).model;
+  const SWAP = 'ALTER TABLE p RENAME COLUMN id TO code, RENAME COLUMN code TO id;';
+  const applySwap = (script: string) => applyScript(SWAP_BASE, `${SWAP}\n${script}`, { schemaName: 'shop' });
+
+  it('참조되는 컬럼을 맞바꾸면 자식·자기 참조 FK 가 따라가고, 참조 색인도 맞는다', () => {
+    const r = applySwap('');
+    if (!r.ok) throw new Error(r.error.reason);
+    expect(r.model.tables.map((t) => t.foreignKeys[0].refColumns)).toEqual([['id'], ['id'], ['code']]);
+    expect(applySwap('ALTER TABLE p DROP COLUMN code;')).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining('`d` 의 FK `d_ibfk_1` 가 참조하는 컬럼 `code`') } });
+    expect(applySwap('ALTER TABLE c DROP FOREIGN KEY c_ibfk_1;\nALTER TABLE p DROP COLUMN id;')).toMatchObject({ ok: false, error: { index: 3, reason: expect.stringContaining('`p` 의 FK `p_ibfk_1` 가 참조하는 컬럼 `id`') } });
+    expect(applySwap('ALTER TABLE p MODIFY code BIGINT NOT NULL;')).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining(RE_EXPORT) } });
+  });
 });
 
 // 문자열 컬럼의 숫자 리터럴 기본값은 MySQL 이 수로 읽어 다시 쓴 글자로, ENUM·SET 의 숫자는 순번·비트로 저장된다 (8.0.46·8.4.11 실측, 시나리오 string-number-defaults).
@@ -408,6 +436,47 @@ describe('ALTER TABLE — 문자열 컬럼의 숫자 기본값', () => {
       expect(!r.ok && r.error.reason.endsWith(RE_EXPORT), script).toBe(true);
     }
     expect(col(ok("ALTER TABLE member ADD s ENUM('2','1') DEFAULT '1';"), 'member', 's').default).toBe("'1'"); // 따옴표로 쓴 값은 멤버 이름이다
+  });
+
+  // BIT 에 쓴 문자열은 글자의 바이트다 (8.0.46·8.4.11 실측: BIT(8) DEFAULT '1' → b'110001') — 수로 읽으면 b'1' 이 되어 다른 기본값을 저장한다 (리뷰 2회차 M-5)
+  it('BIT 의 문자열 기본값은 RE_EXPORT 로 거부하고, 숫자·b 리터럴·TRUE 는 받는다 (ADD·ALTER COLUMN SET DEFAULT)', () => {
+    for (const script of ["ALTER TABLE member ADD c BIT(8) DEFAULT '1';", "ALTER TABLE member ADD c BIT(8);\nALTER TABLE member ALTER c SET DEFAULT '1';"]) {
+      const r = apply(script);
+      expect(r, script).toMatchObject({ ok: false, error: { reason: expect.stringContaining('문자열') } });
+      expect(!r.ok && r.error.reason.endsWith(RE_EXPORT), script).toBe(true);
+    }
+    const r = ok("ALTER TABLE member ADD b1 BIT(8) DEFAULT 1, ADD b2 BIT(8) DEFAULT b'00110001', ADD b3 BIT(1) DEFAULT TRUE;");
+    expect(['b1', 'b2', 'b3'].map((n) => col(r, 'member', n).default)).toEqual(["b'1'", "b'110001'", "b'1'"]);
+  });
+});
+
+// ENUM·SET 기본값의 멤버는 컬럼 콜레이션으로 찾는다 (리뷰 2회차 R2-02, 8.0.46·8.4.11 실측, 시나리오 enum-set-collation-defaults): 기준 덤프의 COLLATE utf8mb4_bin 컬럼은
+// 'a'·'A' 를 다른 멤버로 두어 SET DEFAULT 'A' 가 'A' 다. 테이블 콜레이션을 물려받은 컬럼도 같다 (SHOW CREATE 는 기본이 아닌 콜레이션을 컬럼에 찍는다)
+describe('ALTER TABLE — ENUM·SET 기본값과 대소문자를 가리는 콜레이션', () => {
+  const base = parseSqlDump(tdExport([
+    "CREATE TABLE `e` (\n  `id` int NOT NULL,\n  `v` enum('a','A') CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,\n  `s` set('a','A') CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,\n"
+      + '  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    "CREATE TABLE `inh` (\n  `id` int NOT NULL,\n  `v` enum('a','b') COLLATE utf8mb4_bin DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;",
+  ].join('\n\n'))).model;
+  const run = (script: string) => applyScript(base, script, { schemaName: 'shop' });
+
+  it('기준 컬럼의 SET DEFAULT 는 대소문자까지 같은 멤버를 고른다', () => {
+    const r = run("ALTER TABLE e ALTER COLUMN v SET DEFAULT 'A', ALTER COLUMN s SET DEFAULT 'A';");
+    if (!r.ok) throw new Error(r.error.reason);
+    expect(r.model.tables[0].columns.map((c) => c.default)).toEqual([undefined, "'A'", "'A'"]);
+  });
+
+  it.each([
+    ["ALTER TABLE e ADD COLUMN w ENUM('a','b') COLLATE utf8mb4_bin DEFAULT 'A';"], ["ALTER TABLE inh ALTER COLUMN v SET DEFAULT 'B';"],
+    ["ALTER TABLE inh ADD COLUMN w SET('x','y') DEFAULT 'Y';"], ["CREATE TABLE u (id INT, v ENUM('x','y') DEFAULT 'Y') COLLATE=utf8mb4_bin;"],
+  ])('대소문자만 같은 멤버는 기본값이 아니다 (1067): %s', (script) => {
+    expect(run(script)).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1067)') } });
+  });
+
+  it('_ci 콜레이션은 대소문자를 무시하고 멤버의 표기로 저장한다', () => {
+    const r = run("ALTER TABLE e ADD COLUMN u ENUM('a','b') DEFAULT 'B', ADD COLUMN t SET('x','y') COLLATE utf8mb4_0900_as_ci DEFAULT 'Y,X';");
+    if (!r.ok) throw new Error(r.error.reason);
+    expect(r.model.tables[0].columns.slice(3).map((c) => c.default)).toEqual(["'b'", "'x,y'"]);
   });
 });
 

@@ -40,8 +40,9 @@ export interface State {
   readonly tableAt: Map<string, number>;
   // 스키마의 FK 이름(소문자) → 개수와, FK 가 참조하는 테이블(부모) 이름 → 참조 컬럼 목록(소문자 JSON) → RefList (다른 스키마를 참조하는 FK 는 세지 않는다).
   // FK 이름은 스키마 안에서 유일해야 해서 FK 를 더하거나 이름이 바뀔 때마다 본다. 참조 색인은 부모를 바꾸는 문장이 모든 테이블을 훑지 않고 참조 컬럼 목록마다 한 번만
-  // 보게 한다 — 테이블 수천 개가 참조하는 허브 테이블도 문장마다 드는 시간이 자식 수에 비례하지 않는다 (리뷰 1회차 M-1). 테이블을 바꾸는 replaceTable·replaceTables·
-  // appendTable·removeTables 가 고치고, st.model.tables 를 직접 다시 쓰는 곳은 FK 이름·참조 컬럼을 바꾸지 않으며 참조 테이블 이름을 바꾸면 moveRefTable 을 부른다
+  // 보게 한다 — 테이블 수천 개가 참조하는 허브 테이블도 문장마다 드는 시간이 자식 수에 비례하지 않는다 (리뷰 1회차 M-1). 테이블을 바꾸는 replaceTable·appendTable·
+  // removeTables 가 고치고, 부모 컬럼 이름을 따라 자식 FK 의 참조 컬럼을 바꾸는 renameRefColumns 는 목록을 키째로 옮긴다. st.model.tables 를 직접 다시 쓰는
+  // 그 밖의 곳은 FK 이름·참조 컬럼을 바꾸지 않으며 참조 테이블 이름을 바꾸면 moveRefTable 을 부른다
   readonly fkNames: Map<string, number>;
   readonly refTables: Map<string, Map<string, RefList>>;
   // 루틴 '<종류>:<이름 소문자>' (routineKey). CREATE·DROP FUNCTION·PROCEDURE 가 고친다
@@ -89,6 +90,14 @@ function countReference(st: State, f: ForeignKey, child: string, delta: 1 | -1):
   else st.refTables.delete(f.refTable);
 }
 
+// 참조 컬럼 목록 하나를 부모의 목록 표에 넣는다. 같은 키의 목록이 이미 있으면 자식 수를 합친다 (없으면 목록을 그대로 옮긴다 — 자식이 수천 개여도 새로 만들지 않는다)
+function mergeRefList(lists: Map<string, RefList>, list: RefList): void {
+  const key = JSON.stringify(list.columns);
+  const target = lists.get(key);
+  if (!target) lists.set(key, list);
+  else for (const [child, n] of list.children) addCount(target.children, child, n);
+}
+
 // 모든 FK 의 참조 테이블 이름을 from 에서 to 로 바꾼 뒤 (RENAME TABLE) 참조 색인을 옮긴다 (FK_CHECKS=0 으로 to 를 미리 참조한 FK 와 합친다)
 export function moveRefTable(st: State, from: string, to: string): void {
   const lists = st.refTables.get(from);
@@ -99,12 +108,47 @@ export function moveRefTable(st: State, from: string, to: string): void {
     st.refTables.set(to, lists); // 흔한 경우: 표를 그대로 옮긴다 (자식이 수천 개여도 문장마다 새로 만들지 않는다)
     return;
   }
-  for (const [key, list] of lists) {
-    const merged = target.get(key) ?? { columns: list.columns, children: new Map<string, number>() };
-    for (const [child, n] of list.children) addCount(merged.children, child, n);
-    target.set(key, merged);
+  for (const list of lists.values()) mergeRefList(target, list);
+}
+
+// 부모 컬럼의 이름이 바뀌면 (RENAME COLUMN·CHANGE — renamed: 소문자 옛 이름 → 새 이름) 그 컬럼을 참조하는 다른 테이블 FK 의 참조 컬럼도 바뀐다 (MySQL 8.0).
+// 참조 색인에서 바뀐 컬럼이 든 참조 컬럼 목록의 자식만 다시 만들고, 목록은 새 컬럼 목록 키로 통째로 옮긴다. FK 이름은 그대로라 FK 이름 색인은 건드리지 않는다.
+// 부모의 자식을 모두 다시 만들고 자식마다 참조 색인을 다시 세면, 허브 테이블에서 자식 하나가 참조하는 컬럼 이름만 바꿔도 1,000,000자 스크립트가 30 초였다 (리뷰 2회차 I-2)
+export function renameRefColumns(st: State, parent: string, renamed: ReadonlyMap<string, string>): void {
+  if (!renamed.size) return;
+  const moved = moveRefColumns(st, parent, renamed);
+  if (!moved.length) return;
+  const rename = (n: string) => renamed.get(n.toLowerCase()) ?? n;
+  const changes = (f: ForeignKey) => f.refTable === parent && f.refSchema === undefined && f.refColumns.some((c) => renamed.has(c.toLowerCase()));
+  const tables = st.model.tables.slice();
+  // 자식 이름: 목록 하나면 그 목록의 자식 그대로 (Set 을 만들지 않는다), 여럿이면 여러 목록에 든 자식도 한 번만 고친다
+  for (const name of moved.length === 1 ? moved[0].children.keys() : new Set(moved.flatMap((l) => [...l.children.keys()]))) {
+    const at = tableIndex(st, name);
+    if (at < 0) continue;
+    const child = tables[at];
+    tables[at] = { ...child, foreignKeys: child.foreignKeys.map((f) => (changes(f) ? { ...f, refColumns: f.refColumns.map(rename) } : f)) };
   }
-  st.refTables.set(to, target);
+  st.model.tables = tables;
+}
+
+// 바뀐 컬럼이 든 부모의 참조 컬럼 목록을 새 컬럼 목록 키로 옮기고, 옮긴 목록(새 컬럼·옮긴 자식)을 돌려준다. 부모 자신(자기 참조 FK)은 replaceTable 이 새 정의로
+// 이미 셌으므로 그 자리에 남긴다. 맞바꾸기(a → b, b → a)도 되도록 옮길 목록을 모두 떼어 낸 뒤 넣고, 같은 키의 목록이 이미 있으면 합친다
+function moveRefColumns(st: State, parent: string, renamed: ReadonlyMap<string, string>): RefList[] {
+  const lists = st.refTables.get(parent);
+  if (!lists) return [];
+  const moving: RefList[] = [];
+  for (const [key, list] of [...lists]) {
+    const own = list.children.get(parent);
+    if (!list.columns.some((c) => renamed.has(c)) || (own !== undefined && list.children.size === 1)) continue;
+    lists.delete(key);
+    if (own !== undefined) {
+      list.children.delete(parent);
+      lists.set(key, { columns: list.columns, children: new Map([[parent, own]]) });
+    }
+    moving.push({ columns: list.columns.map((c) => (renamed.get(c) ?? c).toLowerCase()), children: list.children });
+  }
+  for (const list of moving) mergeRefList(lists, list);
+  return moving;
 }
 
 // 부모 테이블을 참조하는 FK 의 참조 컬럼 목록들 (자기 참조 포함)
@@ -198,20 +242,6 @@ export function replaceTable(st: State, name: string, next: Table): void {
   if (next.name === name) return;
   st.tableAt.delete(name);
   st.tableAt.set(next.name, at);
-}
-
-// 이름이 그대로인 테이블 여럿을 한 번에 바꾼다 (배열은 한 번만 복사한다 — 부모 컬럼 이름을 바꾸면 그 컬럼을 참조하는 자식 테이블마다 FK 가 바뀐다)
-export function replaceTables(st: State, next: readonly Table[]): void {
-  if (!next.length) return;
-  const tables = st.model.tables.slice();
-  for (const t of next) {
-    const at = tableIndex(st, t.name);
-    if (at < 0) continue;
-    countForeignKeys(st, t, 1);
-    countForeignKeys(st, tables[at], -1);
-    tables[at] = t;
-  }
-  st.model.tables = tables;
 }
 
 // 새 테이블을 맨 뒤에 둔다 (CREATE TABLE)
