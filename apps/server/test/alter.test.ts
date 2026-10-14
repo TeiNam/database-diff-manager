@@ -575,12 +575,33 @@ describe('POST /versions/:id/alter — 미리보기 뒤에 저장된 더 새 버
     expect(await columnsOf(ctx, res.json().versionId)).toEqual(['id', 'name', 'x']);
   });
 
-  it('미리보기에 expectedBase 를 보내도 같은 규칙으로 대조한다. 새 미리보기는 지금의 최신 SQL 버전 번호를 돌려준다', async () => {
+  // 같은 저장을 다시 보내면(응답을 받지 못해 다시 누름, 같은 미리보기를 연 다른 탭) 결과가 처음 저장한 버전과 같아 빠지는 변경이 없다.
+  // 409 를 주면 저장에 실패한 줄 알게 되므로, 중복 판정이 먼저고 새 버전을 만들 때만 더 새 버전을 본다
+  it('같은 expectedBase 로 다시 저장하면 지금처럼 duplicate 로 처음 저장한 버전을 돌려준다', async () => {
+    const ctx = await setup();
+    const mine = await preview(ctx, ctx.baseId);
+    const otherTab = await preview(ctx, ctx.baseId);
+    const first = await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: mine });
+    expect(first.json()).toMatchObject({ status: 'ok', versionNo: 2 });
+    for (const expectedBase of [mine, otherTab]) {
+      const again = await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase });
+      expect(again.statusCode, again.body).toBe(200);
+      expect(again.json()).toMatchObject({ status: 'duplicate', versionId: first.json().versionId, versionNo: 2 });
+    }
+    expect(versionCount(ctx.db)).toBe(2);
+    expect(derivationCount(ctx.db)).toBe(1);
+    // 결과가 다르면(다른 스크립트) 중복이 아니라 더 새 버전 검사로 막는다
+    expectNewer(await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD y INT;', expectedBase: mine }), { id: first.json().versionId, versionNo: 2 });
+  });
+
+  it('미리보기는 expectedBase 의 지문만 대조한다 — 더 새 버전은 저장이 새 버전을 만들 때 본다. 새 미리보기는 지금의 최신 SQL 버전 번호를 돌려준다', async () => {
     const ctx = await setup();
     const mine = await preview(ctx, ctx.baseId);
     const uploaded = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: REPLACEMENT, userId: 1 }); // v2
-    expectNewer(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: mine }), { id: uploaded.versionId, versionNo: 2 });
-    expect(await preview(ctx, ctx.baseId)).toEqual({ ...mine, latestVersionNo: 2 });
+    const dry = await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: mine });
+    expect(dry.statusCode, dry.body).toBe(200);
+    expect(dry.json().base).toEqual({ ...mine, latestVersionNo: 2 });
+    expectNewer(await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: mine }), { id: uploaded.versionId, versionNo: 2 });
     expect(versionCount(ctx.db)).toBe(2);
   });
 });
