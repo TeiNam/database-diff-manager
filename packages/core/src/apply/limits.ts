@@ -8,6 +8,10 @@ import { fail, RE_EXPORT } from './types';
 export const MAX_KEYS = 64;
 export const MAX_COLUMNS = 1017;
 export const MAX_FOREIGN_KEYS = 64;
+// 바이트 한도 (MySQL 8.0.46·8.4.11 실측, 리뷰 3회차 I-1): VARCHAR·VARBINARY 는 65535 바이트, 키 파트 하나는 3072 바이트 (ROW_FORMAT=COMPACT·REDUNDANT 는 767 —
+// convert-keys.ts keyLimit). 엄격 SQL_MODE 는 넘으면 1074·1071 로 거부하지만 엄격하지 않은 세션은 정의를 조용히 바꿔 받으므로 SQL_MODE 와 상관없이 거부한다
+// (normalize-mysql.ts assertVarcharBytes, keys.ts assertKeyPartBytes)
+export const MAX_VARCHAR_BYTES = 65535;
 
 export function assertKeyCount(count: number): void {
   if (count > MAX_KEYS) fail(`키가 너무 많습니다 — 테이블당 ${MAX_KEYS}개까지입니다 (MySQL 1069)`);

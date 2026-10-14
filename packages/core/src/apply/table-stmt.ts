@@ -3,7 +3,7 @@ import { renamedAutoName } from '../auto-name';
 import { Cursor } from '../cursor';
 import type { ForeignKey, Table, TableOption } from '../model';
 import { parseTableItem } from './def-parser';
-import { addKeys, checkSetNullFks, checkTable, columnKeyItems, enforcePrimaryKeyNotNull, isExplicitNull, sortChecks, sortForeignKeys, sortIndexes } from './keys';
+import { addKeys, assertKeyPartBytes, checkSetNullFks, checkTable, columnKeyItems, enforcePrimaryKeyNotNull, isExplicitNull, sortChecks, sortForeignKeys, sortIndexes } from './keys';
 import { splitList } from './lists';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, finalizeColumn, primaryCollation, tableCharset } from './normalize-mysql';
 import { innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
@@ -87,6 +87,7 @@ export function createTable(st: State, c: Cursor): void {
   t = enforcePrimaryKeyNotNull(t, explicitNull); // PRIMARY KEY 컬럼은 NOT NULL, NULL 을 직접 쓴 컬럼이면 1171
   checkSetNullFks(t); // FK 를 붙인 뒤에 PRIMARY KEY 가 컬럼을 NOT NULL 로 만들었으면 addForeignKey 의 검사가 놓친다 (1830)
   checkTable(st, t);
+  assertKeyPartBytes(t, st.defaults);
   t = { ...t, indexes: sortIndexes(t), foreignKeys: sortForeignKeys(t.foreignKeys) };
   appendTable(st, t);
   trackNew(st.origins, t, false);

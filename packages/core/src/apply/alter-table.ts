@@ -9,7 +9,7 @@ import type { Token } from '../lexer';
 import type { Column, IndexKind, Table } from '../model';
 import { parseColumnSpec, parseConstraint, parseDefault, parseIndexBody, parsePosition, parseUsing, startsConstraint } from './def-parser';
 import { assertTargetsKept, classifyFkIndexes, isFlagged, planAutoKeys, renameProvenance, shrunkIndexes, syncProvenance, withoutNames, type AutoKeyPlan } from './auto-index';
-import { addKeys, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, dropSoleColumnChecks, enforcePrimaryKeyNotNull, exprUses, isExplicitNull, isSoleColumnCheck, partitionColumns, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
+import { addKeys, assertKeyPartBytes, assertReaddedKeysFit, checkNowNotNull, checkTable, columnKeyItems, dropKeys, dropSoleColumnChecks, enforcePrimaryKeyNotNull, exprUses, isExplicitNull, isSoleColumnCheck, partitionColumns, refitKeyParts, remapKeys, renameIndex, setIndexVisibility, sortForeignKeys, sortIndexes, type KeyDrop } from './keys';
 import { splitList } from './lists';
 import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, normalizeDefault, tableCharset, type TableCharset } from './normalize-mysql';
 import { assertColumnCount, assertForeignKeyCount, assertKeyCount } from './limits';
@@ -246,6 +246,7 @@ function applyClauses(st: State, before: Table, clauses: readonly Clause[]): { t
   syncIndexOrigins(st, before.name, t);
   syncProvenance(st, before.name, t, flagged);
   for (const o of pick('option')) t = { ...t, options: setOption(t.options, o.key, o.value) };
+  assertKeyPartBytes(t, st.defaults); // 이 문장에서 바꾼 ROW_FORMAT 으로 본다
   return { table: t, renamed };
 }
 

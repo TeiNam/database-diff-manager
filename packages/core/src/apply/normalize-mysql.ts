@@ -1,10 +1,12 @@
 // 사람이 쓴 타입·기본값·문자셋을 MySQL SHOW CREATE 모양으로 맞춘다 (8.0/8.4).
 // 규칙마다 test:mysql 의 ALTER 시나리오(test/apply.int.test.ts)가 실제 MySQL 결과와 비교한다
+import { charsetMaxlen, partBytes } from '../convert-keys';
 import { Cursor } from '../cursor';
 import { quoteString, tokenize, type Token } from '../lexer';
 import type { Column, TableOption } from '../model';
 import { normalizeType } from '../normalize';
 import { assertFloatSize, floatDefault } from './float-default';
+import { MAX_VARCHAR_BYTES } from './limits';
 import { splitList } from './lists';
 import { TEMPORAL_TYPES, temporalDefault, type TemporalType } from './temporal-default';
 import { fail, RE_EXPORT, type ColumnSpec, type DefaultSpec, type NowSpec } from './types';
@@ -165,6 +167,22 @@ export function columnCharset(type: string, written: Pick<ColumnSpec, 'charset' 
 export function effectiveCollation(col: Pick<Column, 'type' | 'charset' | 'collation'>, table: TableCharset): string {
   if (!CHARSET_TYPES.has(baseType(col.type))) return '';
   return col.collation ?? (col.charset ? primaryCollation(canonicalCharset(col.charset)) : table.collation);
+}
+
+// 컬럼의 글자당 최대 바이트 (charsetMaxlen — SHOW CHARACTER SET 의 Maxlen): 문자열 타입은 실제 문자셋의 값이고, 이진 타입(BINARY·VARBINARY·BLOB)은 바이트가 글자라 1 이다.
+// 콜레이션 이름의 앞부분으로 문자셋을 읽어 기준 덤프의 옛 이름(utf8_general_ci)에도 던지지 않는다
+export function columnMaxlen(col: Pick<Column, 'type' | 'charset' | 'collation'>, table: TableCharset): number {
+  if (!CHARSET_TYPES.has(baseType(col.type))) return 1;
+  return charsetMaxlen(col.collation?.split('_')[0] ?? col.charset ?? table.charset);
+}
+
+// VARCHAR·VARBINARY 바이트 한도 (limits.ts): 엄격하지 않은 세션은 넘는 컬럼을 TEXT·BLOB 계열로 바꿔 받는다 (utf8mb4 VARCHAR(16384) → mediumtext). 행 크기 한도(1118)는 보지 않는다
+function assertVarcharBytes(col: Column, table: TableCharset): void {
+  const base = baseType(col.type);
+  if (base !== 'varchar' && base !== 'varbinary') return;
+  const bytes = partBytes(col, undefined, columnMaxlen(col, table));
+  if (bytes <= MAX_VARCHAR_BYTES) return;
+  fail(`컬럼 \`${col.name}\` 의 ${col.type} 은 ${bytes} 바이트로 ${MAX_VARCHAR_BYTES} 바이트를 넘습니다 — 엄격 SQL_MODE 의 MySQL 은 1074 로 거부하고, 엄격하지 않은 세션은 TEXT·BLOB 계열로 바꿔 받습니다 — ${RE_EXPORT}`);
 }
 
 const fspOf = (type: string): number => Number(/^(?:datetime|timestamp|time)\((\d)\)/.exec(type)?.[1] ?? 0);
@@ -348,6 +366,7 @@ export function finalizeColumn(spec: ColumnSpec, table: TableCharset): Column {
   if (spec.autoIncrement && spec.default && spec.default.kind !== 'null') fail(`AUTO_INCREMENT 컬럼 \`${spec.name}\` 에는 기본값을 쓸 수 없습니다 (MySQL 1067)`);
   const nullable = spec.primaryKey || spec.autoIncrement ? false : spec.nullable ?? true;
   const col: Column = { name: spec.name, type: spec.type, ...columnCharset(spec.type, spec, table), nullable, invisible: spec.invisible, autoIncrement: spec.autoIncrement };
+  assertVarcharBytes(col, table);
   if (spec.srid !== undefined) col.srid = spec.srid;
   if (spec.storage) col.storage = spec.storage;
   if (spec.columnFormat) col.columnFormat = spec.columnFormat;

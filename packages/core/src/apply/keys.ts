@@ -1,9 +1,10 @@
 // 인덱스·FK: 추가·삭제·이름 변경·자동 이름, FK 자동 인덱스, 문장 끝 테이블 검사, MySQL 키 저장 순서
+import { keyLimit, partBytes, rowFormatOf } from '../convert-keys';
 import { LexError, quotedIdentifiers, tokenize } from '../lexer';
 import type { Check, Column, ForeignKey, Index, IndexKind, IndexPart, Partitioning, Table } from '../model';
 import { markProvenance, planAutoKeys, type AutoKeyPlan } from './auto-index';
 import { assertForeignKeyCount, assertKeyCount } from './limits';
-import { baseType, BLOB_TYPES, CHARSET_TYPES, effectiveCollation, INT_TYPES, tableCharset } from './normalize-mysql';
+import { baseType, BLOB_TYPES, CHARSET_TYPES, columnMaxlen, effectiveCollation, INT_TYPES, tableCharset, type TableCharset } from './normalize-mysql';
 import { childTables, findColumn, findTable, hasOtherChild, refLists, sameName, type State } from './state';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type FkItem, type IndexItem } from './types';
 
@@ -197,6 +198,27 @@ function checkKeyParts(t: Table, index: Index): void {
     if (p.length === undefined) continue;
     if (!BLOB_TYPES.has(base) && !LENGTH_TYPES.has(base)) fail(`\`${col.name}\` 에는 길이 있는 키 파트를 쓸 수 없습니다 (MySQL 1089)`);
     if (LENGTH_TYPES.has(base) && p.length > declaredLength(col)) fail(`키 파트 길이가 컬럼 \`${col.name}\` 의 길이보다 깁니다 (MySQL 1089)`);
+  }
+}
+
+// 문장 끝 검사: 키 파트 하나의 바이트 한도 (limits.ts, 8.0.46·8.4.11 실측). ROW_FORMAT 이 COMPACT·REDUNDANT 이면 767, 그 밖(DYNAMIC·COMPRESSED, 쓰지 않으면
+// innodb_default_row_format 기본값 DYNAMIC)은 3072 (keyLimit). 엄격하지 않은 세션은 넘는 일반 인덱스의 키 파트를 한도까지의 prefix 로 줄여 받는다 (utf8mb4 VARCHAR(769) 의
+// KEY (c) → c(768), COMPACT 의 VARCHAR(192) → c(191)). 문장 끝 테이블의 키를 모두 본다 — MySQL 은 MODIFY·CHANGE 로 늘어난 컬럼의 키도, 같은 문장에서 바꾼 ROW_FORMAT 으로
+// 있던 키도 다시 만든다 (ROW_FORMAT=COMPACT 만 바꿔도 1071). FULLTEXT·SPATIAL 은 한도가 없고, 키 전체 길이(3072)는 엄격하지 않아도 1071 이라 보지 않는다
+export function assertKeyPartBytes(t: Table, defaults: TableCharset): void {
+  const rowFormat = rowFormatOf(t);
+  const limit = keyLimit(rowFormat).part;
+  const charset = tableCharset(t.options, defaults);
+  const columns = new Map(t.columns.map((c) => [c.name.toLowerCase(), c])); // 컬럼이 많은 테이블에서 키 파트마다 컬럼 목록을 훑지 않는다
+  for (const i of t.indexes) {
+    if (i.kind === 'FULLTEXT' || i.kind === 'SPATIAL') continue;
+    for (const p of i.parts) {
+      const col = p.column === undefined ? undefined : columns.get(p.column.toLowerCase());
+      const bytes = col ? partBytes(col, p.length, columnMaxlen(col, charset)) : 0; // 식 파트는 0
+      if (bytes <= limit) continue;
+      fail(`인덱스 \`${i.name}\` 의 키 파트 \`${col!.name}\` 이 ${bytes} 바이트로 ${limit} 바이트를 넘습니다${rowFormat ? ` (ROW_FORMAT=${rowFormat})` : ''} — `
+        + `엄격 SQL_MODE 의 MySQL 은 1071 로 거부하고, 엄격하지 않은 세션은 일반 인덱스를 prefix 로 줄여 받습니다 — ${RE_EXPORT}`);
+    }
   }
 }
 
