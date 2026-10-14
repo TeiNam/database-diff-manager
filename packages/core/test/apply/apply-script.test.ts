@@ -65,6 +65,12 @@ describe('applyScript — 문장 처리', () => {
     expect(run('CREATE TABLE `2025_sales` (`1st` INT PRIMARY KEY);\nCREATE TABLE c (`6ref` INT, FOREIGN KEY (`6ref`) REFERENCES `2025_sales` (`1st`));')).toMatchObject({ ok: true, applied: 2 });
   });
 
+  // cursor.ts 의 숫자 토큰 가드 (리뷰 10회차 Claude 참고 2 — 변이 시험에서 살아남았다): x'0A'·X'FF'·b'1' 은 숫자로 시작하지 않는 숫자 토큰이라 숫자 시작 이름 안내를 받지 않는다
+  it.each(["ALTER TABLE t ADD COLUMN x'0A' INT;", "ALTER TABLE t ADD COLUMN X'FF' INT;", "ALTER TABLE t ADD COLUMN b'1' INT;", "ALTER TABLE t RENAME COLUMN id TO x'0A';"])(
+    '이름 자리의 16진수·비트 리터럴 %s 는 숫자 시작 이름 안내 없이 식별자가 필요하다고 거부한다', (sql) => {
+      expect(run(sql)).toMatchObject({ ok: false, error: { index: 1, reason: '식별자 필요 (줄 1)' } });
+    });
+
   it.each(["ALTER TABLE t ADD COLUMN r INT, ADD FOREIGN KEY (x'0A') REFERENCES t (id);", "ALTER TABLE t ADD COLUMN r INT, ADD FOREIGN KEY (r) REFERENCES t (b'1');"])(
     'FK 컬럼 목록의 16진수·비트 리터럴 %s 는 숫자 시작 이름 안내 없이 식별자가 필요하다고 거부한다', (sql) => {
       expect(run(sql)).toMatchObject({ ok: false, error: { index: 1, reason: '식별자 필요 (줄 1)' } });
