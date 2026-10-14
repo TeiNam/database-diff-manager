@@ -2,7 +2,7 @@ import type { RenameMapping } from '@tdm/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 import { api, ApiError } from './client';
-import type { AlterRequest, AlterResponse, Derivation, DiffResponse, Me, MigrationFlowResponse, MigrationMeta, MigrationUploadInput, MigrationUploadResult, ObjectHistory, Role, SchemaInfo, TreeDatabase, UploadMeta, UploadResult, User, VersionDetail, VersionSummary } from './types';
+import type { AlterDefaultsSuggestion, AlterRequest, AlterResponse, Derivation, DiffResponse, Me, MigrationFlowResponse, MigrationMeta, MigrationUploadInput, MigrationUploadResult, ObjectHistory, Role, SchemaInfo, TreeDatabase, UploadMeta, UploadResult, User, VersionDetail, VersionSummary } from './types';
 
 export const queryKeys = {
   me: ['me'] as const,
@@ -10,6 +10,7 @@ export const queryKeys = {
   schema: (id?: number) => ['schema', id] as const,
   versions: (schemaId?: number) => ['versions', schemaId] as const,
   version: (id?: number) => ['version', id] as const,
+  alterDefaults: (id?: number) => ['alter-defaults', id] as const,
   diff: (base?: number, target?: number) => ['diff', base, target] as const,
   users: ['users'] as const,
   objectHistory: (id?: number) => ['object-history', id] as const,
@@ -112,7 +113,7 @@ export function useUpload() {
 }
 
 // 삭제된 id 는 SQLite 가 다시 쓸 수 있다 → id 로 캐시한 내용이 남으면 새 객체 자리에 옛 내용이 보인다
-const CATALOG_CACHE_KEYS = [['versions'], ['version'], ['schema'], ['object-history'], ['diff'], ['migration-flow'], ['migrations'], ['derivation']] as const;
+const CATALOG_CACHE_KEYS = [['versions'], ['version'], ['schema'], ['object-history'], ['diff'], ['migration-flow'], ['migrations'], ['derivation'], ['alter-defaults']] as const;
 
 export function useDeleteVersion() {
   const client = useQueryClient();
@@ -123,6 +124,7 @@ export function useDeleteVersion() {
       client.invalidateQueries({ queryKey: ['versions'] });
       // 스키마는 그대로 남는다. 지운 버전과 그 버전을 담은 객체 이력·diff 는 버린다
       client.removeQueries({ queryKey: queryKeys.version(id) });
+      client.removeQueries({ queryKey: queryKeys.alterDefaults(id) });
       client.removeQueries({ queryKey: ['object-history'] });
       client.removeQueries({ queryKey: ['diff'] });
       client.removeQueries({ queryKey: ['migration-flow'] });
@@ -217,3 +219,14 @@ export function useApplyAlter() {
 
 export const useDerivation = (id?: number) =>
   useQuery({ queryKey: ['derivation', id] as const, queryFn: () => api<Derivation>(`/versions/${id}/derivation`), enabled: id !== undefined, staleTime: Infinity });
+
+// ALTER 적용 대화상자의 스키마 기본값 제안 (기준 버전 테이블의 DEFAULT CHARSET·COLLATE 최빈값). 대화상자의 첫 값이 되므로
+// 실패하면 다시 시도하지 않고 바로 알린다
+export const useAlterDefaults = (versionId?: number) =>
+  useQuery({
+    queryKey: queryKeys.alterDefaults(versionId),
+    queryFn: () => api<AlterDefaultsSuggestion>(`/versions/${versionId}/alter-defaults`),
+    enabled: versionId !== undefined,
+    staleTime: Infinity,
+    retry: false,
+  });

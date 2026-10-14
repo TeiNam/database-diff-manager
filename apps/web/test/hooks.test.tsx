@@ -10,24 +10,25 @@ describe('삭제 훅의 캐시 정리', () => {
   const setup = () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     client.setQueryData(queryKeys.version(12), { id: 12 });
+    client.setQueryData(queryKeys.alterDefaults(12), { defaults: null });
     client.setQueryData(queryKeys.schema(7), { id: 7 });
     client.setQueryData(queryKeys.objectHistory(5), { object: { id: 5 } });
     const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
     return { client, wrapper };
   };
-  const cached = (client: QueryClient) => [queryKeys.version(12), queryKeys.objectHistory(5)].map((k) => client.getQueryData(k));
+  const cached = (client: QueryClient) => [queryKeys.version(12), queryKeys.alterDefaults(12), queryKeys.objectHistory(5)].map((k) => client.getQueryData(k));
 
   it.each([
     ['버전', () => { const m = useDeleteVersion(); return { isSuccess: m.isSuccess, run: () => m.mutate(12) }; }, false],
     ['Schema', () => { const m = useDeleteSchema(); return { isSuccess: m.isSuccess, run: () => m.mutate({ id: 7, confirmName: 'shop' }) }; }, true],
     ['Database', () => { const m = useDeleteDatabase(); return { isSuccess: m.isSuccess, run: () => m.mutate({ id: 1, confirmName: 'db' }) }; }, true],
-  ] as const)('%s 삭제 후 version·object-history(Schema·Database 는 schema 도) 캐시를 지운다', async (_label, useHook, isSchemaRemoved) => {
+  ] as const)('%s 삭제 후 version·alter-defaults·object-history(Schema·Database 는 schema 도) 캐시를 지운다', async (_label, useHook, isSchemaRemoved) => {
     mockApi({ 'DELETE /api/versions/12': { ok: true }, 'DELETE /api/schemas/7': { ok: true }, 'DELETE /api/databases/1': { ok: true } });
     const { client, wrapper } = setup();
     const { result } = renderHook(useHook, { wrapper });
     result.current.run();
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(cached(client)).toEqual([undefined, undefined]);
+    expect(cached(client)).toEqual([undefined, undefined, undefined]);
     // 버전 삭제는 스키마가 그대로 남는다
     expect(client.getQueryData(queryKeys.schema(7))).toEqual(isSchemaRemoved ? undefined : { id: 7 });
   });

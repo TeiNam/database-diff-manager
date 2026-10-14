@@ -18,10 +18,12 @@ export function HistoryPage() {
   const removeSchema = useDeleteSchema();
   const removeDatabase = useDeleteDatabase();
   const navigate = useNavigate();
-  const [alterOpen, setAlterOpen] = useState(false);
+  const [alterFor, setAlterFor] = useState<number>(); // ALTER 대화상자를 연 스키마 (undefined: 닫힘)
   const [scriptOf, setScriptOf] = useState<number>();
   const isEditor = canEdit(me.data);
   const info = schema.data;
+  // 대화상자는 연 스키마의 것이다. 주소가 다른 스키마로 바뀌면 닫아, 보고 있는 스키마와 다른 스키마의 버전에 저장하지 않게 한다
+  if (alterFor !== undefined && alterFor !== schemaId) setAlterFor(undefined);
   const confirmDelete = (target: typeof removeSchema, id: number, label: string, name: string) => {
     if (!confirmByName(label, name)) return;
     // 같은 오류 영역을 쓰므로 이전 삭제의 실패 메시지를 지운다
@@ -38,7 +40,7 @@ export function HistoryPage() {
       <h1 className={s.title}>버전 이력 · {info ? `${info.databaseName} › ${info.name}` : ''}</h1>
       {isEditor && info && (
         <div className={s.row}>
-          {list.some((v) => v.sourceFormat === 'sql') && <button type="button" className={s.btn} onClick={() => setAlterOpen(true)}>ALTER 적용</button>}
+          {list.some((v) => v.sourceFormat === 'sql') && <button type="button" className={s.btn} onClick={() => setAlterFor(schemaId)}>ALTER 적용</button>}
           <button type="button" className={`${s.btn} ${s.danger}`} disabled={removeSchema.isPending || removeDatabase.isPending}
             onClick={() => confirmDelete(removeSchema, info.id, 'Schema', info.name)}>Schema 삭제</button>
           <button type="button" className={`${s.btn} ${s.danger}`} disabled={removeSchema.isPending || removeDatabase.isPending}
@@ -92,7 +94,7 @@ export function HistoryPage() {
         </table>
       )}
       {remove.error && <p role="alert" className={s.error}>{remove.error.message}</p>}
-      {alterOpen && <AlterDialog versions={list} onClose={() => setAlterOpen(false)} />}
+      {alterFor !== undefined && <AlterDialog versions={list} onClose={() => setAlterFor(undefined)} />}
     </section>
   );
 }
