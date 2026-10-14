@@ -430,3 +430,29 @@ describe('세션 time_zone 과 TIMESTAMP 리터럴 기본값', () => {
     expect(run("ALTER TABLE ev ALTER COLUMN ts SET DEFAULT '2020-02-30 00:00:00';")).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1067)') } });
   });
 });
+
+// 리뷰 9회차 (Claude 참고 2): 트랜잭션 특성(SET [GLOBAL|SESSION] TRANSACTION …)·활성 역할(SET ROLE …)·계정의 기본 역할(SET DEFAULT ROLE … TO …)은 스키마와 이 도구가
+// 따라가는 세션 값을 바꾸지 않아 무시한다. 그 밖에 '변수 = 값' 꼴이 아닌 SET 은 ':' 필요 대신 알아보기 쉬운 안내로 거부한다
+describe('스키마와 상관없는 SET', () => {
+  it.each([
+    'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', 'SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE', 'SET GLOBAL TRANSACTION READ ONLY',
+    'SET LOCAL TRANSACTION READ WRITE, ISOLATION LEVEL REPEATABLE READ', 'set transaction isolation level read uncommitted', 'SET ROLE ALL', 'SET ROLE NONE', 'SET ROLE DEFAULT',
+    "SET ROLE 'r1', `r2`@'%'", "SET ROLE ALL EXCEPT 'r1'@'localhost'", "SET DEFAULT ROLE ALL TO 'u'@'%'", 'SET DEFAULT ROLE NONE TO u, v@localhost', 'SET DEFAULT ROLE r1, r2 TO CURRENT_USER()',
+  ])('%s 는 무시한다', (sql) => {
+    const st = freshState();
+    setIn(st, sql);
+    expect(st).toEqual(freshState());
+  });
+
+  it('스크립트 안에서도 적용한 문장 수에 세지 않고 넘어간다', () => {
+    const r = applyScript(empty, "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;\nSET ROLE ALL;\nSET DEFAULT ROLE ALL TO 'u'@'%';\nCREATE TABLE t (id INT PRIMARY KEY);", { schemaName: 'shop' });
+    expect(r).toMatchObject({ ok: true, applied: 1 });
+  });
+
+  it.each(['SET RESOURCE GROUP rg', 'SET RESOURCE GROUP rg FOR 1, 2', 'SET autocommit 1'])("'변수 = 값' 꼴이 아닌 %s 는 알아보기 쉬운 안내로 RE_EXPORT 와 함께 거부한다", (sql) => {
+    const message = messageOf(() => setIn(freshState(), sql));
+    expect(message).toContain("'변수 = 값' 꼴이 아닌 SET 은 받지 않습니다");
+    expect(message).not.toContain("':' 필요");
+    expect(message.endsWith(RE_EXPORT), message).toBe(true);
+  });
+});

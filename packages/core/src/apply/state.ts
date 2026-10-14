@@ -41,6 +41,8 @@ export interface State {
   // UTC 로 정한 세션 time_zone 을 바꿨을 수 있는 저장 함수 호출 (안내에 쓰는 이름 — 그 뒤 time_zone 을 다시 정하면 지운다). 이때 timeZoneUtc 는 false 다 (stored-call.ts)
   timeZoneChangedBy: string | undefined;
   readonly saved: Map<string, string>; // SET @v = … 로 저장한 사용자 변수 (소문자, '@' 포함). 무시한 문장이 저장 함수를 부르면 모두 잊는다 (stored-call.ts)
+  // 저장 함수 호출이 잊게 한 사용자 변수 — 호출 전에 저장한 것이다. 안내에만 쓴다: 다시 저장하면 saved 를 먼저 본다 (session.ts unknownVariable, 리뷰 9회차)
+  readonly forgotten: Set<string>;
   // 무시한 문장이 부른 마지막 저장 함수 (안내에 쓰는 이름). 함수는 사용자 변수·세션 time_zone·전역 sql_mode 를 바꿀 수 있는데, 문장을 실행하지 않아 바뀐 값을 모른다 —
   // 그 뒤 값을 다시 정하지 않은 사용자 변수를 읽거나 SET sql_mode = DEFAULT 를 쓰면 거부한다 (session.ts, 리뷰 8회차)
   storedCall: string | undefined;
@@ -69,7 +71,7 @@ export function initialState(base: SchemaModel, schemaName: string, defaults: Ap
   model.tables.forEach((t, k) => {
     if (!tableAt.has(t.name)) tableAt.set(t.name, k); // 같은 이름이 둘이면 앞의 것 (find 와 같다)
   });
-  const st: State = { model, schemaName, defaults, fkChecks: true, sqlMode, initialSqlMode: sqlMode, serverSqlModeChanged: false, timeZoneUtc: false, timeZoneChangedBy: undefined, saved: new Map(), storedCall: undefined, origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
+  const st: State = { model, schemaName, defaults, fkChecks: true, sqlMode, initialSqlMode: sqlMode, serverSqlModeChanged: false, timeZoneUtc: false, timeZoneChangedBy: undefined, saved: new Map(), forgotten: new Set(), storedCall: undefined, origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
   for (const t of model.tables) countForeignKeys(st, t, 1);
   return st;
 }
