@@ -7,6 +7,7 @@ import { saveDerivation } from '../repos/derivations';
 import { loadEvidence } from '../repos/evidence';
 import { writeRenames } from '../repos/renames';
 import { getVersionFingerprint, isSameFingerprint, latestSqlVersion, loadVersion, type VersionFingerprint } from '../repos/versions';
+import { suggestSqlMode } from './alter-defaults';
 import { roundTripMismatches, type RoundTripInput } from './alter-round-trip';
 import { ingest } from './ingest';
 
@@ -57,8 +58,12 @@ export function applyAlter(db: Db, input: AlterInput): AlterResult {
   // 저장 때 쓸 파일 이름. 미리보기도 같은 검사를 거쳐야 미리보기가 통과한 요청이 저장에서 거부되지 않는다
   const filename = input.filename ?? 'alter.sql';
   if (!/\.sql$/i.test(filename)) throw new AppError(400, 'ALTER 스크립트 파일 이름은 .sql 로 끝나야 합니다');
-  // 기본값 병합(문자셋만 주면 그 문자셋의 기본 콜레이션)은 core 가 한다 — 여기서 MYSQL_DEFAULTS 와 먼저 합치면 문자셋만 준 요청이 1253 으로 실패한다
-  const result = applyScript(base.model, input.script, { schemaName: base.version.schemaName, ...(input.defaults ? { defaults: input.defaults } : {}) });
+  // 기본값 병합(문자셋만 주면 그 문자셋의 기본 콜레이션)은 core 가 한다 — 여기서 MYSQL_DEFAULTS 와 먼저 합치면 문자셋만 준 요청이 1253 으로 실패한다.
+  // SET SQL_MODE 없이 만든 루틴이 기억할 서버 sql_mode 는 기준 버전 루틴의 SQL_MODE 최빈값으로 짐작한다 (없으면 core 가 MySQL 기본 모드를 쓴다 — 리뷰 5회차 M-1)
+  const sqlMode = suggestSqlMode(base.model.routines);
+  const result = applyScript(base.model, input.script, {
+    schemaName: base.version.schemaName, ...(input.defaults ? { defaults: input.defaults } : {}), ...(sqlMode === undefined ? {} : { sqlMode }),
+  });
   if (!result.ok) {
     const { index, line, reason } = result.error;
     throw new AppError(400, index > 0 ? `${index}번째 문장 (줄 ${line}): ${reason}` : reason, { error: result.error });

@@ -584,3 +584,67 @@ describe('POST /versions/:id/alter — 미리보기 뒤에 저장된 더 새 버
     expect(versionCount(ctx.db)).toBe(2);
   });
 });
+
+// 2way 리뷰 5회차 (M-1): SET SQL_MODE 없이 만든 루틴은 스크립트를 실행한 서버의 sql_mode 를 기억하는데, 늘 MySQL 기본 모드로 두어 서버 sql_mode 가 기본과
+// 다르면 틀린 모델이 됐다. 서버는 기준 버전 루틴의 SQL_MODE 최빈값을 처음 세션 SQL_MODE 로 준다 (루틴이 없으면 지금처럼 MySQL 기본 모드)
+describe('POST /versions/:id/alter — SET SQL_MODE 없이 만든 루틴의 SQL_MODE', () => {
+  const RELAXED = 'STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+  const DEFAULT_MODE = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+  const NEW_PROC = 'DELIMITER $$\nCREATE PROCEDURE sp_new()\nBEGIN\n  SELECT 1;\nEND$$\nDELIMITER ;';
+  // td-export 0.1.52 꼴 루틴 블록 (mode 가 없으면 0.1.52 전 꼴 — 루틴의 SQL_MODE 를 남기지 않는다)
+  const routine = (name: string, mode?: string) => [
+    ...(mode === undefined ? [] : [`SET @OLD_ROUTINE_SQL_MODE = @@SQL_MODE, SQL_MODE = '${mode}';`]),
+    'DELIMITER ;;', `CREATE DEFINER=\`root\`@\`%\` PROCEDURE \`${name}\`()\nBEGIN\n  SELECT 1;\nEND ;;`, 'DELIMITER ;',
+    ...(mode === undefined ? [] : ['SET SQL_MODE = @OLD_ROUTINE_SQL_MODE;']),
+  ].join('\n');
+  const baseWith = (ctx: Ctx, routines: string[]) =>
+    ingest(ctx.db, { databaseName: 'db-01', schemaName: 'routines', filename: 'routines.sql', text: dump('routines', [...routines, '', TABLE].join('\n')), userId: 1 }).versionId;
+  const modeOf = async (ctx: Ctx, versionId: number, name: string) => {
+    const detail = (await ctx.app.inject({ method: 'GET', url: `/api/versions/${versionId}`, headers: ctx.viewer })).json();
+    return (detail.model.routines as { name: string; sqlMode?: string }[]).find((r) => r.name === name)?.sqlMode;
+  };
+  const saveNew = async (ctx: Ctx, baseId: number, script = NEW_PROC) => {
+    const res = await ctx.save(baseId, { script });
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json().versionId as number;
+  };
+
+  it('기준 버전 루틴의 SQL_MODE 최빈값을 쓴다 — 같은 서버에서 SET SQL_MODE 없이 만든 루틴과 같은 값이다', async () => {
+    const ctx = await setup();
+    const baseId = baseWith(ctx, [routine('sp_a', RELAXED), routine('sp_b', RELAXED), routine('sp_c', DEFAULT_MODE)]);
+    expect(await modeOf(ctx, baseId, 'sp_a')).toBe(RELAXED);
+    const id = await saveNew(ctx, baseId);
+    expect(await modeOf(ctx, id, 'sp_new')).toBe(RELAXED);
+    const source = (await ctx.app.inject({ method: 'GET', url: `/api/versions/${id}/source`, headers: ctx.viewer })).body;
+    expect(source).toContain(`SQL_MODE = '${RELAXED}';\nDELIMITER ;;\nCREATE PROCEDURE \`sp_new\``);
+    // 다음 추출과 견줘도 sp_new 의 SQL_MODE 가 바뀌지 않는다
+    const diff = (await ctx.app.inject({ method: 'GET', url: `/api/diff?base=${baseId}&target=${id}`, headers: ctx.viewer })).json();
+    expect(diff.ddl).toContain(`SQL_MODE = '${RELAXED}'`);
+  });
+
+  it('스크립트의 SET SQL_MODE 가 앞선다', async () => {
+    const ctx = await setup();
+    const baseId = baseWith(ctx, [routine('sp_a', RELAXED)]);
+    const id = await saveNew(ctx, baseId, `SET SQL_MODE = 'NO_ENGINE_SUBSTITUTION';\n${NEW_PROC}`);
+    expect(await modeOf(ctx, id, 'sp_new')).toBe('NO_ENGINE_SUBSTITUTION');
+  });
+
+  it('루틴이 없거나 루틴에 SQL_MODE 기록이 없으면(td-export 0.1.52 전) 지금처럼 MySQL 기본 모드다', async () => {
+    const ctx = await setup();
+    expect(await modeOf(ctx, await saveNew(ctx, ctx.baseId), 'sp_new')).toBe(DEFAULT_MODE);
+    const legacy = baseWith(ctx, [routine('sp_a'), routine('sp_b')]);
+    expect(await modeOf(ctx, legacy, 'sp_a')).toBeUndefined();
+    expect(await modeOf(ctx, await saveNew(ctx, legacy), 'sp_new')).toBe(DEFAULT_MODE);
+  });
+
+  it('처음 세션 SQL_MODE 로 쓸 수 없는 값(묶음 모드·ANSI_QUOTES 등)의 루틴은 세지 않고, 그런 루틴뿐이어도 ALTER 는 받는다', async () => {
+    const ctx = await setup();
+    const traditional = 'STRICT_TRANS_TABLES,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,TRADITIONAL,NO_ENGINE_SUBSTITUTION';
+    const mixed = baseWith(ctx, [routine('sp_a', traditional), routine('sp_b', traditional), routine('sp_c', 'ANSI_QUOTES'), routine('sp_d', RELAXED)]);
+    expect(await modeOf(ctx, await saveNew(ctx, mixed), 'sp_new')).toBe(RELAXED);
+    const unusable = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'odd', filename: 'odd.sql', text: dump('odd', [routine('sp_a', traditional), '', TABLE].join('\n')), userId: 1 }).versionId;
+    const altered = await ctx.save(unusable, { script: 'ALTER TABLE member ADD x INT;' });
+    expect(altered.json()).toMatchObject({ status: 'ok' });
+    expect(await modeOf(ctx, await saveNew(ctx, altered.json().versionId), 'sp_new')).toBe(DEFAULT_MODE);
+  });
+});

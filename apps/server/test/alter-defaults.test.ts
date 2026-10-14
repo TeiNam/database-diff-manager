@@ -1,4 +1,6 @@
+import type { Routine } from '@tdm/core';
 import { describe, expect, it } from 'vitest';
+import { suggestSqlMode } from '../src/services/alter-defaults';
 import { ingest } from '../src/services/ingest';
 import { loggedInApp } from './helpers';
 
@@ -61,5 +63,26 @@ describe('GET /versions/:id/alter-defaults', () => {
   it('없는 버전은 404', async () => {
     const ctx = await setup([table('a', GENERAL)]);
     expect((await ctx.suggest(9999)).statusCode).toBe(404);
+  });
+});
+
+// 리뷰 5회차 M-1: SET SQL_MODE 없이 만든 루틴이 기억할 서버 sql_mode 는 기준 버전 루틴의 SQL_MODE 최빈값으로 짐작한다 (ALTER 적용의 처음 세션 SQL_MODE)
+describe('suggestSqlMode', () => {
+  const proc = (name: string, sqlMode?: string): Routine => ({ kind: 'procedure', name, params: '', body: 'SELECT 1', characteristics: {}, ...(sqlMode === undefined ? {} : { sqlMode }) });
+  const STRICT = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION';
+
+  it('가장 많은 루틴이 쓰는 SQL_MODE 를 MySQL 표기로 맞춰 센다 — 쓴 순서·대소문자가 달라도 같은 값이다', () => {
+    expect(suggestSqlMode([proc('a', 'NO_ZERO_DATE'), proc('b', 'no_engine_substitution,strict_trans_tables'), proc('c', STRICT)])).toBe(STRICT);
+  });
+
+  it('개수가 같으면 먼저 나온 루틴의 값이고, 빈 모드도 하나의 값이다', () => {
+    expect(suggestSqlMode([proc('a', ''), proc('b', STRICT)])).toBe('');
+    expect(suggestSqlMode([proc('a', STRICT), proc('b', '')])).toBe(STRICT);
+  });
+
+  it('SQL_MODE 기록이 없는 루틴과 처음 세션 SQL_MODE 로 쓸 수 없는 값은 세지 않고, 셀 루틴이 없으면 undefined', () => {
+    expect(suggestSqlMode([proc('a', 'ANSI'), proc('b', 'ANSI'), proc('c', 'REAL_AS_FLOAT'), proc('d'), proc('e', STRICT)])).toBe(STRICT);
+    expect(suggestSqlMode([proc('a'), proc('b', 'NO_SUCH_MODE')])).toBeUndefined();
+    expect(suggestSqlMode([])).toBeUndefined();
   });
 });
