@@ -9,8 +9,8 @@
 // td-export·마이그레이션 스크립트의 'SET @OLD_X = @@X, X = 0' 저장과 'SET X = @OLD_X' 복원을 따른다
 import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
-import { splitList } from './lists';
 import { assignCharset, CHARSET_VARIABLES, currentCharset, namesWrite } from './client-charset';
+import { splitList } from './lists';
 import { baseType } from './normalize-mysql';
 import { cappedReason, isUnknown, type SessionValue, type State } from './state';
 import { forgetStateChangedBy, storedFunctionCall } from './stored-call';
@@ -174,7 +174,9 @@ const isLiteral = (written: Token | undefined): boolean =>
 // 0.0 은 1232, 0x00 은 1231 이다. 0 은 빈 모드로 받고 그 밖의 숫자는 비트를 재현하지 않아 거부한다. 변수(@m·@@foreign_key_checks)의 숫자는 정수(비트)인지
 // 문자열('0' 은 1231)인지 따라가지 않아 함께 거부한다. 따옴표 친 '0' 은 모드 이름이 아니라 1231 이다 (resolveSqlMode)
 function sqlModeOf(value: string, written: Token | undefined): string {
-  if (written?.t === 'number') return /^0+$/.test(value) ? '' : fail(`SQL_MODE 를 숫자 ${value} 로 쓰면 MySQL 이 모드 비트로 읽습니다 — 0(빈 모드) 밖의 숫자는 받지 않습니다 — ${RE_EXPORT}`);
+  if (written?.t === 'number') {
+    return /^0+$/.test(value) ? '' : fail(`SQL_MODE 를 숫자 ${value} 로 쓰면 MySQL 이 모드 비트로 읽습니다 — 0(빈 모드) 밖의 숫자는 받지 않습니다 — ${RE_EXPORT}`);
+  }
   if (written?.t !== 'string' && /^\d+$/.test(value)) {
     fail(`SQL_MODE 에 넣은 변수 값 ${value} 가 숫자입니다 — MySQL 은 정수면 모드 비트로 읽고 문자열이면 1231 로 거부하는데, 이 도구는 변수 값이 정수인지 따라가지 않습니다 — ${RE_EXPORT}`);
   }

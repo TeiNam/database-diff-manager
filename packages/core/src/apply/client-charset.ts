@@ -2,7 +2,8 @@
 // 리터럴은 character_set_connection 으로 바꿔 저장한다. 스크립트는 UTF-8 이므로(화면이 UTF-8 로만 읽는다) 'SET NAMES latin1' 뒤의 DEFAULT '가'·COMMENT '회원 이름'·`가` 는
 // 'ê°€'·'íšŒì› ì´ë¦„'·`ê°€` 로 저장되고, connection 만 latin1 이어도 DEFAULT '가' 는 '?' 다 (ENUM('가','나') 는 1291). 두 문자셋이 UTF-8 계열이나 binary(바이트 그대로)가
 // 아니면, 또는 모르면, ASCII 밖 글자가 든 DDL·루틴 문장을 거부한다 — 깨진 글자를 재현하지 않는다. 데이터 문장·SET 같은 무시하는 문장은 스키마를 바꾸지 않아 받는다.
-// 처음 세션 문자셋은 utf8mb4 로 본다 (mysql 클라이언트 8.0 의 기본값 — state.ts). 콜레이션은 따라가지 않아 @@collation_connection 은 모르는 값이다
+// 처음 세션 문자셋은 utf8mb4 로 본다 (mysql 클라이언트 8.0 의 기본값 — state.ts). 콜레이션은 따라가지 않아 @@collation_connection 은 모르는 값이다. 저장 함수 안의
+// SET NAMES·character_set_client 는 함수에서 돌아올 때 MySQL 이 부른 쪽의 값으로 되돌려 따라가지 않는다 (8.0.46·8.4.11 실측)
 import type { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import { cappedReason, isUnknown, type SessionValue, type State } from './state';
