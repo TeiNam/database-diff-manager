@@ -63,15 +63,21 @@ export interface NestedComment {
   readonly mark: VersionMark;
 }
 
+// 렉서가 주석으로 건너뛴 힌트 (리뷰 15회차 F4): at 은 그 '/*+' 의 원문 자리, delimiter 는 그때의 구분자 — 힌트가 여러 줄이면 mysql 클라이언트는 둘째 줄부터 그 구분자에서 끊는다
+export interface Hint {
+  readonly at: number;
+  readonly delimiter: string;
+}
+
 // 원문의 한 구간에서 렉서가 알린 것: marks 는 렉서가 연 실행 주석 표지, spaces 는 렉서가 공백으로 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 R11-2·Claude F5),
 // closes 는 렉서가 실행 주석을 닫은 '*/' 의 원문 자리 (따옴표·주석 안의 것은 빠진다, 리뷰 13회차), nested 는 실행 주석 안에서 연 일반 주석 (리뷰 14회차 F1), hints 는 렉서가
-// 주석으로 건너뛴 힌트 '/*+' 의 원문 자리 (리뷰 14회차 — DELIMITER 줄 앞의 것을 거부한다)
+// 주석으로 건너뛴 힌트 (리뷰 15회차 F4 — 여러 줄 힌트를 본다)
 export interface LexNotes {
   readonly marks: readonly VersionMark[];
   readonly spaces: readonly number[];
   readonly closes: readonly number[];
   readonly nested: readonly NestedComment[];
-  readonly hints: readonly number[];
+  readonly hints: readonly Hint[];
 }
 
 // DELIMITER 줄 (리뷰 15회차 F1·F2): at 은 DELIMITER 단어의 원문 자리, from 은 그 앞 덩어리가 시작한 자리 (앞 구분자·DELIMITER 줄 바로 뒤, 스크립트 처음) — mysql 클라이언트는
@@ -79,6 +85,7 @@ export interface LexNotes {
 export interface CommandLine {
   readonly from: number;
   readonly at: number;
+  readonly delimiter: string; // 그 줄이 바꾼 구분자
 }
 
 // 문장 앞(앞 문장 뒤부터)의 것: ends 는 그 안의 문장 없이 끝난 덩어리를 끝낸 구분자의 원문 자리 — 실행 주석이 덩어리 안에서 닫혔는지 본다 (리뷰 13회차). commands 는 그 안의
@@ -146,9 +153,10 @@ class ChunkLog implements ChunkWatch {
   private spaces: number[] = [];
   private closes: number[] = [];
   private inner: NestedComment[] = [];
-  private hints: number[] = [];
+  private hints: Hint[] = [];
   private ends: number[] = [];
   private commands: CommandLine[] = [];
+  private delimiter = ';'; // 지금 구분자 (힌트에 붙인다)
   // 렉서가 열려 있다고 보는 표지 (가장 안쪽이 끝). DELIMITER 줄 뒤에서 렉서를 새로 읽혀도(afterCommand) 그 앞의 것은 남지만, 렉서는 새로 연 것만 닫고 그 안에서만 nested 를
   // 알리므로 끝의 것은 늘 렉서의 가장 안쪽 것이다
   private readonly open: VersionMark[] = [];
@@ -170,7 +178,7 @@ class ChunkLog implements ChunkWatch {
   }
 
   hinted(at: number): void {
-    this.hints.push(at);
+    this.hints.push({ at, delimiter: this.delimiter });
   }
 
   space(at: number): void {
@@ -183,6 +191,7 @@ class ChunkLog implements ChunkWatch {
 
   commanded(line: CommandLine): void {
     this.commands.push(line);
+    this.delimiter = line.delimiter;
   }
 
   take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'nested' | 'hints' | 'leading'> {
@@ -190,7 +199,7 @@ class ChunkLog implements ChunkWatch {
     const [leadSpaces, spaces] = splitAt(this.spaces, (at) => at, from);
     const [leadCloses, closes] = splitAt(this.closes, (at) => at, from);
     const [leadNested, nested] = splitAt(this.inner, (n) => n.at, from);
-    const [leadHints, hints] = splitAt(this.hints, (at) => at, from);
+    const [leadHints, hints] = splitAt(this.hints, (h) => h.at, from);
     const leading = { marks: leadMarks, spaces: leadSpaces, closes: leadCloses, nested: leadNested, hints: leadHints, ends: this.ends, commands: this.commands };
     this.marks = [];
     this.spaces = [];
@@ -236,7 +245,7 @@ function scan<S extends DumpStatement>(text: string, lenient: boolean, make: Mak
       if (!start && isDelimiterCommand(text, t)) {
         const end = lineEnd(text, t.s);
         find = new DelimiterSearch(text, delimiterArg(text.slice(t.e, end)), end);
-        watch?.commanded({ from, at: t.s });
+        watch?.commanded({ from, at: t.s, delimiter: find.delimiter });
         tokens = afterCommand(text, t.e, end, mode);
         skipUntil = end;
         continue;

@@ -211,7 +211,7 @@ describe('문장 나누기와 렉서 (덤프 파서와 함께 쓴다)', () => {
     const [s] = splitForApply(text).statements;
     const mark = (digits: string) => ({ at: text.indexOf(`/*!${digits}`), digits });
     expect(s.nested).toEqual([{ at: text.indexOf('/* x'), mark: mark('40101') }, { at: text.indexOf('/* w'), mark: mark('99999') }]);
-    expect(s.hints).toEqual([text.indexOf('/*+')]); // 힌트는 따로 알린다 (DELIMITER 줄 앞의 것을 거부한다)
+    expect(s.hints).toEqual([{ at: text.indexOf('/*+'), delimiter: ';' }]); // 힌트는 그때의 구분자와 함께 따로 알린다 (여러 줄 힌트를 본다, 리뷰 15회차 F4)
   });
 
   it('렉서는 버전 번호와 상관없이 실행 주석의 내용을 토큰으로 읽는다 (덤프의 /*!80023 INVISIBLE */)', () => {
