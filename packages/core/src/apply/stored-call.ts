@@ -1,27 +1,9 @@
-// 무시하는 문장 속 저장 함수 호출 (리뷰 7회차 R7-2·8회차·9회차). 이 도구는 문장을 실행하지 않으므로 저장 함수가 바꿨을 수 있는 세션 상태를 모르는 값으로 둔다.
-// 문장은 받는다 — 거부는 뒤에서 그 값을 읽는 문장이 한다 (session.ts). 함수를 만들어 데이터를 고친 뒤 지우는 마이그레이션이 흔하다
+// 무시하는 문장 속 저장 함수 호출 (리뷰 7회차 R7-2·8회차·9회차·10회차). 이 도구는 문장을 실행하지 않으므로 저장 함수가 바꿨을 수 있는 세션 상태를 모르는 값으로 둔다.
+// 문장은 받는다 — 거부는 뒤에서 그 값에 기대는 문장이 한다 (unknown-session.ts·session.ts). 함수를 만들어 데이터를 고친 뒤 지우는 마이그레이션이 흔하다.
+// 이름이 같은 저장 함수가 있어도 MySQL 이 내장 함수를 부르는 꼴은 native-functions.ts 가 가른다
 import type { Token } from '../lexer';
+import { callsNativeFunction } from './native-functions';
 import { isUnknown, routineKey, type State } from './state';
-
-// 이름이 같은 저장 함수가 있어도 MySQL 이 내장 함수를 부르는 잘 알려진 이름 (소문자). 따옴표·스키마 없이 쓸 때만이다 (8.0.46·8.4.11 실측: 이 이름의 저장 함수를 모두
-// 만든 뒤 불러도 내장 함수가 돈다). 백틱으로 감싸면(`now`()) 저장 함수를 부르는 이름이 있어 저장 함수 호출로 본다. 목록에 없는 내장 함수도 이름이 같은 저장 함수가
-// 모델에 있으면 저장 함수 호출로 본다 (보수적 — 뒤에서 그 값을 읽는 문장만 거부된다)
-const BUILTIN_FUNCTIONS: ReadonlySet<string> = new Set([
-  'concat', 'concat_ws', 'substring', 'substr', 'left', 'right', 'length', 'char_length', 'lower', 'upper', 'trim', 'ltrim', 'rtrim', 'replace', 'lpad', 'rpad',
-  'repeat', 'reverse', 'locate', 'instr', 'format', 'hex', 'unhex', 'md5', 'sha1', 'sha2', 'uuid', 'group_concat', 'field', 'find_in_set',
-  'if', 'ifnull', 'nullif', 'coalesce', 'isnull', 'greatest', 'least',
-  'now', 'curdate', 'curtime', 'current_timestamp', 'sysdate', 'utc_timestamp', 'date', 'year', 'month', 'day', 'date_add', 'date_sub', 'datediff', 'date_format',
-  'str_to_date', 'from_unixtime', 'unix_timestamp', 'timestampdiff',
-  'abs', 'ceil', 'floor', 'round', 'truncate', 'mod', 'rand', 'cast', 'convert', 'count', 'sum', 'avg', 'min', 'max',
-  'json_object', 'json_array', 'json_extract', 'json_unquote', 'json_set', 'json_contains',
-  'last_insert_id', 'row_count', 'database', 'user', 'current_user', 'version', 'uuid_to_bin', 'bin_to_uuid', 'inet_aton', 'inet_ntoa', 'sleep',
-]);
-// 그 가운데 바로 뒤에 '(' 가 붙어야 내장 함수인 이름 (MySQL lex.h 의 SYM_FN — 매뉴얼 "Function Name Parsing and Resolution"). 공백·주석을 끼우면(NOW () · NOW/**/())
-// MySQL 이 식별자로 읽어 저장 함수를 부른다. 나머지 이름(CONCAT·IFNULL …)은 공백·주석과 상관없이 내장 함수다 (리뷰 9회차 R9-1 — 목록의 이름마다 8.0.46·8.4.11 실측).
-// IGNORE_SPACE 세션에서는 공백만 끼운 꼴도 내장 함수지만(주석을 끼우면 저장 함수) 가르지 않고 센다 (보수적)
-const ADJACENT_ONLY_BUILTINS: ReadonlySet<string> = new Set([
-  'now', 'curdate', 'curtime', 'sysdate', 'date_add', 'date_sub', 'substring', 'substr', 'trim', 'group_concat', 'cast', 'count', 'sum', 'min', 'max',
-]);
 
 const DIGITS = /^[0-9]+$/;
 const isOp = (t: Token | undefined, v: string): boolean => t?.t === 'op' && t.v === v;
@@ -61,18 +43,28 @@ function calleeBefore(toks: readonly Token[], open: number): Callee | undefined 
   return { name, schema: isOp(toks[name.start - 1], '.') ? nameEndingAt(toks, name.start - 2) : undefined };
 }
 
-// 스키마 없이 쓴 이름이 MySQL 이 내장 함수로 읽는 꼴인가 (BUILTIN_FUNCTIONS — 바로 '(' 가 붙어야 하는 이름은 ADJACENT_ONLY_BUILTINS). 이름 토큰이 단어여야 한다 (백틱은 센다)
-function isBuiltinCall(toks: readonly Token[], open: number, name: Name): boolean {
+const hasMode = (sqlMode: string, mode: string): boolean => sqlMode.split(',').includes(mode);
+
+// 호출을 읽는 세션 SQL_MODE 의 IGNORE_SPACE (리뷰 10회차 R10-1 — 공백을 끼운 NOW () 도 내장 함수가 된다). 모르면 undefined: 세션 SQL_MODE 를 모르거나(앞의 SET 이 값을 모르는
+// 변수에서 정했다), 처음 세션 SQL_MODE(서버가 기준 버전 루틴에서 짐작한 값 — 설계 4장)에 IGNORE_SPACE 가 있어 지금 값의 IGNORE_SPACE 가 짐작에서 왔을 수 있다 (보수적)
+function ignoreSpace(st: State): boolean | undefined {
+  if (st.sqlModeUnknown !== undefined) return undefined;
+  if (!hasMode(st.sqlMode, 'IGNORE_SPACE')) return false;
+  return hasMode(st.initialSqlMode, 'IGNORE_SPACE') ? undefined : true;
+}
+
+// 스키마 없이 쓴 이름이 MySQL 이 내장 함수로 읽는 꼴인가 (native-functions.ts — 이름과 '(' 사이의 원문으로 공백·주석을 가른다). 이름 토큰이 단어여야 한다 (백틱·숫자로 시작하는
+// 이름은 센다)
+function isBuiltinCall(st: State, toks: readonly Token[], src: string, open: number, name: Name): boolean {
   const word = toks[open - 1];
-  const lower = name.text.toLowerCase();
-  if (word.t !== 'word' || !BUILTIN_FUNCTIONS.has(lower)) return false;
-  return word.e === toks[open].s || !ADJACENT_ONLY_BUILTINS.has(lower);
+  if (word.t !== 'word' || name.start !== open - 1) return false;
+  return callsNativeFunction(word.v, src.slice(word.e, toks[open].s), ignoreSpace(st));
 }
 
 // toks[open] 의 '(' 가 저장 함수 호출을 여는가 — 안내에 쓰는 이름 (아니면 undefined). 스키마를 붙인 호출은 늘 저장 함수다: 현재 스키마면 모델의 함수만 보고, 다른 스키마의
 // 함수는 이 버전이 모르는 함수라 본문을 볼 수 없어 함께 센다. 'INTO t (' 는 INSERT·REPLACE 의 테이블과 컬럼 목록이다. 스키마 없는 이름은 모델의 함수만 보되,
 // 내장 함수가 이기는 꼴은 뺀다 (리뷰 8회차 R8-1·9회차 R9-1 — MySQL 은 따옴표·스키마 없는 CONCAT( 를 이름이 같은 저장 함수가 있어도 내장 함수로 읽는다)
-function storedCallAt(st: State, toks: readonly Token[], open: number): string | undefined {
+function storedCallAt(st: State, toks: readonly Token[], src: string, open: number): string | undefined {
   const callee = calleeBefore(toks, open);
   if (!callee) return undefined;
   const { name, schema } = callee;
@@ -80,14 +72,15 @@ function storedCallAt(st: State, toks: readonly Token[], open: number): string |
   if (before?.t === 'word' && before.v.toUpperCase() === 'INTO') return undefined;
   if (schema) return schema.text === st.schemaName && !isModelFunction(st, name.text) ? undefined : `${schema.text}.${name.text}`;
   if (!isModelFunction(st, name.text)) return undefined;
-  return isBuiltinCall(toks, open, name) ? undefined : name.text;
+  return isBuiltinCall(st, toks, src, open, name) ? undefined : name.text;
 }
 
-// 문장이 부르는 첫 저장 함수 (없으면 undefined). 문자열·주석 속 글자는 토큰이 아니라 걸리지 않는다
-export function storedFunctionCall(st: State, toks: readonly Token[]): string | undefined {
+// 문장이 부르는 첫 저장 함수 (없으면 undefined). src: 토큰의 원문. 문자열·주석 속 글자는 토큰이 아니라 걸리지 않는다. 내장 함수 판정은 지금 세션 SQL_MODE 로 한다 —
+// SET 문은 대입하기 전에 문장 전체를 읽으므로 session.ts 가 대입보다 먼저 부른다
+export function storedFunctionCall(st: State, toks: readonly Token[], src: string): string | undefined {
   for (let k = 1; k < toks.length; k++) {
     if (!isOp(toks[k], '(')) continue;
-    const call = storedCallAt(st, toks, k);
+    const call = storedCallAt(st, toks, src, k);
     if (call !== undefined) return call;
   }
   return undefined;
@@ -98,8 +91,8 @@ export function storedFunctionCall(st: State, toks: readonly Token[]): string | 
 // time_zone 도 UTC 로 보지 않으며, 전역 sql_mode 도 바뀌었을 수 있다고 기억한다 (st.storedCall — 뒤의 SET sql_mode = DEFAULT 가 정한 세션 값을 모른다). 세션 sql_mode·
 // FOREIGN_KEY_CHECKS 는 MySQL 이 함수에서 돌아올 때 되돌린다 (8.0.46·8.4.11 실측).
 // 한계: 함수가 바꾼 그 밖의 세션 변수(default_storage_engine 등)는 따라가지 않는다 — 막으려면 호출 뒤의 CREATE TABLE 을 거의 모두 거부해야 한다 (설계 3.2)
-export function forgetStateChangedByCall(st: State, toks: readonly Token[]): void {
-  const call = storedFunctionCall(st, toks);
+// call: 그 문장이(SET 문이면 그 대입이) 부르는 저장 함수 (storedFunctionCall, 없으면 undefined — 아무것도 바꾸지 않는다)
+export function forgetStateChangedBy(st: State, call: string | undefined): void {
   if (call === undefined) return;
   for (const [name, value] of st.saved) if (!isUnknown(value)) st.forgotten.add(name);
   st.saved.clear();

@@ -10,7 +10,7 @@ import type { Token } from '../lexer';
 import { splitList } from './lists';
 import { baseType } from './normalize-mysql';
 import { isUnknown, type SessionValue, type State } from './state';
-import { forgetStateChangedByCall, storedFunctionCall } from './stored-call';
+import { forgetStateChangedBy, storedFunctionCall } from './stored-call';
 import { DEFAULT_SQL_MODE, fail, RE_EXPORT, type DefaultSpec } from './types';
 
 // 값에 따라 이후 CREATE TABLE 의 결과나 허용 여부가 달라지는 세션 변수 (소문자). 8.0 에 없는 이름(storage_engine, restrict_fk_on_non_standard_key)도 막는다
@@ -50,13 +50,18 @@ const FK_CHECKS_ON: ReadonlySet<string> = new Set(['1', 'ON', 'TRUE']);
 type Scope = 'session' | 'server';
 
 // MySQL 은 대입의 값을 모두 먼저 계산하고(이때 저장 함수가 돈다) 차례로 대입한다. DEFAULT 는 대입할 때 전역 값을 읽으므로, 뒤 대입이 부르는 저장 함수가 바꾼 전역 sql_mode 를
-// 읽는다 (8.0.46·8.4.11 실측) — 그래서 문장 안의 저장 함수 호출을 대입보다 먼저 기억한다. 사용자 변수는 값을 계산할 때 읽으므로 대입마다 차례로 본다
+// 읽는다 (8.0.46·8.4.11 실측) — 그래서 문장 안의 저장 함수 호출을 대입보다 먼저 기억한다. 사용자 변수는 값을 계산할 때 읽으므로 대입마다 차례로 본다.
+// 저장 함수 호출은 문장을 읽을 때의 세션 SQL_MODE(IGNORE_SPACE)로 대입보다 먼저 가린다 — 앞 대입이 바꾼 sql_mode 로 뒤 대입을 읽지 않는다 (리뷰 10회차 R10-1)
 export function applySet(st: State, c: Cursor): void {
   c.expectWord('SET');
   if (isNonSchemaSet(c)) return;
-  st.storedCall = storedFunctionCall(st, c.toks) ?? st.storedCall;
+  const items = splitList(c.toks.slice(c.i), 'SET');
+  const calls = items.map((toks) => storedFunctionCall(st, toks, c.src));
+  st.storedCall = calls.find((call) => call !== undefined) ?? st.storedCall;
   let scope: Scope = 'session';
-  for (const toks of splitList(c.toks.slice(c.i), 'SET')) scope = assign(st, new Cursor(toks, c.src), scope);
+  items.forEach((toks, k) => {
+    scope = assign(st, new Cursor(toks, c.src), scope, calls[k]);
+  });
 }
 
 // 스키마와 이 도구가 따라가는 세션 값에 상관없어 통째로 무시하는 SET (리뷰 9회차 Claude 참고 2): 트랜잭션 특성(SET [GLOBAL|SESSION|…] TRANSACTION ISOLATION LEVEL …·READ ONLY),
@@ -65,9 +70,9 @@ const SCOPE_WORDS: readonly string[] = ['GLOBAL', 'SESSION', 'LOCAL', 'PERSIST',
 const isNonSchemaSet = (c: Cursor): boolean =>
   c.isWord('TRANSACTION') || SCOPE_WORDS.some((w) => c.isWord(w, 'TRANSACTION')) || c.isWord('ROLE') || c.isWord('DEFAULT', 'ROLE');
 
-// 대입 하나. 돌려주는 값은 다음 대입이 물려받는 범위다: 앞에 쓴 GLOBAL·PERSIST·PERSIST_ONLY·SESSION·LOCAL 은 수식어 없는 뒤 대입에도 이어진다
-// (MySQL: 가장 최근 수식어를 따른다). '@@global.x' 처럼 이름에 붙인 범위는 그 대입에만 쓴다
-function assign(st: State, a: Cursor, inherited: Scope): Scope {
+// 대입 하나. call: 이 대입의 값이 부르는 저장 함수 (applySet 이 문장을 읽을 때 가렸다). 돌려주는 값은 다음 대입이 물려받는 범위다: 앞에 쓴 GLOBAL·PERSIST·PERSIST_ONLY·
+// SESSION·LOCAL 은 수식어 없는 뒤 대입에도 이어진다 (MySQL: 가장 최근 수식어를 따른다). '@@global.x' 처럼 이름에 붙인 범위는 그 대입에만 쓴다
+function assign(st: State, a: Cursor, inherited: Scope, call: string | undefined): Scope {
   if (a.isWord('NAMES') || a.isWord('CHARACTER') || a.isWord('CHARSET')) return inherited;
   const scope = scopeWord(a) ?? inherited;
   const variable = target(a);
@@ -76,7 +81,7 @@ function assign(st: State, a: Cursor, inherited: Scope): Scope {
     // PERSIST_ONLY 는 실행 중인 값을 바꾸지 않지만 범위를 가르지 않고 함께 본다 (드물어 보수적으로 거부).
     // 값을 읽지 않고 버려도 그 안의 저장 함수 호출은 실행되어 사용자 변수 등을 바꿀 수 있으므로 다른 무시하는 문장과 같이 그 값을 모르는 값으로 둔다 (리뷰 8회차)
     if (variable.name === 'sql_mode') st.serverSqlModeChanged = true;
-    forgetStateChangedByCall(st, a.toks);
+    forgetStateChangedBy(st, call);
     return scope;
   }
   assignSession(st, a, variable.name);
