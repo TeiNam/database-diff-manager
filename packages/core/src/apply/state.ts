@@ -1,4 +1,4 @@
-// ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE·time_zone 변경 여부), 기준 이름 추적
+// ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE·time_zone 이 UTC 인지), 기준 이름 추적
 import { Cursor } from '../cursor';
 import { routineNameKey } from '../diff';
 import type { Column, ForeignKey, Routine, SchemaModel, Table } from '../model';
@@ -33,7 +33,7 @@ export interface State {
   readonly defaults: ApplyDefaults;
   fkChecks: boolean;
   sqlMode: string;
-  timeZoneSet: boolean; // 세션 time_zone 을 바꾸었는가 — 그 뒤의 TIMESTAMP 리터럴 기본값은 받지 않는다 (session.ts assertZoneFreeDefault)
+  timeZoneUtc: boolean; // 스크립트가 세션 time_zone 을 UTC 로 정했는가 — 아니면 서버 시간대라 TIMESTAMP 리터럴 기본값을 받지 않는다 (session.ts assertUtcTimestampDefault)
   readonly saved: Map<string, string>; // SET @v = … 로 저장한 사용자 변수 (소문자, '@' 포함)
   readonly origins: Origins;
   // 테이블 이름 → st.model.tables 안의 자리. 이름 목록은 늘 정확하고 (테이블을 더하고 지우고 이름을 바꾸는 CREATE·DROP·RENAME TABLE 이 고친다),
@@ -60,7 +60,7 @@ export function initialState(base: SchemaModel, schemaName: string, defaults: Ap
   model.tables.forEach((t, k) => {
     if (!tableAt.has(t.name)) tableAt.set(t.name, k); // 같은 이름이 둘이면 앞의 것 (find 와 같다)
   });
-  const st: State = { model, schemaName, defaults, fkChecks: true, sqlMode, timeZoneSet: false, saved: new Map(), origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
+  const st: State = { model, schemaName, defaults, fkChecks: true, sqlMode, timeZoneUtc: false, saved: new Map(), origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
   for (const t of model.tables) countForeignKeys(st, t, 1);
   return st;
 }

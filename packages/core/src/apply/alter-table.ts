@@ -15,7 +15,7 @@ import { baseType, effectiveCollation, finalizeColumn, NO_LITERAL_DEFAULT, norma
 import { assertColumnCount, assertForeignKeyCount, assertKeyCount } from './limits';
 import { assertInnoDbTable, innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
 import { childTables, findColumn, isReferencedColumn, needTable, objectName, renameRefColumns, replaceTable, sameName, type State } from './state';
-import { assertZoneFreeDefault } from './session';
+import { assertUtcTimestampDefault } from './session';
 import { renameTable } from './table-stmt';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type DefaultSpec, type Position } from './types';
 
@@ -188,7 +188,7 @@ function setDefault(st: State, col: Column, value: DefaultSpec, table: TableChar
   if (NO_LITERAL_DEFAULT.has(base)) fail(`${base.toUpperCase()} 컬럼 \`${col.name}\` 에는 기본값을 쓸 수 없습니다 (MySQL 1101)`);
   if (col.generated) fail(`생성 컬럼 \`${col.name}\` 에는 DEFAULT 를 쓸 수 없습니다 (MySQL 1221)`);
   const normalized = normalizeDefault(value, col, table);
-  assertZoneFreeDefault(st, col.name, col.type, value);
+  assertUtcTimestampDefault(st, col.name, col.type, value);
   return withDefault(col, col.autoIncrement ? undefined : normalized);
 }
 
@@ -327,10 +327,10 @@ function changeColumns(st: State, before: Table, entries: Entry[], clauses: read
   return moved;
 }
 
-// 컬럼 정의 → Column. 세션 time_zone 을 바꾼 뒤의 TIMESTAMP 리터럴 기본값은 받지 않는다 (assertZoneFreeDefault — 값 검사(1067)가 먼저다)
+// 컬럼 정의 → Column. 세션 time_zone 을 UTC 로 정하지 않은 TIMESTAMP 리터럴 기본값은 받지 않는다 (assertUtcTimestampDefault — 값 검사(1067)가 먼저다)
 function finalizeIn(st: State, spec: ColumnSpec, charset: TableCharset): Column {
   const col = finalizeColumn(spec, charset);
-  assertZoneFreeDefault(st, spec.name, spec.type, spec.default);
+  assertUtcTimestampDefault(st, spec.name, spec.type, spec.default);
   return col;
 }
 

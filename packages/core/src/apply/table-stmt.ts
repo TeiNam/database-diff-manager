@@ -7,7 +7,7 @@ import { addKeys, assertKeyPartBytes, checkSetNullFks, checkTable, columnKeyItem
 import { splitList } from './lists';
 import { canonicalCharset, canonicalCollation, charsetOfCollation, finalizeColumn, primaryCollation, tableCharset } from './normalize-mysql';
 import { innodbEngineName, optionValue, parseCommonOption, setOption } from './options';
-import { assertZoneFreeDefault } from './session';
+import { assertUtcTimestampDefault } from './session';
 import { appendTable, childNames, forgetOrigins, moveOrigins, moveRefTable, nameTaken, needTable, objectName, objectNameList, removeTables, replaceTable, sameName, trackNew, type State } from './state';
 import { assertColumnCount, assertKeyCount } from './limits';
 import { fail, RE_EXPORT, type ConstraintItem } from './types';
@@ -80,7 +80,7 @@ export function createTable(st: State, c: Cursor): void {
   assertColumnCount(specs.length);
   const explicitNull = new Set(specs.filter(isExplicitNull).map((s) => s.name.toLowerCase()));
   const columns = specs.map((s) => finalizeColumn(s, charset));
-  for (const s of specs) assertZoneFreeDefault(st, s.name, s.type, s.default); // 세션 time_zone 뒤의 TIMESTAMP 리터럴 기본값 (값 검사(1067)가 먼저다)
+  for (const s of specs) assertUtcTimestampDefault(st, s.name, s.type, s.default); // UTC 로 정하지 않은 세션의 TIMESTAMP 리터럴 기본값 (값 검사(1067)가 먼저다)
   let t: Table = { kind: 'table', name, columns, indexes: [], foreignKeys: [], checks: [], options, fidelity: 'full' };
   // 키는 쓴 차례대로 들어간다: 컬럼 안 PRIMARY KEY·UNIQUE(columnKeyItems)는 그 컬럼 정의를 쓴 자리에서, 표 수준 키·FK 는 쓴 자리에서 (ALTER 의 columnKeys 와 같다).
   // SHOW CREATE 의 같은 무리 안 순서가 이 차례다 (sortIndexes). addKeys 가 인덱스 출처(provenance)도 적는다

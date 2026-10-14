@@ -1,3 +1,6 @@
+-- TIMESTAMP 리터럴 기본값은 세션 time_zone 을 UTC 로 정한 뒤에만 받는다 (리뷰 4회차 M-1): MySQL 은 쓰는 세션의 시간대에서 UTC 로 바꿔 저장하고,
+-- td-export 는 UTC 세션에서 읽는다. UTC 로 정한 세션의 값은 쓴 그대로 찍힌다
+SET time_zone = '+00:00';
 ALTER TABLE member
   ADD COLUMN d1 DATE DEFAULT '2020-01-01',
   ADD COLUMN dt1 DATETIME NOT NULL DEFAULT '2020-01-01',
