@@ -303,6 +303,24 @@ describe('ALTER TABLE — 컬럼 정의 안의 PRIMARY KEY·UNIQUE', () => {
 
 // MySQL 8.0.46·8.4.11 실측: ALTER COLUMN … DROP DEFAULT 는 컬럼 종류와 상관없이 DEFAULT 절을 없앤다 (NULL 허용 컬럼도 `DEFAULT NULL` 이 사라진다).
 // 그 뒤 SET DEFAULT NULL 이면 `DEFAULT NULL` 이 다시 보인다
+// 문자열 컬럼의 숫자 리터럴 기본값은 MySQL 이 수로 읽어 다시 쓴 글자로, ENUM·SET 의 숫자는 순번·비트로 저장된다 (8.0.46·8.4.11 실측, 시나리오 string-number-defaults).
+// 쓴 글자 그대로 저장하면 그 모델로 만든 DDL 이 다른 기본값을 만든다 (리뷰 1회차 F3)
+describe('ALTER TABLE — 문자열 컬럼의 숫자 기본값', () => {
+  it('CHAR·VARCHAR·VARBINARY 의 숫자 리터럴 기본값은 MySQL 이 찍는 글자로 저장한다 (ADD·ALTER COLUMN SET DEFAULT)', () => {
+    const r = ok('ALTER TABLE member ADD code VARCHAR(10) DEFAULT 001, ADD c2 CHAR(5) DEFAULT -0.0, ADD c3 VARCHAR(5) DEFAULT TRUE, ADD c4 VARBINARY(5) DEFAULT +5;\nALTER TABLE member ALTER code SET DEFAULT 0010.50;');
+    expect(['code', 'c2', 'c3', 'c4'].map((n) => col(r, 'member', n).default)).toEqual(["'10.50'", "'0.0'", "'1'", "'5'"]);
+  });
+
+  it('ENUM·SET 의 숫자 기본값은 RE_EXPORT 로 거부한다', () => {
+    for (const script of ["ALTER TABLE member ADD s ENUM('2','1') DEFAULT 1;", "ALTER TABLE member ADD f SET('2','a') DEFAULT 2;", "ALTER TABLE member ADD s ENUM('a','b') DEFAULT TRUE;"]) {
+      const r = apply(script);
+      expect(r, script).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('순번') } });
+      expect(!r.ok && r.error.reason.endsWith(RE_EXPORT), script).toBe(true);
+    }
+    expect(col(ok("ALTER TABLE member ADD s ENUM('2','1') DEFAULT '1';"), 'member', 's').default).toBe("'1'"); // 따옴표로 쓴 값은 멤버 이름이다
+  });
+});
+
 describe('ALTER TABLE — ALTER COLUMN … DROP DEFAULT', () => {
   const DEFAULTS_BASE = parseSqlDump(tdExport(
     "CREATE TABLE `d` (\n  `id` int NOT NULL,\n  `n1` varchar(10) DEFAULT NULL,\n  `n2` varchar(10) NOT NULL,\n  `n3` text,\n  `n4` int DEFAULT '5',\n  `n5` int NOT NULL AUTO_INCREMENT,\n  `n6` json DEFAULT NULL,\n  `n7` datetime DEFAULT CURRENT_TIMESTAMP,\n  `n9` int NOT NULL DEFAULT '7',\n  `n10` varchar(5) DEFAULT 'x',\n  `n11` timestamp NULL DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `n5` (`n5`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",

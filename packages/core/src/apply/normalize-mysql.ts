@@ -197,13 +197,27 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   if (TEMPORAL_TYPES.has(base)) return temporalText(spec, col, base as TemporalType, bad);
   if (base === 'year') return quoteString(yearDefault(spec.value, bad, reExport));
   if (NUMERIC.has(base)) return quoteString(numericDefault(spec.value, col.type, bad, reExport));
+  // ENUM·SET 에 쓴 숫자는 값이 아니라 순번·비트다 (8.0.46·8.4.11 실측: ENUM('2','1') DEFAULT 1 → '2', SET('2','a') DEFAULT 2 → 'a')
+  if ((base === 'enum' || base === 'set') && spec.kind === 'number') return reExport(`${spec.value} 은(는) 숫자라 MySQL 이 값이 아니라 순번·비트로 읽습니다 (값을 따옴표로 감싸 쓰세요)`);
   if (base === 'enum') {
     const wanted = trimTrailingSpaces(spec.value).toLowerCase();
     return quoteString(enumMembers(col.type).find((m) => m.toLowerCase() === wanted) ?? bad(`'${spec.value}' 은 ENUM 값이 아닙니다`));
   }
   if (base === 'set') return quoteString(setDefault(spec.value, col.type, bad));
-  if (base === 'char') return quoteString(trimTrailingSpaces(spec.value)); // CHAR 는 끝 공백을 떼고 찍는다 (8.0.46·8.4.11 실측: 'ab  ' → 'ab', ' ' → '')
-  return quoteString(spec.value);
+  const text = spec.kind === 'number' ? numberText(spec.value) ?? reExport(`${spec.value} 은(는) 문자열 컬럼에 쓸 수 있는 숫자 꼴이 아닙니다`) : spec.value;
+  if (base === 'char') return quoteString(trimTrailingSpaces(text)); // CHAR 는 끝 공백을 떼고 찍는다 (8.0.46·8.4.11 실측: 'ab  ' → 'ab', ' ' → '')
+  return quoteString(text);
+}
+
+// 문자열 컬럼(CHAR·VARCHAR·BINARY·VARBINARY)에 쓴 숫자 리터럴: MySQL 은 수로 읽은 뒤 글자로 바꿔 저장한다 (8.0.46·8.4.11 실측, 시나리오 string-number-defaults:
+// 001 → '1', 001.50 → '1.50', 1. → '1', -0 → '0', -0.0 → '0.0', -001 → '-1'). 정수부 앞 0 을 떼고, 소수부는 쓴 그대로 두며 (빈 소수부는 점까지 뗀다), 값이 0 이면
+// 부호를 뗀다. parseDefault 가 만드는 꼴([-]정수[.소수])이 아니면 undefined
+function numberText(value: string): string | undefined {
+  const m = /^(-?)(\d+)(?:\.(\d*))?$/.exec(value);
+  if (!m) return undefined;
+  const [, sign, whole, frac = ''] = m;
+  const text = `${whole.replace(/^0+(?=\d)/, '')}${frac ? `.${frac}` : ''}`;
+  return sign && /[1-9]/.test(whole + frac) ? `-${text}` : text;
 }
 
 // BIT 기본값: MySQL 은 앞쪽 0 을 떼고 찍는다 (8.0.46·8.4.11 실측: b'00000101' → b'101', b'00000000' → b'0')
