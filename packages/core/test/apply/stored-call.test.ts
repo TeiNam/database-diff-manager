@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { applyScript } from '../../src/apply';
 import { initialState } from '../../src/apply/state';
 import { storedFunctionCall } from '../../src/apply/stored-call';
-import { DEFAULT_SQL_MODE, MYSQL_DEFAULTS } from '../../src/apply/types';
+import { DEFAULT_SQL_MODE, MYSQL_DEFAULTS, RE_EXPORT } from '../../src/apply/types';
 import { tokenize } from '../../src/lexer';
 import type { Routine } from '../../src/model';
 
@@ -72,5 +73,21 @@ describe('storedFunctionCall — IGNORE_SPACE', () => {
   // 리뷰 11회차 R11-1: 짐작한 처음 값과 같아도 리터럴로 정한 SQL_MODE 는 믿는다 — 내장 함수 판정은 늘 지금 아는 모드를 따른다
   it('처음 세션 SQL_MODE 와 같은 값이어도 리터럴로 정했으면 공백 낀 꼴은 내장 함수다', () => {
     expect(callIn('SELECT NOW ()', { ...withMode('IGNORE_SPACE', 'IGNORE_SPACE'), sqlModeLiteral: true })).toBeUndefined();
+  });
+});
+
+// 리뷰 11회차 Claude F9 (변이 M12 — isBuiltinCall 의 name.start !== open - 1): 숫자로 시작하는 저장 함수 `1now` 의 호출 1now() 는 이름이 단어 now 로 끝나도 내장 NOW 가 아니다.
+// 렉서는 숫자 1 과 단어 now 로 나누므로 이름의 첫 토큰이 단어인지 보아야 한다 — 내장으로 보면 저장한 @m 을 잊지 않아 뒤 루틴이 틀린 SQL_MODE 를 기억한다
+describe('storedFunctionCall — 숫자로 시작하는 이름이 내장 함수 이름으로 끝날 때', () => {
+  it('1now() 는 저장 함수 1now 호출이다', () => {
+    const state = initialState({ ...model, routines: [...model.routines, routine('function', '1now')] }, 'shop', MYSQL_DEFAULTS, DEFAULT_SQL_MODE);
+    expect(callIn('SELECT 1now()', state)).toBe('1now');
+  });
+
+  it('호출 뒤 저장한 @m 으로 정한 SQL_MODE 의 루틴은 RE_EXPORT 로 거부한다 (리뷰 입력)', () => {
+    const r = applyScript({ name: 'shop', tables: [], views: [], routines: [] },
+      "CREATE TABLE t (id INT PRIMARY KEY);\nCREATE FUNCTION `1now`() RETURNS INT DETERMINISTIC NO SQL RETURN 1;\nSET @m = 'STRICT_TRANS_TABLES';\nSELECT 1now();\nSET sql_mode = @m;\nCREATE PROCEDURE p() SELECT 1;", { schemaName: 'shop' });
+    expect(r).toMatchObject({ ok: false, error: { index: 6, reason: expect.stringContaining('무시한 문장의 저장 함수 호출(`1now`)') } });
+    expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);
   });
 });

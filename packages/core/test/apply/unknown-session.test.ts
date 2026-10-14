@@ -255,3 +255,13 @@ describe('모르는 값의 까닭 글 길이', () => {
     expect(!tz.ok && tz.error.reason.length).toBeLessThan(700);
   });
 });
+
+// 리뷰 11회차 Claude F9 (변이 M7 — setUnknown 의 st.timeZoneUtc = false): UTC 리터럴로 정한 뒤 모르는 값(@@global.time_zone)으로 다시 정한 time_zone 은 UTC 가 아니다.
+// 저장 함수 호출이 끼지 않아도 TIMESTAMP 리터럴 기본값을 거부해야 한다 (호출이 끼면 그 호출이 먼저 UTC 를 지워 이 줄을 시험하지 않는다)
+describe('UTC 로 정한 뒤 모르는 값으로 다시 정한 time_zone', () => {
+  it('뒤의 TIMESTAMP 리터럴 기본값을 그 SET 을 밝혀 RE_EXPORT 로 거부한다', () => {
+    const r = applyScript({ name: 'shop', tables: [], views: [], routines: [] },
+      "CREATE TABLE t (id INT PRIMARY KEY);\nSET time_zone = '+00:00';\nSET time_zone = @@global.time_zone;\nALTER TABLE t ADD ts TIMESTAMP NULL DEFAULT '2020-01-01 00:00:00';", { schemaName: 'shop' });
+    expectRejected(r, 4, '앞의 `SET time_zone = @@global.time_zone` 문장이 세션 시간대를 알 수 없는 값으로 정해', '서버 변수 값(@@global·@@persist 의 time_zone)은 알 수 없습니다');
+  });
+});
