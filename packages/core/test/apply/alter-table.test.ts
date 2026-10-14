@@ -113,6 +113,14 @@ describe('ALTER TABLE — 키·옵션·이름', () => {
     expect(tbl(r, 'member').indexes.map((i) => i.name)).toEqual(['PRIMARY', 'email', 'uq_name']);
   });
 
+  // SHOW CREATE 는 빈 인덱스 COMMENT 를 찍지 않는다 (8.0.46·8.4.11 실측, 시나리오 index-empty-comment). 남기면 다시 뽑은 덤프와 비교할 때 인덱스를 다시 만든다 (리뷰 2회차 M-1)
+  it("인덱스의 COMMENT '' 는 속성을 남기지 않는다 (ADD INDEX·CREATE INDEX·CREATE TABLE)", () => {
+    const r = ok("ALTER TABLE member ADD INDEX ix_age (age) COMMENT '', ADD UNIQUE KEY uq_name (name) COMMENT 'x';\nCREATE INDEX ix_email ON member (email) COMMENT '';\nCREATE TABLE t (a INT, KEY ka (a) COMMENT '');");
+    const comments = (table: string) => Object.fromEntries(tbl(r, table).indexes.map((i) => [i.name, 'comment' in i ? i.comment : '(없음)']));
+    expect(comments('member')).toEqual({ PRIMARY: '(없음)', email: '(없음)', uq_name: 'x', name_age: '(없음)', ix_age: '(없음)', ix_email: '(없음)' });
+    expect(comments('t')).toEqual({ ka: '(없음)' });
+  });
+
   it('ALTER TABLE … RENAME TO 는 자식 FK 참조·자동 FK 이름을 바꾼다', () => {
     const r = ok('ALTER TABLE orders RENAME TO purchase; ALTER TABLE member RENAME TO person;');
     expect(tbl(r, 'purchase').foreignKeys[0]).toMatchObject({ name: 'purchase_ibfk_1', refTable: 'person' });

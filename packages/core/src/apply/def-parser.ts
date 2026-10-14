@@ -182,13 +182,15 @@ function withoutNoAction(fk: ForeignKey): ForeignKey {
 }
 
 // [USING x] (키 파트) [옵션…]. PRIMARY KEY 뒤의 이름은 MySQL 이 무시한다. 함수 인덱스는 1차 범위 밖.
-// 그대로 찍는 값(USING 의 인덱스 타입)은 화이트리스트로, 빈 목록·끝 쉼표·정수가 아닌 KEY_BLOCK_SIZE 는 MySQL 처럼 1064 로 거부한다
+// 그대로 찍는 값(USING 의 인덱스 타입)은 화이트리스트로, 빈 목록·끝 쉼표·정수가 아닌 KEY_BLOCK_SIZE 는 MySQL 처럼 1064 로 거부한다.
+// 빈 COMMENT('')는 SHOW CREATE 가 찍지 않으므로 남기지 않는다 (8.0.46·8.4.11 실측 — 남기면 다시 뽑은 덤프와 비교할 때 인덱스를 다시 만든다, 리뷰 2회차 M-1)
 export function parseIndexBody(c: Cursor, kind: IndexKind, name = ''): Index {
   if (kind === 'PRIMARY' && !c.isOp('(') && !c.isWord('USING')) c.ident();
   const using = parseUsing(c);
   const keyParts = c.isOp('(') ? topLevelLists(c)[0] : undefined; // 닫히지 않았으면 undefined — parseIndex 가 ParseError 를 낸다
   if (keyParts) checkList(keyParts, '키 파트');
-  const index = parseIndex(c, kind, name);
+  const { comment, ...parsed } = parseIndex(c, kind, name);
+  const index: Index = comment ? { ...parsed, comment } : parsed;
   if (index.using !== undefined && !INDEX_TYPES.has(index.using)) badIndexType(index.using); // 키 파트 뒤에 쓴 USING (parse-table 은 \w+ 만 본다)
   if (index.keyBlockSize !== undefined && !Number.isSafeInteger(index.keyBlockSize)) fail('KEY_BLOCK_SIZE 는 정수여야 합니다 (MySQL 1064)');
   // MySQL 은 인덱스의 KEY_BLOCK_SIZE 를 테이블에 KEY_BLOCK_SIZE 가 있을 때만 저장하고 (그때도 테이블 값과 다를 때만 SHOW CREATE 에 찍는다 — 8.0.46·8.4.11 실측), 문장 순서에 따라 달라진다

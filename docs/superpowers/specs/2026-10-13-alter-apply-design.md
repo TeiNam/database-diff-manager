@@ -153,7 +153,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - 함수의 `RETURNS` 타입은 타입 규칙으로 정규화한다. 문자열 타입이면 MySQL처럼 ` CHARSET <스키마 기본 문자셋>`을 붙이고, 스키마 기본 콜레이션이 그 문자셋의 기본(`utf8mb4_0900_ai_ci`·`latin1_swedish_ci`·`utf8mb3_general_ci` …)이 아니면 ` COLLATE <콜레이션>`도 붙인다(8.0/8.4 실측, 시나리오 `schema-defaults-unicode`). `RETURNS` 안에 `CHARSET`·`COLLATE`를 직접 쓴 경우는 1차에서 거부한다.
 - **테이블 옵션:**
   - `ENGINE` 값은 MySQL 표기로 맞춘다(`innodb`→`InnoDB`). `ROW_FORMAT`은 대문자로 쓴다. `ROW_FORMAT=DEFAULT`·`KEY_BLOCK_SIZE=0`은 옵션을 지운다(8.0/8.4 실측, 시나리오 `table-options`).
-  - `COMMENT=''`이면 옵션을 지운다.
+  - `COMMENT=''`이면 옵션을 지운다. 인덱스 정의(`ADD INDEX`·`CREATE INDEX`·`CREATE TABLE`의 키)의 `COMMENT ''`도 남기지 않는다. SHOW CREATE가 빈 인덱스 COMMENT를 찍지 않는다(8.0/8.4 실측, 시나리오 `index-empty-comment`).
   - `AUTO_INCREMENT=n`은 비교에서 무시되므로 기준 값을 그대로 둔다.
   - InnoDB 테이블만 지원한다(사용자 결정). `ENGINE`을 InnoDB가 아닌 것으로 만들거나 바꾸는 문장, 그리고 InnoDB가 아닌 기준 테이블을 바꾸는 `ALTER TABLE`·`CREATE INDEX`·`DROP INDEX`는 거부하고 다시 추출하도록 안내한다. `DROP TABLE`·`RENAME TABLE`은 받는다. `ENGINE` 옵션이 없는 테이블은 InnoDB로 본다.
 
