@@ -121,7 +121,7 @@ export function renameRefColumns(st: State, parent: string, renamed: ReadonlyMap
   const rename = (n: string) => renamed.get(n.toLowerCase()) ?? n;
   const changes = (f: ForeignKey) => f.refTable === parent && f.refSchema === undefined && f.refColumns.some((c) => renamed.has(c.toLowerCase()));
   const tables = st.model.tables.slice();
-  // 자식 이름: 목록 하나면 그 목록의 자식 그대로 (Set 을 만들지 않는다), 여럿이면 두 목록에 든 자식을 한 번만 고친다
+  // 자식 이름: 목록 하나면 그 목록의 자식 그대로 (Set 을 만들지 않는다), 여럿이면 여러 목록에 든 자식도 한 번만 고친다
   for (const name of moved.length === 1 ? moved[0].children.keys() : new Set(moved.flatMap((l) => [...l.children.keys()]))) {
     const at = tableIndex(st, name);
     if (at < 0) continue;
