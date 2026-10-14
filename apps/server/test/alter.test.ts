@@ -650,6 +650,14 @@ describe('POST /versions/:id/alter — SET SQL_MODE 없이 만든 루틴의 SQL_
     expect(await modeOf(ctx, id, 'sp_new')).toBe('NO_ENGINE_SUBSTITUTION');
   });
 
+  // 리뷰 6회차 M-2: MySQL 은 세션 sql_mode 의 DEFAULT 를 전역 값(서버 sql_mode)으로 푼다 — 짐작한 서버 sql_mode 다
+  it('SET [SESSION] sql_mode = DEFAULT 뒤에 만든 루틴도 짐작한 서버 sql_mode 를 쓴다 — MySQL 기본 모드가 아니다', async () => {
+    const ctx = await setup();
+    const baseId = baseWith(ctx, [routine('sp_a', RELAXED), routine('sp_b', RELAXED)]);
+    const id = await saveNew(ctx, baseId, `SET sql_mode = 'NO_ENGINE_SUBSTITUTION';\nSET SESSION sql_mode = DEFAULT;\n${NEW_PROC}`);
+    expect(await modeOf(ctx, id, 'sp_new')).toBe(RELAXED);
+  });
+
   it('루틴이 없거나 루틴에 SQL_MODE 기록이 없으면(td-export 0.1.52 전) 지금처럼 MySQL 기본 모드다', async () => {
     const ctx = await setup();
     expect(await modeOf(ctx, await saveNew(ctx, ctx.baseId), 'sp_new')).toBe(DEFAULT_MODE);

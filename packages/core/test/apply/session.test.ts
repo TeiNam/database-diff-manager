@@ -37,6 +37,39 @@ describe('SET 문', () => {
 
 const freshState = () => initialState(empty, 'shop', MYSQL_DEFAULTS, DEFAULT_SQL_MODE);
 const setIn = (st: State, sql: string) => applySet(st, new Cursor(tokenize(sql), sql));
+
+// 리뷰 6회차 M-2: 세션 sql_mode 에 DEFAULT 를 주면 MySQL 은 전역 값, 곧 서버 sql_mode 로 되돌린다. 이 도구에서는 처음 세션 SQL_MODE(ApplyOptions.sqlMode —
+// 서버가 기준 버전 루틴에서 짐작한 서버 sql_mode)가 그 값이다. 컴파일 기본값(DEFAULT_SQL_MODE)은 처음 값을 주지 않았을 때만이다
+describe('SET sql_mode = DEFAULT', () => {
+  const RELAXED = 'STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+  const changed = () => {
+    const st = initialState(empty, 'shop', MYSQL_DEFAULTS, RELAXED);
+    setIn(st, "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'");
+    return st;
+  };
+
+  it.each([
+    ['SET sql_mode = DEFAULT'], ['SET SESSION sql_mode = DEFAULT'], ['SET LOCAL sql_mode = default'], ['SET @@sql_mode = DEFAULT'],
+    ['SET @@SESSION.sql_mode = DEFAULT'], ['SET @@local.SQL_MODE = DEFAULT'], ['SET NAMES utf8mb4, sql_mode = DEFAULT'],
+  ])('%s 는 MySQL 기본 모드가 아니라 처음 세션 SQL_MODE 로 되돌린다', (sql) => {
+    const st = changed();
+    setIn(st, sql);
+    expect(st.sqlMode).toBe(RELAXED);
+  });
+
+  it('SET GLOBAL sql_mode = DEFAULT 는 서버 값만 바꿔 세션 값은 그대로다', () => {
+    const st = changed();
+    setIn(st, 'SET GLOBAL sql_mode = DEFAULT');
+    expect(st.sqlMode).toBe('NO_ENGINE_SUBSTITUTION');
+  });
+
+  it('처음 세션 SQL_MODE 가 MySQL 기본 모드면(ApplyOptions.sqlMode 를 주지 않음) 지금처럼 MySQL 기본 모드다', () => {
+    const st = freshState();
+    setIn(st, "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'");
+    setIn(st, 'SET SESSION sql_mode = DEFAULT');
+    expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
+  });
+});
 const messageOf = (fn: () => unknown): string => {
   try {
     fn();

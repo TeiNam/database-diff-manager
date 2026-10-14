@@ -160,6 +160,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - `sqlMode`는 스크립트에서 그 문장 앞의 마지막 `SET [SESSION] SQL_MODE` 값을 쓴다. 없으면 스크립트를 실행한 서버의 sql_mode다(MySQL은 루틴을 만든 세션의 값을 저장하고, 클라이언트가 바꾸지 않은 세션 값은 서버 값이다).
     - 스크립트만으로는 서버 값을 알 수 없어, 서버가 기준 버전 루틴의 `sqlMode` 최빈값으로 짐작해 `applyScript`의 처음 세션 SQL_MODE(`ApplyOptions.sqlMode`)로 준다. td-export 0.1.52+는 루틴마다 SQL_MODE를 남기고, 기준 버전의 루틴은 대개 같은 서버에서 만들었다. 개수가 같으면 종류·이름순으로 먼저 나온 루틴의 값이다. 모드 이름을 아래 규칙으로 맞춰 센다.
     - SQL_MODE 기록이 없는 루틴(td-export 0.1.52 전)과 아래에서 거부하는 값의 루틴은 세지 않는다. 셀 루틴이 없으면 MySQL 8.0/8.4 기본 모드(`ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`)를 쓴다(리뷰 5회차 M-1).
+    - `SET [SESSION] SQL_MODE = DEFAULT`(`@@SESSION.`·`@@`·`LOCAL` 꼴 포함)는 MySQL처럼 세션 값을 전역 값, 곧 서버 sql_mode로 되돌린다. 이 도구에서는 처음 세션 SQL_MODE(짐작한 서버 값, 짐작할 루틴이 없으면 MySQL 기본 모드)다. `SET` 없이 만든 루틴과 같은 값이 된다(리뷰 6회차 M-2). `SET GLOBAL SQL_MODE = DEFAULT`는 세션을 바꾸지 않아 무시한다.
     - 한계: 기준 버전의 루틴을 서버 값과 다른 SQL_MODE로 만들었으면(`SET sql_mode` 뒤에 만든 루틴이 많으면) 그 값을 서버 값으로 잘못 짐작한다. 짐작한 값에 `NO_BACKSLASH_ESCAPES`가 있으면 백슬래시가 든 문장은 거부한다(3.2). 대화상자에 서버 SQL_MODE 칸은 두지 않는다.
     - 모드 이름은 MySQL 순서로 정렬하고 중복을 지운다(SHOW CREATE 의 `sql_mode` 표기). 묶음 모드(`ANSI`·`TRADITIONAL`)와 테이블 문장을 다르게 읽게 하는 `REAL_AS_FLOAT`·`ANSI_QUOTES`는 거부하고 다시 추출하도록 안내한다(3.2).
   - DEFINER는 저장하지 않는다. 비교 대상이 아니다.
