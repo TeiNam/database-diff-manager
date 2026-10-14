@@ -5,6 +5,7 @@ import { Cursor } from '../cursor';
 import { quoteString, tokenize, type Token } from '../lexer';
 import type { Column, TableOption } from '../model';
 import { normalizeType } from '../normalize';
+import { memberFinder } from './enum-member';
 import { assertFloatSize, floatDefault } from './float-default';
 import { MAX_VARCHAR_BYTES } from './limits';
 import { splitList } from './lists';
@@ -199,9 +200,9 @@ export function nowText(type: string, now: NowSpec, what: string, errno = ER_INV
   return now.fsp ? `CURRENT_TIMESTAMP(${now.fsp})` : 'CURRENT_TIMESTAMP';
 }
 
-// 기본값 원문 (SHOW CREATE 표기): 숫자도 따옴표로 감싸고 타입 자릿수에 맞춘다. ENUM·SET 멤버는 컬럼 콜레이션으로 찾는다 (memberKey).
-// undefined: 저장되는 기본값이 없다 — TEXT·BLOB 계열에 명시한 DEFAULT NULL 은 SHOW CREATE 에 보이지 않는다 (JSON·GEOMETRY 는 'NULL')
-export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | 'type' | 'nullable' | 'collation'>): string | undefined {
+// 기본값 원문 (SHOW CREATE 표기): 숫자도 따옴표로 감싸고 타입 자릿수에 맞춘다. ENUM·SET 멤버는 컬럼의 실제 콜레이션으로 찾는다 (memberFinder — table: 컬럼이 든 테이블의
+// 기본 문자셋, 콜레이션을 적지 않은 컬럼이 물려받는다). undefined: 저장되는 기본값이 없다 — TEXT·BLOB 계열에 명시한 DEFAULT NULL 은 SHOW CREATE 에 보이지 않는다 (JSON·GEOMETRY 는 'NULL')
+export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | 'type' | 'nullable' | 'charset' | 'collation'>, table: TableCharset): string | undefined {
   const base = baseType(col.type);
   const bad = (why: string): never => fail(`컬럼 \`${col.name}\` 의 기본값이 올바르지 않습니다: ${why} (MySQL 1067)`);
   const reExport = (why: string): never => fail(`컬럼 \`${col.name}\` 의 기본값 ${why} — ${RE_EXPORT}`);
@@ -219,11 +220,10 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   // ENUM·SET 에 쓴 숫자는 값이 아니라 순번·비트다 (8.0.46·8.4.11 실측: ENUM('2','1') DEFAULT 1 → '2', SET('2','a') DEFAULT 2 → 'a')
   if ((base === 'enum' || base === 'set') && spec.kind === 'number') return reExport(`${spec.value} 은(는) 숫자라 MySQL 이 값이 아니라 순번·비트로 읽습니다 (값을 따옴표로 감싸 쓰세요)`);
   if (base === 'enum') {
-    const key = memberKey(col);
-    const wanted = key(trimTrailingSpaces(spec.value));
-    return quoteString(enumMembers(col.type).find((m) => key(m) === wanted) ?? bad(`'${spec.value}' 은 ENUM 값이 아닙니다`));
+    const find = memberFinder(enumMembers(col.type), effectiveCollation(col, table), reExport);
+    return quoteString(find(trimTrailingSpaces(spec.value)) ?? bad(`'${spec.value}' 은 ENUM 값이 아닙니다`));
   }
-  if (base === 'set') return quoteString(setDefault(spec.value, col, bad));
+  if (base === 'set') return quoteString(setDefault(spec.value, col, table, bad, reExport));
   const text = spec.kind === 'number' ? numberText(spec.value) ?? reExport(`${spec.value} 은(는) 문자열 컬럼에 쓸 수 있는 숫자 꼴이 아닙니다`) : spec.value;
   if (base === 'char') return quoteString(trimTrailingSpaces(text)); // CHAR 는 끝 공백을 떼고 찍는다 (8.0.46·8.4.11 실측: 'ab  ' → 'ab', ' ' → '')
   return quoteString(text);
@@ -335,24 +335,12 @@ export function assertBmpText(text: string, where: string): void {
   if (NON_BMP.test(text)) fail(`${where}에 4바이트 문자(이모지 등)가 있습니다 — MySQL 이 SHOW CREATE 에서 '?' 나 16진수로 바꿔 찍어 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
 }
 
-// SET 기본값: 값마다 멤버여야 하고, 정의 순서로 다시 쓴다
-function setDefault(text: string, col: Pick<Column, 'type' | 'collation'>, bad: (why: string) => never): string {
+// SET 기본값: 값마다 멤버여야 하고 (memberFinder), 정의 순서로 다시 쓴다
+function setDefault(text: string, col: Pick<Column, 'type' | 'charset' | 'collation'>, table: TableCharset, bad: (why: string) => never, reExport: (why: string) => never): string {
   const members = enumMembers(col.type);
-  const key = memberKey(col);
-  const picked = text === '' ? [] : text.split(',').map((v) => {
-    const wanted = key(v);
-    return members.find((m) => key(m) === wanted) ?? bad(`'${v}' 은 SET 값이 아닙니다`);
-  });
+  const find = memberFinder(members, effectiveCollation(col, table), reExport);
+  const picked = text === '' ? [] : text.split(',').map((v) => find(v) ?? bad(`'${v}' 은 SET 값이 아닙니다`));
   return members.filter((m) => picked.includes(m)).join(',');
-}
-
-// ENUM·SET 기본값을 멤버와 견줄 글자 (리뷰 2회차 R2-02): MySQL 은 컬럼 콜레이션으로 멤버를 찾는다 (8.0.46·8.4.11 실측). 대소문자를 가리는 콜레이션(_bin·_cs 등
-// _ci 가 아닌 것)은 같은 글자만 맞아 ENUM('a','A') COLLATE utf8mb4_bin DEFAULT 'A' 는 'A', ENUM('a','b') COLLATE utf8mb4_bin DEFAULT 'A' 는 1067 이다. _ci 는 대소문자를
-// 무시한다 (대소문자만 다른 멤버는 MySQL 이 1291 로 거부해 생기지 않는다). 콜레이션을 적지 않은 컬럼은 문자셋의 기본(늘 _ci) 콜레이션이다 — SHOW CREATE 와 columnCharset 은
-// 기본이 아닌 콜레이션을 (테이블에서 물려받았어도) 컬럼에 적는다
-function memberKey(col: Pick<Column, 'collation'>): (text: string) => string {
-  const caseSensitive = col.collation !== undefined && !col.collation.endsWith('_ci');
-  return caseSensitive ? (text) => text : (text) => text.toLowerCase();
 }
 
 // 사람이 쓴 컬럼 정의 → SHOW CREATE 모양 Column (table: 이 컬럼이 들어갈 테이블의 기본 문자셋)
@@ -371,7 +359,7 @@ export function finalizeColumn(spec: ColumnSpec, table: TableCharset): Column {
   if (spec.storage) col.storage = spec.storage;
   if (spec.columnFormat) col.columnFormat = spec.columnFormat;
   if (spec.default && !spec.autoIncrement) {
-    const value = normalizeDefault(spec.default, col);
+    const value = normalizeDefault(spec.default, col, table);
     if (value !== undefined) col.default = value;
   } else if (nullable && !BLOB_TYPES.has(base)) col.default = 'NULL';
   if (spec.onUpdate) col.onUpdate = nowText(spec.type, spec.onUpdate, `컬럼 \`${spec.name}\` 의 ON UPDATE`, ER_INVALID_ON_UPDATE);

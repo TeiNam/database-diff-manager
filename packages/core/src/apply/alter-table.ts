@@ -27,7 +27,7 @@ type Clause =
   | { k: 'add'; spec: ColumnSpec; pos: Position }
   | { k: 'modify'; old: string; spec: ColumnSpec; pos: Position; rename: boolean } // MODIFY(rename=false)·CHANGE(true)
   | { k: 'renameColumn'; old: string; to: string }
-  | { k: 'alterColumn'; old: string; set: (col: Column) => Column }
+  | { k: 'alterColumn'; old: string; set: (col: Column, table: TableCharset) => Column } // table: 테이블 기본 문자셋 (ENUM·SET 기본값의 멤버 찾기)
   | { k: 'dropColumn'; name: string }
   | { k: 'key'; item: ConstraintItem }
   | ({ k: 'dropKey' } & KeyDrop)
@@ -165,7 +165,7 @@ function parseAlter(c: Cursor): Clause {
   if (c.acceptWord('SET', 'DEFAULT')) {
     if (c.isOp('(')) return fail(`식 기본값 SET DEFAULT (…) 은 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
     const value = parseDefault(c);
-    return { k: 'alterColumn', old, set: (col) => setDefault(col, value) };
+    return { k: 'alterColumn', old, set: (col, table) => setDefault(col, value, table) };
   }
   if (c.acceptWord('DROP', 'DEFAULT')) return { k: 'alterColumn', old, set: dropDefault };
   if (c.acceptWord('SET', 'VISIBLE')) return { k: 'alterColumn', old, set: (col) => ({ ...col, invisible: false }) };
@@ -182,11 +182,11 @@ function withDefault(col: Column, value: string | undefined): Column {
 
 // ALTER COLUMN … SET DEFAULT 값 (MySQL 8.0.46·8.4.11 실측). TEXT·BLOB·JSON·GEOMETRY 는 NULL 이든 리터럴이든 1101 이다 (NOT NULL 이어도, 생성 컬럼이어도 다른 오류보다 먼저 — 컬럼 정의의
 // `DEFAULT NULL` 은 받지만 SET DEFAULT 는 아니다). 생성 컬럼(VIRTUAL·STORED)은 1221. AUTO_INCREMENT 컬럼은 값을 검증한 뒤 받지만 SHOW CREATE 에 기본값이 찍히지 않아 저장하지 않는다
-function setDefault(col: Column, value: DefaultSpec): Column {
+function setDefault(col: Column, value: DefaultSpec, table: TableCharset): Column {
   const base = baseType(col.type);
   if (NO_LITERAL_DEFAULT.has(base)) fail(`${base.toUpperCase()} 컬럼 \`${col.name}\` 에는 기본값을 쓸 수 없습니다 (MySQL 1101)`);
   if (col.generated) fail(`생성 컬럼 \`${col.name}\` 에는 DEFAULT 를 쓸 수 없습니다 (MySQL 1221)`);
-  const normalized = normalizeDefault(value, col);
+  const normalized = normalizeDefault(value, col, table);
   return withDefault(col, col.autoIncrement ? undefined : normalized);
 }
 
@@ -311,7 +311,7 @@ function changeColumns(st: State, before: Table, entries: Entry[], clauses: read
     if (touched.has(e.from!)) fail(`한 문장에서 컬럼 \`${ch.old}\` 을 두 번 바꿀 수 없습니다 (MySQL 1054)`);
     touched.add(e.from!);
     if (ch.k === 'renameColumn') e.col = { ...e.col, name: ch.to };
-    else if (ch.k === 'alterColumn') e.col = ch.set(e.col);
+    else if (ch.k === 'alterColumn') e.col = ch.set(e.col, charset);
     else {
       // MODIFY·CHANGE 정의에는 AS 를 쓸 수 없으므로(파서가 거부한다) 생성 컬럼이면 일반 컬럼으로 바꾸는 절이다. STORED 는 바뀌지만 VIRTUAL 은 MySQL 이 거부한다 (실측 3106)
       if (e.col.generated && !e.col.generated.stored) fail(`VIRTUAL 생성 컬럼 \`${e.col.name}\` 은 일반 컬럼으로 바꿀 수 없습니다 — 생성 컬럼의 STORED 여부는 바꿀 수 없습니다 (MySQL 3106)`);

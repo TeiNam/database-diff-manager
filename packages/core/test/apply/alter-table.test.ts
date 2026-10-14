@@ -480,6 +480,42 @@ describe('ALTER TABLE — ENUM·SET 기본값과 대소문자를 가리는 콜�
   });
 });
 
+// 멤버 비교를 재현할 수 없는 콜레이션 (리뷰 3회차 R3-02·M-3, 8.0.46·8.4.11 실측): utf8mb4_turkish_ci 에서 'I' 는 'i' 가 아니라 'ı' 와 같아 MySQL 은 ENUM('i','ı') DEFAULT 'I' 를
+// 'ı' 로 저장한다. 언어별 규칙은 재현하지 않으므로 글자까지 같은 멤버만 받는다. 기본 문자셋이 binary 인 테이블의 ENUM 은 SHOW CREATE 에 콜레이션이 없지만 binary 로 견준다
+describe('ALTER TABLE — ENUM·SET 기본값과 재현하지 않는 콜레이션', () => {
+  const base = parseSqlDump(tdExport([
+    "CREATE TABLE `b` (\n  `id` int NOT NULL,\n  `e` enum('a','A') DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=binary;",
+    "CREATE TABLE `tr` (\n  `id` int NOT NULL,\n  `e` enum('i','ı') CHARACTER SET utf8mb4 COLLATE utf8mb4_turkish_ci DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",
+  ].join('\n\n'))).model;
+  const run = (script: string) => applyScript(base, script, { schemaName: 'shop' });
+  const defaultOf = (script: string, table: string, column: string) => {
+    const r = run(script);
+    if (!r.ok) throw new Error(r.error.reason);
+    return r.model.tables.find((t) => t.name === table)!.columns.find((c) => c.name === column)!.default;
+  };
+
+  it('binary 문자셋 테이블의 SET DEFAULT 는 글자가 같은 멤버를 고른다', () => {
+    expect(defaultOf("ALTER TABLE b ALTER COLUMN e SET DEFAULT 'A';", 'b', 'e')).toBe("'A'");
+    expect(defaultOf("ALTER TABLE b ADD f ENUM('x','y') DEFAULT 'y';", 'b', 'f')).toBe("'y'");
+    expect(run("ALTER TABLE b ADD f ENUM('x','y') DEFAULT 'Y';")).toMatchObject({ ok: false, error: { reason: expect.stringContaining('(MySQL 1067)') } });
+  });
+
+  it('언어별 콜레이션도 글자까지 같은 멤버는 받는다', () => {
+    expect(defaultOf("ALTER TABLE tr ALTER COLUMN e SET DEFAULT 'ı';", 'tr', 'e')).toBe("'ı'");
+    expect(defaultOf("ALTER TABLE tr ADD t ENUM('i','ı') COLLATE utf8mb4_turkish_ci DEFAULT 'i';", 'tr', 't')).toBe("'i'");
+  });
+
+  it.each([
+    ["ALTER TABLE tr ADD t ENUM('i','ı') COLLATE utf8mb4_turkish_ci DEFAULT 'I';"], ["ALTER TABLE tr ADD s SET('i','ı') COLLATE utf8mb4_turkish_ci DEFAULT 'I';"],
+    ["ALTER TABLE tr ALTER COLUMN e SET DEFAULT 'I';"], ["ALTER TABLE tr MODIFY e ENUM('i','ı') COLLATE utf8mb4_turkish_ci DEFAULT 'I';"],
+    ["CREATE TABLE u (id INT, e ENUM('i','ı') DEFAULT 'I') COLLATE=utf8mb4_turkish_ci;"],
+  ])('터키어 콜레이션의 글자가 다른 기본값은 RE_EXPORT 로 거부한다: %s', (script) => {
+    const r = run(script);
+    expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('utf8mb4_turkish_ci') } });
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
+  });
+});
+
 // 56자 스크립트가 1,000만 자 기본값을 만들어 서버 힙을 다 쓰던 문제 (리뷰 1회차 F4): 타입의 (M,D) 를 기본값을 찍기 전에 MySQL 한도로 본다
 describe('ALTER TABLE — FLOAT·DOUBLE(M,D) 크기 한도', () => {
   it('아주 큰 D 는 기본값을 찍기 전에 1425 로 거부한다 (기준 덤프의 컬럼에 SET DEFAULT 해도)', () => {
