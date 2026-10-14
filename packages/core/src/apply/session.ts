@@ -1,12 +1,14 @@
 // SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
 // (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, unique_checks 등)는 스키마에 영향이 없어 무시한다.
-// 서버 변수(SET GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)는 이 스크립트의 세션을 바꾸지 않아 무시한다 (서버 sql_mode 를 바꾼 사실만 기억해 뒤의 SET sql_mode = DEFAULT 를 거부하고, 값 안의 저장 함수 호출도 거부한다).
+// 서버 변수(SET GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)는 이 스크립트의 세션을 바꾸지 않아 무시한다 (서버 sql_mode 를 바꾼 사실만 기억해 뒤의 SET sql_mode = DEFAULT 를 거부하고,
+// 값 안의 저장 함수 호출은 함수가 바꿨을 수 있는 사용자 변수 등을 모르는 값으로 둔다 — stored-call.ts).
 // td-export·마이그레이션 스크립트의 'SET @OLD_X = @@X, X = 0' 저장과 'SET X = @OLD_X' 복원을 따른다
 import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import { splitList } from './lists';
 import { baseType } from './normalize-mysql';
-import { assertNoStoredFunctionCall, type State } from './state';
+import type { State } from './state';
+import { forgetStateChangedByCall, storedFunctionCall } from './stored-call';
 import { DEFAULT_SQL_MODE, fail, RE_EXPORT, type DefaultSpec } from './types';
 
 // 값에 따라 이후 CREATE TABLE 의 결과나 허용 여부가 달라지는 세션 변수 (소문자). 8.0 에 없는 이름(storage_engine, restrict_fk_on_non_standard_key)도 막는다
@@ -38,8 +40,11 @@ const FK_CHECKS_ON: ReadonlySet<string> = new Set(['1', 'ON', 'TRUE']);
 // 대입의 범위. server: GLOBAL·PERSIST·PERSIST_ONLY — 서버 값을 바꾸고 이 스크립트의 세션 값은 그대로라 무시한다
 type Scope = 'session' | 'server';
 
+// MySQL 은 대입의 값을 모두 먼저 계산하고(이때 저장 함수가 돈다) 차례로 대입한다. DEFAULT 는 대입할 때 전역 값을 읽으므로, 뒤 대입이 부르는 저장 함수가 바꾼 전역 sql_mode 를
+// 읽는다 (8.0.46·8.4.11 실측) — 그래서 문장 안의 저장 함수 호출을 대입보다 먼저 기억한다. 사용자 변수는 값을 계산할 때 읽으므로 대입마다 차례로 본다
 export function applySet(st: State, c: Cursor): void {
   c.expectWord('SET');
+  st.storedCall = storedFunctionCall(st, c.toks) ?? st.storedCall;
   let scope: Scope = 'session';
   for (const toks of splitList(c.toks.slice(c.i), 'SET')) scope = assign(st, new Cursor(toks, c.src), scope);
 }
@@ -53,9 +58,9 @@ function assign(st: State, a: Cursor, inherited: Scope): Scope {
   if (!variable.name.startsWith('@') && (variable.scope ?? scope) === 'server') {
     // 서버 변수: 값이 식이어도, 스키마에 영향을 주는 변수여도 이 세션과 상관없다. 다만 서버 sql_mode 를 바꾼 사실은 기억한다 (sessionSqlMode).
     // PERSIST_ONLY 는 실행 중인 값을 바꾸지 않지만 범위를 가르지 않고 함께 본다 (드물어 보수적으로 거부).
-    // 값을 읽지 않고 버려도 그 안의 저장 함수 호출은 실행되어 사용자 변수를 바꿀 수 있으므로 다른 무시하는 문장과 같이 거부한다 (리뷰 7회차 R7-2)
+    // 값을 읽지 않고 버려도 그 안의 저장 함수 호출은 실행되어 사용자 변수 등을 바꿀 수 있으므로 다른 무시하는 문장과 같이 그 값을 모르는 값으로 둔다 (리뷰 8회차)
     if (variable.name === 'sql_mode') st.serverSqlModeChanged = true;
-    assertNoStoredFunctionCall(st, a.toks);
+    forgetStateChangedByCall(st, a.toks);
     return scope;
   }
   assignSession(st, a, variable.name);
@@ -79,7 +84,10 @@ function assignSession(st: State, a: Cursor, target: string): void {
   if (target.startsWith('@')) st.saved.set(target, value);
   else if (target === 'foreign_key_checks') st.fkChecks = foreignKeyChecksOf(value);
   else if (target === 'sql_mode') st.sqlMode = sessionSqlMode(st, value);
-  else if (target === 'time_zone') st.timeZoneUtc = isUtcZone(written);
+  else if (target === 'time_zone') {
+    st.timeZoneUtc = isUtcZone(written);
+    st.timeZoneChangedBy = undefined;
+  }
 }
 
 // UTC 를 쓴 리터럴인가. 변수에서 되돌리는 대입(SET time_zone = @OLD_TIME_ZONE)·@@time_zone·DEFAULT 는 서버 시간대일 수 있어 UTC 로 보지 않는다
@@ -91,9 +99,11 @@ const isUtcZone = (t: Token | undefined): boolean =>
 // SHOW CREATE 를 읽으므로 기준 버전의 값은 UTC 글자다. 스크립트가 앞에서 세션 time_zone 을 UTC 로 정했으면 (mysqldump·phpMyAdmin 머리의 SET TIME_ZONE='+00:00') 쓴 글자가
 // 곧 UTC 라 그대로 받는다. 그 밖에는 서버 시간대(KST 서버의 SYSTEM 등)나 다른 시간대에서 바뀌어 저장된 값을 알 수 없으므로 받지 않는다. 스크립트는 이미 그 시간대로
 // 실행됐으므로 스크립트를 고치라고 안내하지 않는다. CURRENT_TIMESTAMP·NULL 과 DATETIME 은 시간대를 타지 않는다
-export function assertUtcTimestampDefault(st: Pick<State, 'timeZoneUtc'>, column: string, type: string, value: DefaultSpec | undefined): void {
+// UTC 로 정한 뒤 무시한 문장이 저장 함수를 불렀으면 함수가 세션 time_zone 을 바꿨을 수 있다 (MySQL 은 함수 안의 SET time_zone 을 되돌리지 않는다, 8.0.46·8.4.11 실측 — 리뷰 8회차)
+export function assertUtcTimestampDefault(st: Pick<State, 'timeZoneUtc' | 'timeZoneChangedBy'>, column: string, type: string, value: DefaultSpec | undefined): void {
   if (st.timeZoneUtc || value === undefined || value.kind === 'null' || value.kind === 'now' || baseType(type) !== 'timestamp') return;
-  fail(`TIMESTAMP 컬럼 \`${column}\` 의 리터럴 기본값은 MySQL 이 세션 시간대에서 UTC 로 바꿔 저장하는데, 스크립트를 실행한 서버의 시간대를 알 수 없어 저장된 값을 정할 수 없습니다 — ${RE_EXPORT}`);
+  const unknown = st.timeZoneChangedBy === undefined ? '스크립트를 실행한 서버의 시간대를 알 수 없어' : `무시한 문장의 저장 함수 호출(\`${st.timeZoneChangedBy}\`)이 세션 시간대를 바꿨을 수 있어`;
+  fail(`TIMESTAMP 컬럼 \`${column}\` 의 리터럴 기본값은 MySQL 이 세션 시간대에서 UTC 로 바꿔 저장하는데, ${unknown} 저장된 값을 정할 수 없습니다 — ${RE_EXPORT}`);
 }
 
 interface Variable {
@@ -122,13 +132,19 @@ function valueOf(st: State, a: Cursor): string {
       return source.scope === 'server' ? fail(`서버 변수 값(@@global·@@persist 의 ${source.name})은 알 수 없어 받을 수 없습니다`) : current(st, source.name);
     }
     const name = `@${a.ident().toLowerCase()}`;
-    return st.saved.get(name) ?? fail(`값을 저장하지 않은 변수입니다: ${name}`);
+    return st.saved.get(name) ?? fail(unknownVariable(st, name));
   }
   const t = a.next();
   if (t.t === 'string' || t.t === 'number') return t.v;
   if (t.t === 'word') return t.v.toUpperCase();
   return fail(`SET 값을 읽을 수 없습니다: ${t.v}`);
 }
+
+// 값을 모르는 사용자 변수. 무시한 문장이 저장 함수를 부른 뒤로 다시 정하지 않은 변수는 그 함수가 바꿨을 수 있다 (리뷰 7회차 R7-2·8회차)
+const unknownVariable = (st: State, name: string): string =>
+  st.storedCall === undefined
+    ? `값을 저장하지 않은 변수입니다: ${name}`
+    : `사용자 변수 ${name} 의 값을 알 수 없습니다 — 무시한 문장의 저장 함수 호출(\`${st.storedCall}\`)이 이 변수를 바꿨을 수 있는데, 이 도구는 문장을 실행하지 않아 바뀐 값을 모릅니다 — ${RE_EXPORT}`;
 
 const current = (st: State, name: string): string => (name === 'foreign_key_checks' ? (st.fkChecks ? '1' : '0') : name === 'sql_mode' ? st.sqlMode : '');
 
@@ -144,10 +160,12 @@ function foreignKeyChecksOf(value: string): boolean {
 
 // 세션 sql_mode 에 쓴 값. DEFAULT 는 MySQL 이 세션 값을 전역 값, 곧 스크립트를 실행한 서버의 sql_mode 로 되돌린다 — 이 도구에서는 처음 세션 SQL_MODE 다
 // (서버가 기준 버전 루틴에서 짐작한 값. 주지 않았으면 MySQL 기본 모드 — 리뷰 6회차 M-2). 컴파일 기본값(DEFAULT_SQL_MODE)으로 두면 SET 없이 만든 루틴과 어긋난다.
-// 다만 스크립트가 앞에서 GLOBAL·PERSIST 로 서버 sql_mode 를 바꿨으면 DEFAULT 가 읽는 전역 값은 바뀐 값이라 처음 세션 SQL_MODE 와 다르다 — 그 값을 알 수 없어 받지 않는다 (리뷰 7회차 R7-1)
+// 다만 스크립트가 앞에서 GLOBAL·PERSIST 로 서버 sql_mode 를 바꿨으면 DEFAULT 가 읽는 전역 값은 바뀐 값이라 처음 세션 SQL_MODE 와 다르다 — 그 값을 알 수 없어 받지 않는다 (리뷰 7회차 R7-1).
+// 무시한 문장이 부른 저장 함수도 전역 sql_mode 를 바꿀 수 있다 (함수 안의 SET GLOBAL — 8.0.46·8.4.11 실측, 리뷰 8회차)
 function sessionSqlMode(st: State, value: string): string {
   if (value !== 'DEFAULT') return resolveSqlMode(value);
   if (st.serverSqlModeChanged) fail(`SET sql_mode = DEFAULT 는 받을 수 없습니다 — 이 스크립트가 앞에서 전역(GLOBAL·PERSIST) sql_mode 를 바꿨습니다. DEFAULT 는 바뀐 전역 값으로 되돌리므로 처음 세션 SQL_MODE 와 달라지는데 그 값을 알 수 없습니다 — ${RE_EXPORT}`);
+  if (st.storedCall !== undefined) fail(`SET sql_mode = DEFAULT 는 받을 수 없습니다 — 무시한 문장의 저장 함수 호출(\`${st.storedCall}\`)이 전역 sql_mode 를 바꿨을 수 있습니다. DEFAULT 는 전역 값으로 되돌리는데 그 값을 알 수 없습니다 — ${RE_EXPORT}`);
   return st.initialSqlMode;
 }
 
