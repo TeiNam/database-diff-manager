@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type DragEvent } from 'react';
 import { ApiError } from '../../api/client';
-import { useApplyAlter } from '../../api/hooks';
+import { useApplyAlter, useIsVersionMissing } from '../../api/hooks';
 import type { AlterChange, AlterRequest, AlterResponse, VersionSummary } from '../../api/types';
 import { Icon } from '../../components/Icon';
 import { trapTab, useDialogFocus } from '../../hooks/useDialog';
@@ -24,6 +24,12 @@ interface Outcome {
   inputs: RequestInputs;
 }
 
+// 저장하고 나서 기준 버전이 되기를 기다리는 버전 (저장 응답의 버전 id·번호)
+interface AwaitedBase {
+  id: number;
+  versionNo: number;
+}
+
 const isSameInputs = (a: RequestInputs, b: RequestInputs | undefined) =>
   b !== undefined && a.baseId === b.baseId && a.script === b.script && a.charset === b.charset && a.collation === b.collation;
 
@@ -34,13 +40,17 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
   const candidates = versions.filter((v) => v.sourceFormat === 'sql');
   const [baseId, setBaseId] = useState(candidates[0]?.id);
   // 저장하고 나면 이어 쓰는 스크립트는 그때 만든(내용이 같은 버전이 이미 있었다면 그) 버전 위에 적용돼야 한다. 그 버전이 목록에 나타나는 대로 기준 버전을 옮긴다.
-  // 새 버전은 목록을 다시 받아야 보이는데, 그 전에 옛 기준 버전으로 미리보기를 내면 새 버전의 변경을 건너뛰므로 그동안은 미리보기·저장을 막는다
-  const [nextBaseId, setNextBaseId] = useState<number>();
-  const nextBase = candidates.find((v) => v.id === nextBaseId);
+  // 새 버전은 목록을 다시 받아야 보이는데, 그 전에 옛 기준 버전으로 미리보기를 내면 새 버전의 변경을 건너뛰므로 그동안은 미리보기·저장을 막는다.
+  // 내용이 같은 기존 버전도 같다 — 다른 사용자·탭이 방금 만든 버전이면 이 대화상자가 받아 둔 목록에는 아직 없다
+  const [awaitedBase, setAwaitedBase] = useState<AwaitedBase>();
+  const nextBase = candidates.find((v) => v.id === awaitedBase?.id);
   if (nextBase) {
     setBaseId(nextBase.id);
-    setNextBaseId(undefined);
+    setAwaitedBase(undefined);
   }
+  // 목록을 다시 받아 마쳤는데도 기다리던 버전이 없다 (목록을 받지 못해 옛 목록이 남았거나, 그 사이 지워졌다). 기다려도 오지 않으니 알리고,
+  // 옛 기준 버전으로 이어 쓰게 하지는 않는다 — 방금 저장한 변경이 빠진 결과가 나온다
+  const missingBase = useIsVersionMissing(versions[0]?.schemaId, awaitedBase?.id) ? awaitedBase : undefined;
   // 고른 기준 버전이 지금 목록에 아직 있는지. 다른 곳에서 지워졌거나 목록이 다른 스키마의 것으로 바뀌었다면 없다 —
   // 그때는 미리보기·저장을 막아, 화면에 보이는 버전과 요청을 보내는 버전이 어긋나지 않게 한다
   const base = candidates.find((v) => v.id === baseId);
@@ -89,16 +99,16 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
   const finish = (response: AlterResponse, requested: RequestInputs) => {
     setOutcome({ response, inputs: requested });
     if (response.status === 'preview') return;
-    // 새 버전('ok')은 목록을 다시 받아야 보이므로 나타나기를 기다린다. 내용이 같은 기존 버전('duplicate')은 이미 목록에 있어야 한다 —
-    // 없으면 기다려도 오지 않을 수 있으니 기준 버전을 그대로 두어, 미리보기를 막은 채 남지 않게 한다
-    if (response.status === 'ok' || candidates.some((v) => v.id === response.versionId)) setNextBaseId(response.versionId);
+    // 새 버전('ok')도 내용이 같은 기존 버전('duplicate')도 목록에 나타나기를 기다린다. 목록에 이미 있는지는 여기서 가리지 않는다 —
+    // 이 함수는 저장을 보낸 렌더의 것이라 그때 받아 둔 목록만 보인다. 이미 있다면 위에서 바로 기준 버전을 옮긴다
+    setAwaitedBase({ id: response.versionId, versionNo: response.versionNo });
   };
   const submit = (dryRun: boolean) => {
     if (!inputs) return;
     const body: AlterRequest = { script, dryRun, defaults: { charset: inputs.charset, collation: inputs.collation }, ...(filename ? { filename } : {}), ...(note.trim() ? { note: note.trim() } : {}) };
     alter.mutate({ baseId: inputs.baseId, body }, { onSuccess: (response) => finish(response, inputs) });
   };
-  const ready = base !== undefined && script.trim().length > 0 && !isLocked && !defaults.isWaiting && nextBaseId === undefined;
+  const ready = base !== undefined && script.trim().length > 0 && !isLocked && !defaults.isWaiting && awaitedBase === undefined;
   const preview = outcome?.response.status === 'preview' ? outcome.response : undefined;
   const saved = outcome && outcome.response.status !== 'preview' ? outcome.response : undefined;
   return (
@@ -114,7 +124,7 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
         <fieldset className={s.row} aria-label="기준 버전과 스키마 기본값" disabled={isLocked}>
           <label>기준 버전
             <select value={base?.id ?? ''} aria-label="기준 버전"
-              onChange={(e) => { const id = Number(e.target.value); edit(() => { setBaseId(id); setNextBaseId(undefined); }); }}>
+              onChange={(e) => { const id = Number(e.target.value); edit(() => { setBaseId(id); setAwaitedBase(undefined); }); }}>
               {isBaseGone && <option value="" disabled>기준 버전을 고르세요</option>}
               {candidates.map((v) => <option key={v.id} value={v.id}>v{v.versionNo} · {v.sourceFilename}</option>)}
             </select>
@@ -126,6 +136,12 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
           <label>메모<input value={note} maxLength={500} aria-label="메모" onChange={(e) => { if (!isLockedNow.current) setNote(e.target.value); }} /></label>
         </fieldset>
         {isBaseGone && <p role="alert" className={s.warn}>선택한 기준 버전이 목록에 없습니다 — 다른 곳에서 지웠을 수 있습니다. 기준 버전을 다시 고르세요</p>}
+        {missingBase && (
+          <p role="alert" className={s.warn}>
+            v{missingBase.versionNo} 버전을 새로 받은 목록에서 찾지 못했습니다 — 목록을 다시 받지 못했거나 다른 곳에서 지웠을 수 있습니다.
+            이전 기준 버전에 이어 쓰면 이 버전의 변경이 빠질 수 있으니, 대화상자를 닫았다 다시 열거나 기준 버전을 직접 고르세요
+          </p>
+        )}
         {defaults.isWaiting && <p className={s.warnLine}>기준 버전 테이블의 기본 문자셋을 읽는 중…</p>}
         {defaults.error && <p role="alert" className={s.warn}>{defaults.error}</p>}
         <ScriptDropBox onFile={loadFile} disabled={isLocked} />
@@ -146,7 +162,7 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
         {alter.error && <p role="alert" className={s.warn}>{errorText(alter.error)}</p>}
         <footer className={s.foot}>
           {/* 저장 직후 목록을 다시 받는 짧은 동안만 보인다. 푸터 안에 두어 나타났다 사라져도 다른 줄이 밀리지 않게 한다 */}
-          {nextBaseId !== undefined && <span className={s.footHint}>새 기준 버전을 목록에 불러오는 중… 오래 걸리면 대화상자를 닫았다 다시 여세요</span>}
+          {awaitedBase !== undefined && !missingBase && <span className={s.footHint}>새 기준 버전을 목록에 불러오는 중… 오래 걸리면 대화상자를 닫았다 다시 여세요</span>}
           <button type="button" className={s.btn} onClick={onClose}>닫기</button>
           <button type="button" className={s.btn} disabled={!ready} onClick={() => submit(true)}>미리보기</button>
           <button type="button" className={`${s.btn} ${s.primary}`} disabled={!ready || !preview} onClick={() => submit(false)}>저장</button>

@@ -1,5 +1,5 @@
 import type { RenameMapping } from '@tdm/core';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useIsFetching, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 import { api, ApiError } from './client';
 import type { AlterDefaultsSuggestion, AlterRequest, AlterResponse, Derivation, DiffResponse, Me, MigrationFlowResponse, MigrationMeta, MigrationUploadInput, MigrationUploadResult, ObjectHistory, Role, SchemaInfo, TreeDatabase, UploadMeta, UploadResult, User, VersionDetail, VersionSummary } from './types';
@@ -215,6 +215,17 @@ export function useApplyAlter() {
       client.invalidateQueries({ queryKey: ['object-history'] });
     },
   });
+}
+
+// 버전 목록을 다 받았는데도 이 버전이 그 안에 없는지 (ALTER 적용 뒤 기다리던 버전이 끝내 오지 않았는지 가린다).
+// 목록을 받는 중이면 아직 모르고, 캐시에 이 스키마의 목록이 없으면 알 수 없다 — 둘 다 false 다.
+// 목록 쿼리를 하나 더 만들지 않고 캐시만 읽는다: 같은 키에 옵션(queryFn)이 다른 관찰자를 두면 목록을 받는 함수가 뒤섞인다
+export function useIsVersionMissing(schemaId: number | undefined, versionId: number | undefined): boolean {
+  const client = useQueryClient();
+  const key = queryKeys.versions(schemaId);
+  const isFetching = useIsFetching({ queryKey: key }) > 0;
+  const list = client.getQueryData<VersionSummary[]>(key);
+  return versionId !== undefined && !isFetching && list !== undefined && !list.some((v) => v.id === versionId);
 }
 
 export const useDerivation = (id?: number) =>

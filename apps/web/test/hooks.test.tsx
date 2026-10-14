@@ -2,7 +2,8 @@ import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-
 import { renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DIFF_REFETCH_MS, DIFF_STALE_MS, queryKeys, useDeleteDatabase, useDeleteMigration, useDeleteSchema, useDeleteVersion, useDiff, useMigrationFlow, useUpload, useUploadMigration } from '../src/api/hooks';
+import { DIFF_REFETCH_MS, DIFF_STALE_MS, queryKeys, useDeleteDatabase, useDeleteMigration, useDeleteSchema, useDeleteVersion, useDiff, useIsVersionMissing, useMigrationFlow, useUpload, useUploadMigration } from '../src/api/hooks';
+import { version } from './alter-fixtures';
 import { mockApi } from './render';
 
 // 삭제된 id 를 SQLite 가 다시 쓸 수 있어, 지운 버전·스키마·객체 이력 캐시가 남으면 새 데이터 대신 옛 내용이 보인다
@@ -127,5 +128,43 @@ describe('diff·전환 표 주기적 재조회', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(count()).toBe(3);
     expect(DIFF_REFETCH_MS).toBe(60_000);
+  });
+});
+
+// ALTER 적용 뒤 기다리던 버전이 끝내 오지 않았는지: 목록을 다 받았는데도 그 안에 없을 때만 true 다
+describe('useIsVersionMissing', () => {
+  const setup = () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    return { client, wrapper };
+  };
+  const sql = (id: number) => version(id, id, 'sql');
+
+  it('목록 쿼리가 없으면 알 수 없어 false 다 — 목록을 prop 으로만 받는 곳에서 기다림을 접지 않는다', () => {
+    const { wrapper } = setup();
+    expect(renderHook(() => useIsVersionMissing(7, 12), { wrapper }).result.current).toBe(false);
+  });
+
+  it('받아 둔 목록에 버전이 있으면 false, 없으면 true 다 — 버전 id 가 없거나 다른 스키마의 목록이면 false', () => {
+    const { client, wrapper } = setup();
+    client.setQueryData(queryKeys.versions(7), [sql(11)]);
+    expect(renderHook(() => useIsVersionMissing(7, 11), { wrapper }).result.current).toBe(false);
+    expect(renderHook(() => useIsVersionMissing(7, 12), { wrapper }).result.current).toBe(true);
+    expect(renderHook(() => useIsVersionMissing(7, undefined), { wrapper }).result.current).toBe(false);
+    expect(renderHook(() => useIsVersionMissing(8, 12), { wrapper }).result.current).toBe(false);
+  });
+
+  it('목록을 다시 받는 동안은 false 이고, 다 받은 뒤에도 없으면 true 로 바뀐다 (내용이 같은 목록이어도)', async () => {
+    const { client, wrapper } = setup();
+    client.setQueryData(queryKeys.versions(7), [sql(11)]);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const { result } = renderHook(() => useIsVersionMissing(7, 12), { wrapper });
+    expect(result.current).toBe(true);
+    const refetch = client.fetchQuery({ queryKey: queryKeys.versions(7), queryFn: async () => { await held; return [sql(11)]; }, staleTime: 0 });
+    await waitFor(() => expect(result.current).toBe(false));
+    release();
+    await refetch;
+    await waitFor(() => expect(result.current).toBe(true));
   });
 });
