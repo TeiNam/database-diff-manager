@@ -24,6 +24,10 @@ export interface LexWatch {
   versioned(at: number, digits: string): void;
   // 열린 실행 주석을 닫는 '*/' 를 읽었다 (따옴표·주석 안의 것은 아니다): at 은 '*/' 의 원문 자리 (리뷰 13회차)
   closed(at: number): void;
+  // 열린 실행 주석 안에서 일반 블록 주석('/* … */' — '/*!'·'/*+' 는 아니다)을 열었다: at 은 그 '/*' 의 원문 자리 (리뷰 14회차 F1)
+  nested(at: number): void;
+  // 힌트('/*+ … */')를 주석으로 건너뛰었다: at 은 '/*+' 의 원문 자리 (리뷰 14회차 — mysql 8.0 클라이언트는 힌트를 지우지 않고 버퍼에 남긴다)
+  hinted(at: number): void;
   // ASCII 가 아닌 공백(NBSP U+00A0·U+3000·U+FEFF … — JS 의 \s)을 토큰 사이 공백으로 건너뛰었다 (MySQL 은 이름의 글자로 읽는다). at 은 그 글자의 원문 자리
   space(at: number): void;
 }
@@ -42,9 +46,10 @@ export function tokenize(src: string, mode: LexMode = {}): Token[] {
   return [...lexTokens(src, mode)];
 }
 
-// 토큰을 하나씩 만든다. mode 는 매 문자열마다 읽으므로 호출자가 도중에 바꿀 수 있다 (덤프 안의 SET SQL_MODE)
-export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
-  let i = 0;
+// 토큰을 하나씩 만든다. mode 는 매 문자열마다 읽으므로 호출자가 도중에 바꿀 수 있다 (덤프 안의 SET SQL_MODE). start: 읽기 시작할 원문 자리 — 그 앞에서 연 주석·따옴표는
+// 없는 것으로 본다 (문장 나누기가 DELIMITER 줄 끝에서 새로 읽는다, 리뷰 14회차 F3)
+export function* lexTokens(src: string, mode: LexMode = {}, start = 0): Generator<Token> {
+  let i = start;
   let versioned = 0; // 열려 있는 /*!NNNNN 주석 수
   while (i < src.length) {
     const c = src[i];
@@ -58,6 +63,7 @@ export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
     if (versioned > 0 && src.startsWith('*/', i)) { mode.watch?.closed(i); i += 2; versioned--; continue; }
     const comment = commentEnd(src, i);
     if (comment >= 0) {
+      if (mode.watch) watchBlockComment(src, i, versioned, mode.watch);
       i = comment;
       continue;
     }
@@ -99,6 +105,14 @@ function versionMarkEnd(src: string, i: number, mode: LexMode): number {
   while (end < src.length && DIGIT.test(src[end])) end++;
   mode.watch?.versioned(i, src.slice(i + 3, end));
   return end;
+}
+
+// i 자리에서 건너뛴 주석이 블록 주석이면 알린다: 힌트('/*+')는 hinted, 실행 주석 안(versioned > 0)의 일반 주석은 nested. mysql 클라이언트는 일반 블록 주석만 주석으로 지우고
+// (8.0 기본) 실행 주석('/*!' — discardVersioned 로 건너뛴 것도)·힌트는 그대로 보낸다
+function watchBlockComment(src: string, i: number, versioned: number, watch: LexWatch): void {
+  if (!src.startsWith('/*', i)) return;
+  if (src[i + 2] === '+') watch.hinted(i);
+  else if (versioned > 0 && src[i + 2] !== '!') watch.nested(i);
 }
 
 // i 자리에서 시작하는 주석(블록 '/* … */', '-- …', '# …')의 끝 바로 뒤 자리. 주석이 아니면 -1

@@ -116,6 +116,15 @@ describe('POST /versions/:id/alter', () => {
     expect(res.json().details.error).toMatchObject({ index: 0, line: 3 });
   });
 
+  // 리뷰 14회차 F2: 문장 앞 덩어리의 거부는 뒤 문장의 번호와 줄로 안내된다 — core 의 안내 글이 표지가 있는 줄을 밝힌다 (mysql 클라이언트는 'ERROR 1064 … at line 2')
+  it('문장 앞 덩어리의 거부는 표지가 있는 줄을 밝힌다', async () => {
+    const ctx = await setup();
+    const res = await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD a INT;\n/*!40101 ;\n\n\nALTER TABLE member ADD b INT;', dryRun: true });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('2번째 문장 (줄 5): 앞 문장 뒤(줄 2)의 실행 주석 /*!40101 가 구분자까지 닫히지 않았습니다 (MySQL 1064)');
+    expect(res.json().details.error).toMatchObject({ index: 2, line: 5 });
+  });
+
   it('MD 기준·stale 기준은 거부하고, 같은 결과를 다시 저장하면 duplicate', async () => {
     const ctx = await setup();
     const md = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'app', filename: SAMPLE_MD, text: sampleText(SAMPLE_MD), userId: 1 });

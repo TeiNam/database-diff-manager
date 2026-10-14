@@ -56,12 +56,21 @@ export interface VersionMark {
   readonly digits: string;
 }
 
+// 실행 주석 안에서 연 일반 블록 주석 (ALTER 적용, 리뷰 14회차 F1): at 은 그 '/*' 의 원문 자리, mark 는 렉서가 그때 열려 있다고 본 가장 안쪽 실행 주석의 표지
+export interface NestedComment {
+  readonly at: number;
+  readonly mark: VersionMark;
+}
+
 // 원문의 한 구간에서 렉서가 알린 것: marks 는 렉서가 연 실행 주석 표지, spaces 는 렉서가 공백으로 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 R11-2·Claude F5),
-// closes 는 렉서가 실행 주석을 닫은 '*/' 의 원문 자리 (따옴표·주석 안의 것은 빠진다, 리뷰 13회차)
+// closes 는 렉서가 실행 주석을 닫은 '*/' 의 원문 자리 (따옴표·주석 안의 것은 빠진다, 리뷰 13회차), nested 는 실행 주석 안에서 연 일반 주석 (리뷰 14회차 F1), hints 는 렉서가
+// 주석으로 건너뛴 힌트 '/*+' 의 원문 자리 (리뷰 14회차 — DELIMITER 줄 앞의 것을 거부한다)
 export interface LexNotes {
   readonly marks: readonly VersionMark[];
   readonly spaces: readonly number[];
   readonly closes: readonly number[];
+  readonly nested: readonly NestedComment[];
+  readonly hints: readonly number[];
 }
 
 // 문장 앞(앞 문장 뒤부터)의 것: ends 는 그 안의 문장 없이 끝난 덩어리를 끝낸 구분자의 원문 자리 — 실행 주석이 덩어리 안에서 닫혔는지 본다 (리뷰 13회차)
@@ -89,7 +98,7 @@ type MakeStatement<S> = (statement: DumpStatement, offset: number, from: number)
 const plain: MakeStatement<DumpStatement> = (statement) => statement;
 
 // 문장 끝: 기본은 ';', 'DELIMITER x' 줄 뒤로는 x ('DELIMITER ;' 로 복귀, x 는 delimiterArg). 문자열·주석 안의 구분자는 토큰화에서 이미 빠진다.
-// DELIMITER 줄은 클라이언트 명령이라 문장으로 내보내지 않는다
+// DELIMITER 줄은 클라이언트 명령이라 문장으로 내보내지 않고, 인자 뒤는 mysql 클라이언트처럼 읽지 않는다 (afterCommand)
 export function splitStatements(text: string): { ddl: string; line: number }[] {
   return splitDump(text).map(({ ddl, line }) => ({ ddl, line }));
 }
@@ -119,19 +128,37 @@ interface ChunkWatch extends LexWatch {
 }
 
 // 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것을 넘긴다. 그 앞의 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 덩어리의 것과 가르고(leading — 문장 없는
-// 덩어리의 표지를 뒤 문장의 것으로 읽으면 '/*!80400 */;' 뒤의 문장을 거부한다), 마지막 문장 뒤의 것은 rest 가 넘긴다
+// 덩어리의 표지를 뒤 문장의 것으로 읽으면 '/*!80400 */;' 뒤의 문장을 거부한다), 마지막 문장 뒤의 것은 rest 가 넘긴다. 실행 주석 안의 일반 주석에는 렉서가 그때 열려 있다고 본
+// 가장 안쪽 표지를 붙인다 — 렉서처럼 표지마다 열고 '*/' 마다 가장 안쪽 것을 닫는다 (리뷰 14회차 F1)
 class ChunkLog implements ChunkWatch {
   private marks: VersionMark[] = [];
   private spaces: number[] = [];
   private closes: number[] = [];
+  private inner: NestedComment[] = [];
+  private hints: number[] = [];
   private ends: number[] = [];
+  // 렉서가 열려 있다고 보는 표지 (가장 안쪽이 끝). DELIMITER 줄 뒤에서 렉서를 새로 읽혀도(afterCommand) 그 앞의 것은 남지만, 렉서는 새로 연 것만 닫고 그 안에서만 nested 를
+  // 알리므로 끝의 것은 늘 렉서의 가장 안쪽 것이다
+  private readonly open: VersionMark[] = [];
 
   versioned(at: number, digits: string): void {
-    this.marks.push({ at, digits });
+    const mark = { at, digits };
+    this.marks.push(mark);
+    this.open.push(mark);
   }
 
   closed(at: number): void {
     this.closes.push(at);
+    this.open.pop();
+  }
+
+  nested(at: number): void {
+    const mark = this.open[this.open.length - 1];
+    if (mark) this.inner.push({ at, mark });
+  }
+
+  hinted(at: number): void {
+    this.hints.push(at);
   }
 
   space(at: number): void {
@@ -142,20 +169,30 @@ class ChunkLog implements ChunkWatch {
     this.ends.push(at);
   }
 
-  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'leading'> {
-    const before = (at: number): boolean => at < from;
-    const leading = { marks: this.marks.filter((m) => before(m.at)), spaces: this.spaces.filter(before), closes: this.closes.filter(before), ends: this.ends };
-    const taken = { marks: this.marks.filter((m) => !before(m.at)), spaces: this.spaces.filter((at) => !before(at)), closes: this.closes.filter((at) => !before(at)), leading };
+  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'nested' | 'hints' | 'leading'> {
+    const [leadMarks, marks] = splitAt(this.marks, (m) => m.at, from);
+    const [leadSpaces, spaces] = splitAt(this.spaces, (at) => at, from);
+    const [leadCloses, closes] = splitAt(this.closes, (at) => at, from);
+    const [leadNested, nested] = splitAt(this.inner, (n) => n.at, from);
+    const [leadHints, hints] = splitAt(this.hints, (at) => at, from);
+    const leading = { marks: leadMarks, spaces: leadSpaces, closes: leadCloses, nested: leadNested, hints: leadHints, ends: this.ends };
     this.marks = [];
     this.spaces = [];
     this.closes = [];
+    this.inner = [];
+    this.hints = [];
     this.ends = [];
-    return taken;
+    return { marks, spaces, closes, nested, hints, leading };
   }
 
   rest(): LexNotes {
-    return { marks: this.marks, spaces: this.spaces, closes: this.closes };
+    return { marks: this.marks, spaces: this.spaces, closes: this.closes, nested: this.inner, hints: this.hints };
   }
+}
+
+// items(원문 자리 순서)를 from 앞의 것과 그 뒤의 것으로 가른다
+function splitAt<T>(items: readonly T[], at: (item: T) => number, from: number): [T[], T[]] {
+  return [items.filter((item) => at(item) < from), items.filter((item) => at(item) >= from)];
 }
 
 function scan<S extends DumpStatement>(text: string, lenient: boolean, make: MakeStatement<S>, watch?: ChunkWatch): DumpScan<S> {
@@ -174,12 +211,15 @@ function scan<S extends DumpStatement>(text: string, lenient: boolean, make: Mak
     mode.noBackslashEscapes = session.noBackslashEscapes;
   };
   try {
-    for (const t of lexTokens(text, mode)) {
+    let tokens = lexTokens(text, mode);
+    for (let next = tokens.next(); !next.done; next = tokens.next()) {
+      const t = next.value;
       if (t.e <= skipUntil) continue;
       if (!start) from = skipUntil;
       if (!start && isDelimiterCommand(text, t)) {
         const end = lineEnd(text, t.s);
         delimiter = delimiterArg(text.slice(t.e, end));
+        tokens = afterCommand(text, t.e, end, mode);
         skipUntil = end;
         continue;
       }
@@ -247,6 +287,15 @@ const lineEnd = (text: string, pos: number): number => {
   const end = text.indexOf('\n', pos);
   return end < 0 ? text.length : end;
 };
+
+// DELIMITER 줄 뒤의 토큰 (리뷰 14회차 F3, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 그 줄의 인자 뒤를 버리므로(com_delimiter·get_arg) 렉서는 줄 끝(end)에서
+// 새로 읽는다 — 13회차까지는 그 줄의 나머지도 읽어, 닫지 않은 실행 주석('DELIMITER ;; /*!40101 x')을 뒤 루틴·ALTER 까지 열린 것으로 보고 1064 라 거부했고, 뒤의 짝 없는 '*/' 는
+// 그 주석을 닫은 것으로 읽었다. DELIMITER 단어 뒤(from 부터)에서 렉서가 알렸을 ASCII 밖 공백은 따옴표·주석 안의 것까지 알린다 — unicode-space.ts 가 그 줄의 것도 거부한다
+// (리뷰 12회차 Claude F5, 보수적)
+function afterCommand(text: string, from: number, end: number, mode: LexMode): Generator<Token> {
+  for (let k = from; k < end; k++) if (text.charCodeAt(k) > 0x7f && /\s/.test(text[k])) mode.watch?.space(k);
+  return lexTokens(text, mode, end);
+}
 
 // DELIMITER 의 인자 (mysql 클라이언트 com_delimiter·get_arg, 8.4.11 실측): 앞 공백을 건너뛰고, 따옴표(' " `)로 시작하면 짝 따옴표 앞까지(짝이 없으면 줄 끝까지),
 // 아니면 첫 공백(' ') 앞까지다 — 탭은 인자를 끝내지 않는다. 줄의 나머지('-- …'·'# …' 주석)는 버리고, CRLF 의 '\r' 은 줄 끝으로 본다. 인자가 없으면 ';'

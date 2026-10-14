@@ -18,7 +18,7 @@ import { createTable, dropTable, renameTables } from './table-stmt';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
 import { assertAsciiSpaces, assertLeadingSpaces } from './unicode-space';
 import { assertKnownRealType, assertModeIndependentText } from './unknown-session';
-import { executedText, hiddenAfterLast, leadingSkippedComments, skippedComments, type HiddenComment } from './version-comment';
+import { assertNoStrayClose, executedText, hiddenAfterLast, leadingSkippedComments, skippedComments, type HiddenComment } from './version-comment';
 
 export { MYSQL_DEFAULTS, type ApplyDefaults, type ApplyError, type ApplyOptions, type ApplyResult } from './types';
 export { printSqlDump } from './print-dump';
@@ -106,6 +106,7 @@ function applyStatement(st: State, s: ApplyStatement, script: string): boolean {
   const statement = executedText(s, skipped);
   assertSameBackslashMode(st, s.ddl, noBackslashEscapes);
   const written = tokenize(s.ddl, { noBackslashEscapes });
+  assertNoStrayClose(s, written); // 짝 없는 '*/' — applyTokens 는 문장 끝의 '*/' 를 감싼 주석의 닫힘으로 뗀다 (리뷰 14회차)
   assertModeIndependentText(st, s.ddl, written); // 세션 SQL_MODE 를 모르면 모드에 따라 달리 읽히는 백슬래시·큰따옴표 (리뷰 10회차)
   const tokens = statement === s.ddl ? written : tokenize(statement, { noBackslashEscapes });
   assertAsciiSpaces(script, s, skipped, tokens); // 따옴표·주석 밖의 NBSP 등 (리뷰 11회차 Claude F5)
