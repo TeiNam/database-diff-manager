@@ -160,11 +160,14 @@ export interface AlterChange {
 }
 
 // 버전을 가리키는 지문 (서버 VersionFingerprint). 행 ID 는 가장 큰 ID 의 버전을 지우면 다른 업로드가 다시 쓰므로 ID 만으로는 같은 버전이라 할 수 없다 —
-// 스키마 ID·버전 번호·저장된 모델 해시를 함께 본다. 모델 해시는 목록에 없어 서버가 저장할 때 확인한다 (어긋나면 409)
+// 스키마 ID·버전 번호·저장된 모델 해시·버전을 만든 시각·데이터베이스와 스키마 이름을 함께 본다. 모델 해시는 목록에 없어 서버가 저장할 때 확인한다 (어긋나면 409)
 export interface VersionFingerprint {
   schemaId: number;
   versionNo: number;
   modelHash: string;
+  uploadedAt: string;
+  databaseName: string;
+  schemaName: string;
 }
 
 export interface AlterRequest {

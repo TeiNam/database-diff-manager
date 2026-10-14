@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { printSqlDump } from '@tdm/core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { one, run, type Db } from '../src/db/connection';
 import { loadEvidence, loadStaleReason } from '../src/repos/evidence';
 import { listRenames } from '../src/repos/renames';
@@ -29,8 +29,12 @@ const dump = (db: string, table = TABLE) => [
 
 // 지문은 서버의 계산을 거치지 않고 저장된 값에서 직접 읽는다 (서버가 돌려주는 지문과 대조하는 테스트가 순환하지 않게)
 const fingerprintOf = (db: Db, id: number) => {
-  const r = one<{ schema_id: number; version_no: number; model_hash: string }>(db, 'SELECT schema_id, version_no, model_hash FROM schema_versions WHERE id = ?', id)!;
-  return { schemaId: Number(r.schema_id), versionNo: Number(r.version_no), modelHash: r.model_hash };
+  const r = one<{ schema_id: number; version_no: number; model_hash: string; uploaded_at: string; database_name: string; schema_name: string }>(db, `
+    SELECT v.schema_id, v.version_no, v.model_hash, v.uploaded_at, d.name AS database_name, s.name AS schema_name
+      FROM schema_versions v JOIN schemas s ON s.id = v.schema_id JOIN databases d ON d.id = s.database_id WHERE v.id = ?`, id)!;
+  return {
+    schemaId: Number(r.schema_id), versionNo: Number(r.version_no), modelHash: r.model_hash, uploadedAt: r.uploaded_at, databaseName: r.database_name, schemaName: r.schema_name,
+  };
 };
 
 async function setup() {
@@ -336,7 +340,9 @@ describe('기동 재판정 — 기준 버전의 stale', () => {
 });
 
 // 2way 리뷰 4회차 (R4-01): 행 ID 는 가장 큰 ID 의 버전을 지우면 다시 쓰이므로, ID 만으로는 미리보기한 그 기준 버전인지 알 수 없다.
-// 미리보기가 기준 버전의 지문(스키마 ID·버전 번호·저장된 모델 해시)을 돌려주고, 저장은 그 지문을 expectedBase 로 되돌려 보내야 한다
+// 미리보기가 기준 버전의 지문(스키마 ID·버전 번호·저장된 모델 해시)을 돌려주고, 저장은 그 지문을 expectedBase 로 되돌려 보내야 한다.
+// 2way 리뷰 5회차 (R5-01): 스키마까지 통째로 지우면 스키마 ID·버전 번호·행 ID 를 처음부터 다시 쓰고, 모델 해시는 테이블·뷰·루틴만 보므로 같은 구조를
+// 다른 스키마에 올리면 세 필드가 모두 같아진다. 지문에 버전을 만든 시각과 데이터베이스·스키마 이름을 더한다
 describe('POST /versions/:id/alter — 기준 버전 지문', () => {
   const SCRIPT = 'ALTER TABLE member ADD x INT;';
   const REPLACEMENT = dump('shop', TABLE.replace('`name`', '`title`'));
@@ -344,6 +350,10 @@ describe('POST /versions/:id/alter — 기준 버전 지문', () => {
   const versionCount = (db: Db) => one<{ n: number }>(db, 'SELECT count(*) AS n FROM schema_versions')!.n;
   const derivationCount = (db: Db) => one<{ n: number }>(db, 'SELECT count(*) AS n FROM schema_version_derivations')!.n;
   const removeVersion = (ctx: Ctx, id: number) => ctx.app.inject({ method: 'DELETE', url: `/api/versions/${id}`, headers: ctx.admin });
+  const removeSchema = (ctx: Ctx) => ctx.app.inject({ method: 'DELETE', url: `/api/schemas/${ctx.schemaId}`, headers: ctx.admin, payload: { confirmName: 'shop' } });
+  afterEach(() => {
+    vi.useRealTimers(); // 시각을 고정한 테스트가 중간에 실패해도 다음 테스트는 실제 시각을 쓴다
+  });
   const columnsOf = async (ctx: Ctx, versionId: number) => {
     const detail = (await ctx.app.inject({ method: 'GET', url: `/api/versions/${versionId}`, headers: ctx.viewer })).json();
     return detail.model.tables[0].columns.map((c: { name: string }) => c.name);
@@ -363,10 +373,10 @@ describe('POST /versions/:id/alter — 기준 버전 지문', () => {
     expect(res.body).not.toContain(stale.modelHash); // 저장된 값을 알려 주지 않는다
   };
 
-  it('미리보기가 돌려주는 지문은 저장된 스키마 ID·버전 번호·모델 해시다', async () => {
+  it('미리보기가 돌려주는 지문은 저장된 스키마 ID·버전 번호·모델 해시·버전을 만든 시각과 데이터베이스·스키마 이름이다', async () => {
     const { ctx, stale } = await previewed();
-    const stored = one<{ model_hash: string }>(ctx.db, 'SELECT model_hash FROM schema_versions WHERE id = ?', ctx.baseId)!;
-    expect(stale).toEqual({ schemaId: ctx.schemaId, versionNo: 1, modelHash: stored.model_hash });
+    const stored = one<{ model_hash: string; uploaded_at: string }>(ctx.db, 'SELECT model_hash, uploaded_at FROM schema_versions WHERE id = ?', ctx.baseId)!;
+    expect(stale).toEqual({ schemaId: ctx.schemaId, versionNo: 1, modelHash: stored.model_hash, uploadedAt: stored.uploaded_at, databaseName: 'db-01', schemaName: 'shop' });
   });
 
   it('미리보기가 돌려준 지문을 그대로 보내면 저장된다 — 그 사이 다른 버전이 올라와도 기준 버전이 그대로면 막지 않는다', async () => {
@@ -428,6 +438,35 @@ describe('POST /versions/:id/alter — 기준 버전 지문', () => {
     expect(versionCount(ctx.db)).toBe(1);
   });
 
+  it('스키마를 통째로 지우고 같은 구조를 다른 이름의 스키마에 올려 스키마 ID·버전 번호·행 ID·모델 해시가 모두 같아져도 409 — 다른 스키마에 파생 버전을 만들지 않는다', async () => {
+    const { ctx, stale } = await previewed();
+    expect((await removeSchema(ctx)).statusCode).toBe(200);
+    const other = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'other', filename: 'other.sql', text: dump('other'), userId: 1 });
+    expect(other).toMatchObject({ status: 'ok', versionId: ctx.baseId, versionNo: 1 });
+    expect(fingerprintOf(ctx.db, ctx.baseId)).toMatchObject({ schemaId: stale.schemaId, versionNo: stale.versionNo, modelHash: stale.modelHash });
+    expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: stale }), stale);
+    expect(versionCount(ctx.db)).toBe(1);
+    expect(derivationCount(ctx.db)).toBe(0);
+  });
+
+  it('같은 데이터베이스·같은 이름·같은 구조로 다시 만들어 이름까지 같아져도, 버전을 만든 시각이 달라 409', async () => {
+    const { ctx, stale } = await previewed();
+    expect((await removeSchema(ctx)).statusCode).toBe(200);
+    // 다시 올리는 시각을 미리보기한 버전을 만든 시각과 다르게 둔다 (같은 밀리초에 지우고 다시 올리지는 않는다)
+    const later = Date.parse(stale.uploadedAt) + 60_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(later);
+    const again = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: dump('shop'), userId: 1 });
+    vi.useRealTimers();
+    expect(again).toMatchObject({ status: 'ok', versionId: ctx.baseId, versionNo: 1 });
+    const { uploadedAt, ...rest } = fingerprintOf(ctx.db, ctx.baseId);
+    expect(rest).toEqual({ schemaId: stale.schemaId, versionNo: stale.versionNo, modelHash: stale.modelHash, databaseName: stale.databaseName, schemaName: stale.schemaName });
+    expect(uploadedAt).toBe(new Date(later).toISOString());
+    expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: stale }), stale);
+    expect(versionCount(ctx.db)).toBe(1);
+    expect(derivationCount(ctx.db)).toBe(0);
+  });
+
   it('미리보기에 expectedBase 를 보내도 대조한다 — 맞으면 지문을 돌려주고, 어긋나면 409', async () => {
     const { ctx, stale } = await previewed();
     const ok = await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: stale });
@@ -436,6 +475,9 @@ describe('POST /versions/:id/alter — 기준 버전 지문', () => {
     expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, modelHash: '0'.repeat(64) } }), stale);
     expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, versionNo: stale.versionNo + 1 } }), stale);
     expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, schemaId: stale.schemaId + 1 } }), stale);
+    expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, uploadedAt: '2000-01-01T00:00:00.000Z' } }), stale);
+    expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, databaseName: 'db-02' } }), stale);
+    expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, schemaName: 'other' } }), stale);
   });
 
   it('저장에는 expectedBase 가 필요하다 — 없으면 400 이고 아무것도 만들지 않는다. 미리보기에는 필요 없다', async () => {
@@ -454,6 +496,8 @@ describe('POST /versions/:id/alter — 기준 버전 지문', () => {
     const malformed: [string, unknown][] = [
       ['객체가 아님', 'x'], ['null', null], ['필드 없음', { schemaId: 1 }], ['소수 스키마 ID', { ...stale, schemaId: 1.5 }], ['0 버전 번호', { ...stale, versionNo: 0 }],
       ['문자열 버전 번호', { ...stale, versionNo: '1' }], ['빈 해시', { ...stale, modelHash: '' }], ['숫자 해시', { ...stale, modelHash: 5 }], ['너무 긴 해시', { ...stale, modelHash: 'a'.repeat(129) }],
+      ['시각 없음', { ...stale, uploadedAt: undefined }], ['숫자 시각', { ...stale, uploadedAt: 0 }], ['너무 긴 시각', { ...stale, uploadedAt: 'a'.repeat(257) }],
+      ['빈 데이터베이스 이름', { ...stale, databaseName: '' }], ['스키마 이름 없음', { ...stale, schemaName: undefined }], ['너무 긴 스키마 이름', { ...stale, schemaName: 's'.repeat(257) }],
     ];
     for (const [label, expectedBase] of malformed) {
       for (const dryRun of [true, false]) {
