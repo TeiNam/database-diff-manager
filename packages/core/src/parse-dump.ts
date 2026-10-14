@@ -56,10 +56,17 @@ export interface VersionMark {
   readonly digits: string;
 }
 
-// 원문의 한 구간에서 렉서가 알린 것: marks 는 렉서가 연 실행 주석 표지, spaces 는 렉서가 공백으로 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 R11-2·Claude F5)
+// 원문의 한 구간에서 렉서가 알린 것: marks 는 렉서가 연 실행 주석 표지, spaces 는 렉서가 공백으로 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 R11-2·Claude F5),
+// closes 는 렉서가 실행 주석을 닫은 '*/' 의 원문 자리 (따옴표·주석 안의 것은 빠진다, 리뷰 13회차)
 export interface LexNotes {
   readonly marks: readonly VersionMark[];
   readonly spaces: readonly number[];
+  readonly closes: readonly number[];
+}
+
+// 문장 앞(앞 문장 뒤부터)의 것: ends 는 그 안의 문장 없이 끝난 덩어리를 끝낸 구분자의 원문 자리 — 실행 주석이 덩어리 안에서 닫혔는지 본다 (리뷰 13회차)
+export interface LeadingNotes extends LexNotes {
+  readonly ends: readonly number[];
 }
 
 // ALTER 적용이 쓰는 문장 (splitForApply). offset: ddl 의 원문 자리. marks·spaces: 이 문장의 덩어리(앞 구분자·DELIMITER 줄 뒤부터 이 문장의 끝까지)에서 렉서가 알린 것 —
@@ -67,7 +74,7 @@ export interface LexNotes {
 // ('/*!99999 */;'·'<NBSP>;')와 DELIMITER 줄에서 알린 것 (apply/version-comment.ts·unicode-space.ts, 리뷰 12회차 Claude F5 — 11회차는 버렸다)
 export interface ApplyStatement extends DumpStatement, LexNotes {
   readonly offset: number;
-  readonly leading: LexNotes;
+  readonly leading: LeadingNotes;
 }
 
 // splitForApply 의 결과. trailing: 마지막 문장 뒤(문장 없이 끝난 덩어리·DELIMITER 줄·파일 끝)에서 렉서가 알린 것 — 줄 주석이 뒤 DDL 을 삼킨 건너뛰는 실행 주석을 가린다
@@ -106,34 +113,52 @@ export function scanDump(text: string): DumpScan {
   return scan(text, true, plain);
 }
 
+// scan 이 렉서가 알린 것과 함께 문장 없이 끝난 덩어리의 구분자 자리(ended)도 알린다 (리뷰 13회차)
+interface ChunkWatch extends LexWatch {
+  ended(at: number): void;
+}
+
 // 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것을 넘긴다. 그 앞의 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 덩어리의 것과 가르고(leading — 문장 없는
 // 덩어리의 표지를 뒤 문장의 것으로 읽으면 '/*!80400 */;' 뒤의 문장을 거부한다), 마지막 문장 뒤의 것은 rest 가 넘긴다
-class ChunkLog implements LexWatch {
+class ChunkLog implements ChunkWatch {
   private marks: VersionMark[] = [];
   private spaces: number[] = [];
+  private closes: number[] = [];
+  private ends: number[] = [];
 
   versioned(at: number, digits: string): void {
     this.marks.push({ at, digits });
+  }
+
+  closed(at: number): void {
+    this.closes.push(at);
   }
 
   space(at: number): void {
     this.spaces.push(at);
   }
 
-  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'leading'> {
-    const leading = { marks: this.marks.filter((m) => m.at < from), spaces: this.spaces.filter((at) => at < from) };
-    const taken = { marks: this.marks.filter((m) => m.at >= from), spaces: this.spaces.filter((at) => at >= from), leading };
+  ended(at: number): void {
+    this.ends.push(at);
+  }
+
+  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'leading'> {
+    const before = (at: number): boolean => at < from;
+    const leading = { marks: this.marks.filter((m) => before(m.at)), spaces: this.spaces.filter(before), closes: this.closes.filter(before), ends: this.ends };
+    const taken = { marks: this.marks.filter((m) => !before(m.at)), spaces: this.spaces.filter((at) => !before(at)), closes: this.closes.filter((at) => !before(at)), leading };
     this.marks = [];
     this.spaces = [];
+    this.closes = [];
+    this.ends = [];
     return taken;
   }
 
   rest(): LexNotes {
-    return { marks: this.marks, spaces: this.spaces };
+    return { marks: this.marks, spaces: this.spaces, closes: this.closes };
   }
 }
 
-function scan<S extends DumpStatement>(text: string, lenient: boolean, make: MakeStatement<S>, watch?: LexWatch): DumpScan<S> {
+function scan<S extends DumpStatement>(text: string, lenient: boolean, make: MakeStatement<S>, watch?: ChunkWatch): DumpScan<S> {
   const out: S[] = [];
   const session = new SessionMode();
   const mode: LexMode = watch ? { watch } : {};
@@ -163,6 +188,7 @@ function scan<S extends DumpStatement>(text: string, lenient: boolean, make: Mak
       if (at >= 0) {
         if (!start && at > t.s) start = t;
         if (start) emit(at, true);
+        else watch?.ended(at);
         start = undefined;
         skipUntil = at + delimiter.length;
         continue;
