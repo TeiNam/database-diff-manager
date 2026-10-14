@@ -159,16 +159,25 @@ export interface AlterChange {
   op: 'add' | 'drop' | 'modify' | 'rename';
 }
 
+// 버전을 가리키는 지문 (서버 VersionFingerprint). 행 ID 는 가장 큰 ID 의 버전을 지우면 다른 업로드가 다시 쓰므로 ID 만으로는 같은 버전이라 할 수 없다 —
+// 스키마 ID·버전 번호·저장된 모델 해시를 함께 본다. 모델 해시는 목록에 없어 서버가 저장할 때 확인한다 (어긋나면 409)
+export interface VersionFingerprint {
+  schemaId: number;
+  versionNo: number;
+  modelHash: string;
+}
+
 export interface AlterRequest {
   script: string;
   filename?: string;
   note?: string;
   dryRun?: boolean;
   defaults?: { charset?: string; collation?: string };
+  expectedBase?: VersionFingerprint; // 저장에는 꼭 있어야 한다 — 미리보기가 돌려준 base 를 그대로 보낸다
 }
 
 export type AlterResponse =
-  | { status: 'preview'; applied: number; changes: AlterChange[]; renames: RenameMapping[] }
+  | { status: 'preview'; applied: number; changes: AlterChange[]; renames: RenameMapping[]; base: VersionFingerprint }
   | { status: 'ok' | 'duplicate'; versionId: number; versionNo: number; applied: number; changes: AlterChange[] };
 
 // 기준 버전 테이블의 DEFAULT CHARSET·COLLATE 최빈값 (서버 GET /versions/:id/alter-defaults). 알 수 있는 테이블이 없으면 null

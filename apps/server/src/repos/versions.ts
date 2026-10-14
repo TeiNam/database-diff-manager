@@ -73,6 +73,23 @@ export function getVersionMeta(db: Db, id: number): VersionMeta {
   return toMeta(r);
 }
 
+// 버전을 가리키는 지문. 행 ID 는 가장 큰 ID 의 버전을 지우면 다른 업로드가 다시 쓰므로(SQLite rowid) ID 만으로는 같은 버전이라 할 수 없다.
+// 스키마 ID, 버전 번호(스키마마다 번호를 다시 쓰지 않는다), 저장된 모델 해시를 함께 본다 — 스키마까지 통째로 지우고 다시 만들어 앞의 둘이 같아져도 모델이 다르면 해시가 다르다
+export interface VersionFingerprint {
+  schemaId: number;
+  versionNo: number;
+  modelHash: string;
+}
+
+export function getVersionFingerprint(db: Db, id: number): VersionFingerprint {
+  const r = one<{ schema_id: number; version_no: number; model_hash: string }>(db, 'SELECT schema_id, version_no, model_hash FROM schema_versions WHERE id = ?', id);
+  if (!r) throw NOT_FOUND();
+  return { schemaId: Number(r.schema_id), versionNo: Number(r.version_no), modelHash: r.model_hash };
+}
+
+export const isSameFingerprint = (a: VersionFingerprint, b: VersionFingerprint): boolean =>
+  a.schemaId === b.schemaId && a.versionNo === b.versionNo && a.modelHash === b.modelHash;
+
 export function listVersions(db: Db, schemaId: number): VersionSummary[] {
   getSchema(db, schemaId);
   const metas = all<MetaRecord>(db, `${META_SQL} WHERE v.schema_id = ? ORDER BY v.version_no`, schemaId).map(toMeta);

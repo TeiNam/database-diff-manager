@@ -219,13 +219,23 @@ export function useApplyAlter() {
 
 // 버전 목록을 다 받았는데도 이 버전이 그 안에 없는지 (ALTER 적용 뒤 기다리던 버전이 끝내 오지 않았는지 가린다).
 // 목록을 받는 중이면 아직 모르고, 캐시에 이 스키마의 목록이 없으면 알 수 없다 — 둘 다 false 다.
-// 목록 쿼리를 하나 더 만들지 않고 캐시만 읽는다: 같은 키에 옵션(queryFn)이 다른 관찰자를 두면 목록을 받는 함수가 뒤섞인다
-export function useIsVersionMissing(schemaId: number | undefined, versionId: number | undefined): boolean {
+// 목록 쿼리를 하나 더 만들지 않고 캐시만 읽는다: 같은 키에 옵션(queryFn)이 다른 관찰자를 두면 목록을 받는 함수가 뒤섞인다.
+// versionNo 를 주면 ID 가 같아도 버전 번호가 다른 버전은 그 버전이 아니다 (지운 버전의 ID 를 다른 업로드가 다시 쓴다)
+export function useIsVersionMissing(schemaId: number | undefined, versionId: number | undefined, versionNo?: number): boolean {
   const client = useQueryClient();
   const key = queryKeys.versions(schemaId);
   const isFetching = useIsFetching({ queryKey: key }) > 0;
   const list = client.getQueryData<VersionSummary[]>(key);
-  return versionId !== undefined && !isFetching && list !== undefined && !list.some((v) => v.id === versionId);
+  const isListed = (v: VersionSummary) => v.id === versionId && (versionNo === undefined || v.versionNo === versionNo);
+  return versionId !== undefined && !isFetching && list !== undefined && !list.some(isListed);
+}
+
+// 버전 목록을 다시 받는다. 서버가 본 기준 버전과 화면의 목록이 어긋났을 때(ALTER 적용의 기준 버전 지문 불일치) 화면의 목록을 맞추는 데 쓴다
+export function useRefreshVersions() {
+  const client = useQueryClient();
+  return useCallback(() => {
+    client.invalidateQueries({ queryKey: ['versions'] });
+  }, [client]);
 }
 
 export const useDerivation = (id?: number) =>
