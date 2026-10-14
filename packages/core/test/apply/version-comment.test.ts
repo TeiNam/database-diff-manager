@@ -319,6 +319,14 @@ describe('문장 없이 끝난 덩어리의 실행 주석', () => {
     expect(columnsOf(r)).toEqual(['id', 'a', 'b']);
     expect(r.ok && r.model.routines.map((x) => x.name)).toEqual(['p']);
   });
+
+  // 리뷰 15회차 F6 (변이 P1 — 앞 덩어리를 끝낸 ';' 앞의 힌트도 DELIMITER 줄 앞의 것으로 본다): ';' 로 끝낸 힌트는 두 클라이언트 모두 주석뿐인 문장으로 보내고 버퍼를 비운다
+  // (8.0.46·8.4.11 에서 mysql 클라이언트로 실측)
+  it("';' 로 끝낸 힌트 뒤의 DELIMITER 줄도 받는다 (넷 모두 a·b 와 루틴 p)", () => {
+    const r = run('ALTER TABLE t ADD a INT;\n/*+ x */;\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;\nALTER TABLE t ADD b INT;');
+    expect(columnsOf(r)).toEqual(['id', 'a', 'b']);
+    expect(r.ok && r.model.routines.map((x) => x.name)).toEqual(['p']);
+  });
 });
 
 // 리뷰 14회차 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측 — 모두 1064): MySQL 은 열린 실행 주석이 없으면 '*/' 를 '*' '/' 로 읽는다. 문장 끝의 것은 문장을 감싼 실행 주석의 닫힘처럼
