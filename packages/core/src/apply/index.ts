@@ -15,7 +15,8 @@ import { initialState, type State } from './state';
 import { createTable, dropTable, renameTables } from './table-stmt';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
 import { assertKnownRealType, assertModeIndependentText } from './unknown-session';
-import { executedText } from './version-comment';
+import { assertAsciiSpaces } from './unicode-space';
+import { executedText, skippedComments } from './version-comment';
 
 export { MYSQL_DEFAULTS, type ApplyDefaults, type ApplyError, type ApplyOptions, type ApplyResult } from './types';
 export { printSqlDump } from './print-dump';
@@ -90,11 +91,13 @@ type Handler = (st: State, c: Cursor) => void;
 // 모드 검사는 쓴 글 그대로 본다 — 건너뛰는 실행 주석 안의 글도 문장 나누기는 읽었다 (보수적)
 function applyStatement(st: State, s: ApplyStatement, script: string): boolean {
   const { noBackslashEscapes } = s;
-  const statement = executedText(script, s); // 실행 주석의 버전 번호 (리뷰 11회차 R11-2)
+  const skipped = skippedComments(script, s); // 실행 주석의 버전 번호 (리뷰 11회차 R11-2)
+  const statement = executedText(s, skipped);
   assertSameBackslashMode(st, s.ddl, noBackslashEscapes);
   const written = tokenize(s.ddl, { noBackslashEscapes });
   assertModeIndependentText(st, s.ddl, written); // 세션 SQL_MODE 를 모르면 모드에 따라 달리 읽히는 백슬래시·큰따옴표 (리뷰 10회차)
   const tokens = statement === s.ddl ? written : tokenize(statement, { noBackslashEscapes });
+  assertAsciiSpaces(script, s, skipped, tokens); // 따옴표·주석 밖의 NBSP 등 (리뷰 11회차 Claude F5)
   return tokens.length > 0 && applyTokens(st, statement, tokens, noBackslashEscapes); // 주석뿐인 문장은 MySQL 도 오류 없이 지나간다
 }
 

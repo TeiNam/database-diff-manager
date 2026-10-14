@@ -16,15 +16,17 @@ const LAST_RUN_BY_BOTH = 80046; // 8.0.46 이 실행하는 가장 높은 번호 
 const FIRST_SKIPPED_BY_BOTH = 80500; // 8.0·8.4 의 어느 판도 실행하지 않는 가장 낮은 번호
 
 // 건너뛰는 실행 주석이 차지하는 원문 자리 [start, end)
-interface Region {
+export interface Region {
   readonly start: number;
   readonly end: number;
 }
 
-// MySQL 이 이 문장에서 실행하는 글: 건너뛰는 실행 주석을 공백으로 지운 ddl (없으면 ddl 그대로, 주석뿐이면 ''). 실행 여부가 버전에 따라 갈리면 거부한다.
-// 루틴 정의 안의 것은 지우지 않는다 — createRoutine 이 루틴 정의 안의 실행 주석을 받지 않는다 (MySQL 은 본문에서 그 글을 지워 저장한다). script: 문장을 나눈 원문
-export function executedText(script: string, s: ApplyStatement): string {
-  const skipped = s.marks.filter((m) => !runs(m)).map((m) => skippedRegion(script, s, m));
+// 이 문장의 덩어리에서 MySQL 이 건너뛰는 실행 주석의 자리. 실행 여부가 버전에 따라 갈리면 거부한다. script: 문장을 나눈 원문
+export const skippedComments = (script: string, s: ApplyStatement): Region[] => s.marks.filter((m) => !runs(m)).map((m) => skippedRegion(script, s, m));
+
+// MySQL 이 이 문장에서 실행하는 글: 건너뛰는 실행 주석(skipped)을 공백으로 지운 ddl (없으면 ddl 그대로, 주석뿐이면 ''). 루틴 정의 안의 것은 지우지 않는다 —
+// createRoutine 이 루틴 정의 안의 실행 주석을 받지 않는다 (MySQL 은 본문에서 그 글을 지워 저장한다)
+export function executedText(s: ApplyStatement, skipped: readonly Region[]): string {
   if (!skipped.length) return s.ddl;
   const lead = blank(s, skipped.filter((r) => r.start < s.offset)).trimStart(); // 문장이 그 안에서 시작한 주석 (ddl 앞에서 열었다)
   return isCreateRoutine(lead) ? lead : blank(s, skipped).trim();

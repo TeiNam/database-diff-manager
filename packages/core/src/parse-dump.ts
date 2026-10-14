@@ -57,10 +57,12 @@ export interface VersionMark {
 }
 
 // ALTER 적용이 쓰는 문장 (splitForApply). offset: ddl 의 원문 자리. marks: 이 문장의 덩어리(앞 구분자·DELIMITER 줄 뒤부터 이 문장의 끝까지)에서 렉서가 연 실행 주석
-// 표지 — 문장이 실행 주석 안에서 시작하면 여는 표지는 ddl 앞에 있다 ('/*!99999 ALTER … */;' 의 ddl 은 'ALTER … */')
+// 표지 — 문장이 실행 주석 안에서 시작하면 여는 표지는 ddl 앞에 있다 ('/*!99999 ALTER … */;' 의 ddl 은 'ALTER … */'). spaces: 같은 덩어리에서 렉서가 공백으로
+// 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 Claude F5)
 export interface ApplyStatement extends DumpStatement {
   readonly offset: number;
   readonly marks: readonly VersionMark[];
+  readonly spaces: readonly number[];
 }
 
 // 문장 하나를 만든다: offset 은 ddl 의 원문 자리, from 은 그 덩어리가 시작한 자리 (앞 구분자·DELIMITER 줄 바로 뒤)
@@ -79,10 +81,11 @@ export function splitDump(text: string): DumpStatement[] {
   return scan(text, false, plain).statements;
 }
 
-// ALTER 적용용 splitDump: 문장마다 원문 자리와 그 덩어리에서 연 실행 주석 표지를 더한다 (버전 번호는 apply/version-comment.ts 가 가른다). 덤프 파서는 쓰지 않는다
+// ALTER 적용용 splitDump: 문장마다 원문 자리와 그 덩어리에서 렉서가 알린 것(실행 주석 표지, ASCII 밖 공백)을 더한다 (apply/version-comment.ts·unicode-space.ts 가 본다).
+// 덤프 파서는 쓰지 않는다
 export function splitForApply(text: string): ApplyStatement[] {
-  const marks = new MarkLog();
-  return scan(text, false, (statement, offset, from) => ({ ...statement, offset, marks: marks.take(from) }), marks).statements;
+  const log = new ChunkLog();
+  return scan(text, false, (statement, offset, from) => ({ ...statement, offset, ...log.take(from) }), log).statements;
 }
 
 // 덤프 파일 읽기용: 닫히지 않은 문자열·주석에서 실패하지 않고 끊긴 파일로 표시한다 (그 문장은 terminated=false)
@@ -90,17 +93,23 @@ export function scanDump(text: string): DumpScan {
   return scan(text, true, plain);
 }
 
-// 렉서가 연 실행 주석 표지를 모았다가 문장마다 그 덩어리의 것만 넘긴다. 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 표지는 다음 문장의 덩어리 앞이라 버린다
-class MarkLog implements LexWatch {
+// 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것만 넘긴다. 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 다음 문장의 덩어리 앞이라 버린다
+class ChunkLog implements LexWatch {
   private marks: VersionMark[] = [];
+  private spaces: number[] = [];
 
   versioned(at: number, digits: string): void {
     this.marks.push({ at, digits });
   }
 
-  take(from: number): VersionMark[] {
-    const taken = this.marks.filter((m) => m.at >= from);
+  space(at: number): void {
+    this.spaces.push(at);
+  }
+
+  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces'> {
+    const taken = { marks: this.marks.filter((m) => m.at >= from), spaces: this.spaces.filter((at) => at >= from) };
     this.marks = [];
+    this.spaces = [];
     return taken;
   }
 }
