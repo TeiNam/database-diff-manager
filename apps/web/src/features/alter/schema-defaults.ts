@@ -12,7 +12,8 @@ function resolve(given: Partial<ApplyDefaults>): ApplyDefaults | undefined {
 }
 
 // 문자셋 칸을 고쳤을 때 콜레이션 칸의 새 값. 문자셋만 바꾸면 이전 콜레이션이 새 문자셋의 것이 아니어서 서버가 1253 으로 거부한다.
-// 콜레이션이 이미 새 문자셋의 것이면 그대로 두고(사용자가 먼저 고른 값을 지우지 않는다), 아니면 새 문자셋의 기본 콜레이션으로 맞춘다.
+// collation 은 사용자가 마지막으로 정한 콜레이션(기준)이다 — 글자를 칠 때마다 화면에 나온 이전 결과를 넘기면, 입력 도중 지나는 이름(utf8)에 덮여 원래 값을 잃는다.
+// 기준이 이미 새 문자셋의 것이면 그대로 두고(사용자가 먼저 고른 값을 지우지 않는다), 아니면 새 문자셋의 기본 콜레이션으로 맞춘다.
 // 알 수 없는 문자셋과, 스키마 기본값으로 쓸 수 없는 binary 는 콜레이션을 사용자에게 맡긴다
 export function collationAfterCharset(charset: string, collation: string): string {
   const next = resolve({ charset: charset.trim() });
