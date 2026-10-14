@@ -1,5 +1,6 @@
 // SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
-// (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, unique_checks 등)는 스키마에 영향이 없어 무시한다.
+// (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, unique_checks 등)는 스키마에 영향이 없어 값을 버린다 — 값을 모르는
+// 변수에서 되돌려도 받는다 (리뷰 9회차). 트랜잭션 특성·역할의 SET(SET TRANSACTION·SET ROLE·SET DEFAULT ROLE)도 무시한다.
 // 서버 변수(SET GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)는 이 스크립트의 세션을 바꾸지 않아 무시한다 (서버 sql_mode 를 바꾼 사실만 기억해 뒤의 SET sql_mode = DEFAULT 를 거부하고,
 // 값 안의 저장 함수 호출은 함수가 바꿨을 수 있는 사용자 변수 등을 모르는 값으로 둔다 — stored-call.ts).
 // td-export·마이그레이션 스크립트의 'SET @OLD_X = @@X, X = 0' 저장과 'SET X = @OLD_X' 복원을 따른다
@@ -16,6 +17,12 @@ const SCHEMA_VARIABLES: ReadonlySet<string> = new Set([
   'default_storage_engine', 'storage_engine', 'explicit_defaults_for_timestamp', 'sql_require_primary_key', 'sql_generate_invisible_primary_key',
   'restrict_fk_on_non_standard_key', 'default_collation_for_utf8mb4', 'character_set_database', 'collation_database', 'innodb_strict_mode',
 ]);
+
+// 값을 모델에 쓰는 세션 변수 (소문자, assignSession 이 따라가는 것): FOREIGN_KEY_CHECKS·SQL_MODE 는 값을, time_zone 은 UTC 로 정했는지를 쓴다. 사용자 변수도 뒤 SET 이 읽으므로
+// 값을 쓴다. 그 밖의 세션 변수(unique_checks·sql_notes·character_set_client·collation_connection …)는 값을 버리므로, 값을 모르는 변수(저장하지 않았거나 저장 함수 호출 뒤 잊은
+// 사용자 변수, @@global·@@persist 서버 변수)에서 되돌려도 받는다 — mysqldump·Workbench 꼬리의 'SET UNIQUE_CHECKS = @OLD_UNIQUE_CHECKS' (리뷰 9회차 Claude 참고 1)
+const TRACKED_VARIABLES: ReadonlySet<string> = new Set(['foreign_key_checks', 'sql_mode', 'time_zone']);
+const usesValue = (target: string): boolean => target.startsWith('@') || TRACKED_VARIABLES.has(target);
 
 // MySQL 8.0/8.4 의 SQL_MODE 이름. SHOW CREATE·@@sql_mode 가 내는 순서(MySQL 내부 순서, 8.0.46 실측)대로 둔다 — resolveSqlMode 가 이 순서로 줄 세운다.
 // 8.0 에서 없어진 NO_AUTO_CREATE_USER·MAXDB·ORACLE 같은 이름은 1231
@@ -44,10 +51,17 @@ type Scope = 'session' | 'server';
 // 읽는다 (8.0.46·8.4.11 실측) — 그래서 문장 안의 저장 함수 호출을 대입보다 먼저 기억한다. 사용자 변수는 값을 계산할 때 읽으므로 대입마다 차례로 본다
 export function applySet(st: State, c: Cursor): void {
   c.expectWord('SET');
+  if (isNonSchemaSet(c)) return;
   st.storedCall = storedFunctionCall(st, c.toks) ?? st.storedCall;
   let scope: Scope = 'session';
   for (const toks of splitList(c.toks.slice(c.i), 'SET')) scope = assign(st, new Cursor(toks, c.src), scope);
 }
+
+// 스키마와 이 도구가 따라가는 세션 값에 상관없어 통째로 무시하는 SET (리뷰 9회차 Claude 참고 2): 트랜잭션 특성(SET [GLOBAL|SESSION|…] TRANSACTION ISOLATION LEVEL …·READ ONLY),
+// 활성 역할(SET ROLE …), 계정의 기본 역할(SET DEFAULT ROLE … TO …). MySQL 문법에 식이 들어갈 자리가 없어 저장 함수도 부르지 않는다. c 는 SET 바로 뒤다
+const SCOPE_WORDS: readonly string[] = ['GLOBAL', 'SESSION', 'LOCAL', 'PERSIST', 'PERSIST_ONLY'];
+const isNonSchemaSet = (c: Cursor): boolean =>
+  c.isWord('TRANSACTION') || SCOPE_WORDS.some((w) => c.isWord(w, 'TRANSACTION')) || c.isWord('ROLE') || c.isWord('DEFAULT', 'ROLE');
 
 // 대입 하나. 돌려주는 값은 다음 대입이 물려받는 범위다: 앞에 쓴 GLOBAL·PERSIST·PERSIST_ONLY·SESSION·LOCAL 은 수식어 없는 뒤 대입에도 이어진다
 // (MySQL: 가장 최근 수식어를 따른다). '@@global.x' 처럼 이름에 붙인 범위는 그 대입에만 쓴다
@@ -74,13 +88,11 @@ function scopeWord(a: Cursor): Scope | undefined {
 
 function assignSession(st: State, a: Cursor, target: string): void {
   if (SCHEMA_VARIABLES.has(target)) fail(`이후 테이블 정의 결과를 바꾸는 세션 변수는 받을 수 없습니다: ${target} — ${RE_EXPORT}`);
-  if (!a.acceptOp('=')) {
-    a.expectOp(':');
-    a.expectOp('=');
-  }
+  if (!a.acceptOp('=') && !(a.acceptOp(':') && a.acceptOp('='))) fail(notAssignment(a));
   const written = a.peek(); // 쓴 값의 첫 토큰 (time_zone 은 리터럴만 UTC 로 본다)
-  const value = valueOf(st, a);
+  const value = valueOf(st, a, usesValue(target));
   if (!a.done) fail(`SET 값은 리터럴·@변수·@@변수만 받습니다: ${a.src.slice(a.peek()!.s).trim()}`);
+  if (value === undefined) return; // 값을 버리는 변수에 쓴 모르는 값
   if (target.startsWith('@')) st.saved.set(target, value);
   else if (target === 'foreign_key_checks') st.fkChecks = foreignKeyChecksOf(value);
   else if (target === 'sql_mode') st.sqlMode = sessionSqlMode(st, value);
@@ -125,26 +137,45 @@ function systemName(a: Cursor): Variable {
   return { name: a.ident().toLowerCase(), scope: NAME_SCOPES.get(first) };
 }
 
-function valueOf(st: State, a: Cursor): string {
-  if (a.acceptOp('@')) {
-    if (a.acceptOp('@')) {
-      const source = systemName(a);
-      return source.scope === 'server' ? fail(`서버 변수 값(@@global·@@persist 의 ${source.name})은 알 수 없어 받을 수 없습니다`) : current(st, source.name);
-    }
-    const name = `@${a.ident().toLowerCase()}`;
-    return st.saved.get(name) ?? fail(unknownVariable(st, name));
-  }
+// 쓴 값: 리터럴·@변수·@@변수 (식은 assignSession 이 거부한다 — 값 안의 저장 함수 호출이 숨지 않게 값을 버리는 변수도 같다). 값을 알 수 없는 읽기(저장하지 않았거나 저장 함수
+// 호출 뒤 잊은 사용자 변수, @@global·@@persist 서버 변수)는 required(대상이 값을 쓴다 — usesValue)면 거부하고, 아니면 undefined 다
+function valueOf(st: State, a: Cursor, required: boolean): string | undefined {
+  if (a.acceptOp('@')) return a.acceptOp('@') ? systemValue(st, a, required) : userValue(st, a, required);
   const t = a.next();
   if (t.t === 'string' || t.t === 'number') return t.v;
   if (t.t === 'word') return t.v.toUpperCase();
   return fail(`SET 값을 읽을 수 없습니다: ${t.v}`);
 }
 
-// 값을 모르는 사용자 변수. 무시한 문장이 저장 함수를 부른 뒤로 다시 정하지 않은 변수는 그 함수가 바꿨을 수 있다 (리뷰 7회차 R7-2·8회차)
-const unknownVariable = (st: State, name: string): string =>
-  st.storedCall === undefined
-    ? `값을 저장하지 않은 변수입니다: ${name}`
-    : `사용자 변수 ${name} 의 값을 알 수 없습니다 — 무시한 문장의 저장 함수 호출(\`${st.storedCall}\`)이 이 변수를 바꿨을 수 있는데, 이 도구는 문장을 실행하지 않아 바뀐 값을 모릅니다 — ${RE_EXPORT}`;
+function systemValue(st: State, a: Cursor, required: boolean): string | undefined {
+  const source = systemName(a);
+  if (source.scope !== 'server') return current(st, source.name);
+  return required ? fail(`서버 변수 값(@@global·@@persist 의 ${source.name})은 알 수 없어 받을 수 없습니다`) : undefined;
+}
+
+function userValue(st: State, a: Cursor, required: boolean): string | undefined {
+  const name = `@${a.ident().toLowerCase()}`;
+  const value = st.saved.get(name);
+  if (value === undefined && required) fail(unknownVariable(st, name));
+  return value;
+}
+
+// 값을 모르는 사용자 변수. 무시한 문장이 저장 함수를 부른 뒤로 다시 정하지 않은 변수는 그 함수가 바꿨을 수 있다 (리뷰 7회차 R7-2·8회차). 호출 전에 저장한 변수
+// (mysqldump 머리의 @OLD_SQL_MODE)도 함수가 바꿀 수 있어 저장한 값을 믿지 않는다 — 안내에 그렇게 밝힌다 (리뷰 9회차)
+function unknownVariable(st: State, name: string): string {
+  if (st.storedCall === undefined) return `값을 저장하지 않은 변수입니다: ${name}`;
+  const call = `무시한 문장의 저장 함수 호출(\`${st.storedCall}\`)`;
+  const reason = st.forgotten.has(name)
+    ? `${call}이 이 변수를 바꿨을 수 있습니다. 호출 전에 저장한 값이지만 저장 함수는 어느 사용자 변수든 바꿀 수 있어 그 값을 그대로 쓰지 않는데`
+    : `${call}이 이 변수를 바꿨을 수 있는데`;
+  return `사용자 변수 ${name} 의 값을 알 수 없습니다 — ${reason}, 이 도구는 문장을 실행하지 않아 바뀐 값을 모릅니다 — ${RE_EXPORT}`;
+}
+
+// '변수 = 값' 꼴이 아닌 대입 (SET RESOURCE GROUP …): MySQL 의 다른 SET 문이다. 무엇을 바꾸는지 가르지 않고 받지 않는다 (리뷰 9회차 Claude 참고 2 — "':' 필요" 대신)
+function notAssignment(a: Cursor): string {
+  const end = a.peek() ?? a.toks[a.toks.length - 1];
+  return `'변수 = 값' 꼴이 아닌 SET 은 받지 않습니다: SET ${a.src.slice(a.toks[0].s, end.e)} … — ${RE_EXPORT}`;
+}
 
 const current = (st: State, name: string): string => (name === 'foreign_key_checks' ? (st.fkChecks ? '1' : '0') : name === 'sql_mode' ? st.sqlMode : '');
 

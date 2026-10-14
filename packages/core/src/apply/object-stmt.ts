@@ -1,5 +1,5 @@
 // CREATE·DROP FUNCTION·PROCEDURE, DROP VIEW. 루틴 본문은 쓴 그대로 저장한다 (MySQL SHOW CREATE 도 그렇다)
-import { ParseError, type Cursor } from '../cursor';
+import { DigitLeadingNameError, ParseError, type Cursor } from '../cursor';
 import { tokenize, type Token } from '../lexer';
 import type { Routine, RoutineCharacteristics, RoutineKind } from '../model';
 import { parseRoutine } from '../parse-routine';
@@ -99,7 +99,8 @@ function parseOrFail(ddl: string, noBackslashEscapes: boolean): Routine {
   try {
     return parseRoutine(ddl, { noBackslashEscapes });
   } catch (e) {
-    if (e instanceof ParseError) return fail(`루틴 정의를 읽을 수 없습니다: ${e.message} (MySQL 1064)`);
+    // 따옴표 없는 숫자 시작 이름(1fn)은 MySQL 이 받으므로 MySQL 오류 번호를 붙이지 않는다 (리뷰 9회차 Claude 참고 3)
+    if (e instanceof ParseError) return fail(`루틴 정의를 읽을 수 없습니다: ${e.message}${e instanceof DigitLeadingNameError ? '' : ' (MySQL 1064)'}`);
     throw e;
   }
 }

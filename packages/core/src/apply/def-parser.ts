@@ -98,6 +98,19 @@ function skipReferences(c: Cursor): void {
 
 // 렉서는 '1.2.3' 처럼 숫자와 점이 이어진 것도 숫자 토큰 하나로 읽는다. MySQL 이 받는 10진 리터럴(12, 1.5, 1.)만 통과시킨다
 const isDecimalLiteral = (v: string): boolean => /^\d+(?:\.\d*)?$/.test(v);
+// 숫자 토큰 자리에서 시작하는 지수 표기 (1e3·1.5E-3·2E+10)
+const EXPONENT_LITERAL = /[0-9.]+[eE][+-]?[0-9]+/y;
+
+// 지수 표기 기본값 (리뷰 9회차 Claude 참고 3): 렉서는 1e3 을 숫자 1 과 단어 e3 으로 나눈다 (MySQL 은 실수 리터럴로 읽는다). 렉서는 그대로 두고 지수 없는 숫자나 따옴표로 감싼
+// 값으로 쓰라고 안내한다. 따옴표 값은 FLOAT·DOUBLE·DECIMAL 에서만 같은 값이다 — 문자열 컬럼은 쓴 글자 그대로('1e3'), 정수 컬럼은 1067 이다. sign: 숫자 앞에 쓴 부호
+function assertNotExponent(c: Cursor, n: Token, sign: string): void {
+  const next = c.peek();
+  if (next?.t !== 'word' || next.s !== n.e) return;
+  EXPONENT_LITERAL.lastIndex = n.s;
+  const written = EXPONENT_LITERAL.exec(c.src)?.[0];
+  if (written === undefined) return;
+  fail(`기본값의 지수 표기 숫자(${sign}${written})는 읽지 못합니다 — 지수 없는 숫자로 쓰거나(1e3 → 1000) FLOAT·DOUBLE·DECIMAL 컬럼이면 따옴표로 감싸 주세요('1e3')`);
+}
 
 // DEFAULT 뒤의 값 (ALTER COLUMN … SET DEFAULT 도 쓴다)
 export function parseDefault(c: Cursor): DefaultSpec {
@@ -105,6 +118,7 @@ export function parseDefault(c: Cursor): DefaultSpec {
   if (t.t === 'op' && (t.v === '-' || t.v === '+')) {
     const n = c.next();
     if (n.t !== 'number' || !isDecimalLiteral(n.v)) return fail(`기본값으로 쓸 수 없는 값입니다: ${t.v}${n.v}`);
+    assertNotExponent(c, n, t.v);
     return { kind: 'number', value: (t.v === '-' ? '-' : '') + n.v };
   }
   if (t.t === 'op' && t.v === '(') return fail(`식 기본값 DEFAULT (…)${OUT_OF_SCOPE}`);
@@ -113,6 +127,7 @@ export function parseDefault(c: Cursor): DefaultSpec {
     if (/^[bB]'/.test(t.v)) return { kind: 'bit', value: `b'${t.v.slice(2, -1)}'` };
     if (/^(0[xb]|[xX]')/.test(t.v)) return fail(`16진수 기본값은 1차 지원 범위가 아닙니다 — ${RE_EXPORT}`);
     if (!isDecimalLiteral(t.v)) return fail(`기본값으로 쓸 수 없는 값입니다: ${t.v}`);
+    assertNotExponent(c, t, '');
     return { kind: 'number', value: t.v };
   }
   if (t.t === 'word') {

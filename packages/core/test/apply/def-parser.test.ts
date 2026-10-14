@@ -104,6 +104,20 @@ describe('parseDefault', () => {
     expect(messageOf(() => parseColumnSpec(cur('t DATETIME ON UPDATE CURRENT_TIMESTAMP(10)')))).toContain('(MySQL 1294)');
     expect(messageOf(() => parseDefault(cur('NOW(x)')))).not.toContain('(MySQL');
   });
+
+  // 리뷰 9회차 (Claude 참고 3): 렉서는 지수 표기 1e3 을 숫자 1 과 단어 e3 으로 나눈다 (MySQL 은 실수 리터럴로 읽는다). 렉서는 그대로 두고, 지수 없는 숫자나
+  // 따옴표로 감싼 값으로 쓰라고 안내한다 (문자열 컬럼의 따옴표 값은 쓴 글자 그대로라 숫자로 읽은 값과 다르다 — FLOAT·DOUBLE·DECIMAL 만 따옴표를 권한다)
+  it.each([['1e3', '1e3'], ['1.5E3', '1.5E3'], ['-1e3', '-1e3'], ['1e-3', '1e-3'], ['+2E+10', '+2E+10']])('지수 표기 %s 는 지수 없는 숫자나 따옴표로 감싼 값으로 쓰라고 안내한다', (src, written) => {
+    const message = messageOf(() => parseDefault(cur(src)));
+    expect(message).toContain(`기본값의 지수 표기 숫자(${written})는 읽지 못합니다`);
+    expect(message).toContain('지수 없는 숫자로 쓰거나(1e3 → 1000)');
+    expect(message).toContain("FLOAT·DOUBLE·DECIMAL 컬럼이면 따옴표로 감싸 주세요('1e3')");
+  });
+
+  it('지수 표기가 아닌 숫자 뒤의 단어는 그대로 다음 속성으로 읽는다', () => {
+    expect(parseColumnSpec(cur("d DOUBLE DEFAULT 1 COMMENT 'x'"))).toMatchObject({ default: { kind: 'number', value: '1' }, comment: 'x' });
+    expect(messageOf(() => parseColumnSpec(cur('d DOUBLE DEFAULT 1ea')))).toContain("알 수 없는 컬럼 속성 'ea'");
+  });
 });
 
 describe('1차 지원 범위 밖 안내', () => {

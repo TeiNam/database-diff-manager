@@ -40,6 +40,36 @@ describe('applyScript — 문장 처리', () => {
     expect(JSON.stringify(base)).toBe(before);
     expect(applyScript(base, 'SET NAMES utf8mb4;', { schemaName: 'shop', defaults: { charset: 'latin1', collation: 'utf8mb4_bin' } })).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1253') } });
   });
+
+  // 리뷰 9회차 (Claude 참고 3): 렉서는 따옴표 없는 숫자 시작 이름(2024_sales)을 숫자와 단어로 나눠 이름으로 읽지 못한다 (MySQL 은 숫자로만 되지 않은 이름이면 식별자로 읽는다).
+  // 렉서는 그대로 두고 백틱으로 감싸라고 안내한다
+  it.each([
+    ['ALTER TABLE 2024_sales ADD COLUMN c INT;', '2024_sales'], ['ALTER TABLE t ADD COLUMN 4x INT;', '4x'], ['CREATE TABLE 2025_sales (id INT PRIMARY KEY);', '2025_sales'],
+    ['CREATE TABLE s (id INT PRIMARY KEY, 1st INT);', '1st'], ['DROP TABLE 2024_sales;', '2024_sales'], ['ALTER TABLE t RENAME COLUMN id TO 1st;', '1st'], ['ALTER TABLE t ADD INDEX 1ix (id);', '1ix'],
+  ])('따옴표 없는 숫자 시작 이름 %s 는 백틱으로 감싸라고 안내한다', (sql, name) => {
+    expect(run(sql)).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining(`숫자로 시작하는 이름(${name})은 백틱(\`)으로 감싸 주세요`) } });
+  });
+
+  it('루틴 이름도 같이 안내하고, MySQL 은 받는 이름이라 MySQL 오류 번호(1064)를 붙이지 않는다', () => {
+    const r = run('CREATE FUNCTION 1fn() RETURNS INT DETERMINISTIC RETURN 1;');
+    expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('숫자로 시작하는 이름(1fn)은 백틱(`)으로 감싸 주세요') } });
+    expect(!r.ok && r.error.reason).not.toContain('MySQL 1064');
+  });
+
+  it('백틱으로 감싼 숫자 시작 이름은 받는다', () => {
+    expect(run('ALTER TABLE t ADD COLUMN `4x` INT, ADD INDEX `1ix` (id);\nCREATE TABLE `2025_sales` (id INT PRIMARY KEY, `1st` INT);')).toMatchObject({ ok: true, applied: 2 });
+  });
+
+  // 지수 표기 기본값도 같다: 렉서가 1e3 을 숫자와 단어로 나눈다 — 지수 없는 숫자나 (실수·DECIMAL 컬럼이면) 따옴표로 감싼 값으로 쓰라고 안내한다
+  it.each(['ALTER TABLE t ADD COLUMN d DOUBLE DEFAULT 1e3;', 'ALTER TABLE t ALTER COLUMN id SET DEFAULT 1e3;', 'CREATE TABLE s (id INT PRIMARY KEY, d DECIMAL(10,2) DEFAULT -1.5E3);'])(
+    '지수 표기 기본값 %s 는 지수 없는 숫자나 따옴표로 감싼 값으로 쓰라고 안내한다',
+    (sql) => expect(run(sql)).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('기본값의 지수 표기 숫자(') } }),
+  );
+
+  it("안내대로 쓴 지수 없는 숫자(1000)와 따옴표 값('1e3')은 DOUBLE 컬럼에서 같은 기본값이 된다", () => {
+    const r = run("ALTER TABLE t ADD COLUMN d DOUBLE DEFAULT 1000, ADD COLUMN e DOUBLE DEFAULT '1e3';");
+    expect(r.ok && r.model.tables[0].columns.slice(1).map((col) => col.default)).toEqual(["'1000'", "'1000'"]);
+  });
 });
 
 // 이미 MySQL 에서 돈 스크립트에 흔한, 스키마(SHOW CREATE 결과)를 바꾸지 않는 문장은 무시한다: 트랜잭션 제어, LOCK·UNLOCK TABLES, 데이터 문장, 권한, 서버 변수(SET GLOBAL·PERSIST),
@@ -205,6 +235,13 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
     (call, name) => expectForgotten(run(setMScript(call, '1set_m')), 4, name),
   );
 
+  // 리뷰 9회차 R9-2: 현재 스키마로 한정한 자리('.' 바로 뒤)는 숫자처럼 보이는 이름도 식별자다 — shop.0xface() 는 저장 함수 0xface 를 부른다 (8.0.46·8.4.11 실측).
+  // 렉서는 0xface·0b101·123 을 16진수·비트·숫자 리터럴로 읽는다
+  it.each([['SELECT shop.0xface();', '0xface'], ['DO shop.0b101();', '0b101'], ['INSERT INTO t VALUES (shop.123());', '123'], ['SELECT shop.`0xface`();', '0xface']])(
+    '현재 스키마로 한정한 숫자처럼 보이는 이름의 저장 함수 호출 %s 도 사용자 변수를 잊게 한다 (R9-2)',
+    (call, name) => expectForgotten(run(setMScript(call, name)), 4, `shop.${name}`),
+  );
+
   // 리뷰 8회차 (Claude 참고 1): 임시 도우미 함수로 데이터를 고친 뒤 지우는 마이그레이션. 뒤에서 사용자 변수를 읽지 않으므로 받고, 최종 모델은 ALTER 만 적용한 것과 같다
   it('도우미 함수를 만들어 UPDATE 로 부른 뒤 지우는 마이그레이션을 받고, 최종 모델은 ALTER 만 적용한 모델과 같다', () => {
     const script = ['DELIMITER //', 'CREATE FUNCTION fn(x INT) RETURNS INT DETERMINISTIC BEGIN RETURN x + 1; END//', 'DELIMITER ;', 'UPDATE t SET id = fn(id);', 'DROP FUNCTION fn;', 'ALTER TABLE t ADD COLUMN c INT;'].join('\n');
@@ -234,6 +271,16 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
     '이름이 같은 저장 함수가 있을 때 %s 는 저장 함수 호출로 본다 (R8-1 대조군)',
     (call, name) => expectForgotten(run(`${COLLIDING}\n${MODE}\n${call}\n${READ}\n${ALTER}`), 8, name),
   );
+
+  // 리뷰 9회차 R9-1: 바로 '(' 가 붙어야 내장 함수인 이름(NOW·COUNT … 15개)이 아니면, 이름과 괄호 사이에 공백·주석을 끼워도 MySQL 은 내장 함수를 부른다 (8.0.46·8.4.11 실측)
+  it('이름이 같은 저장 함수가 있어도 공백·주석을 끼운 CONCAT (…)·IFNULL/**/(…) 같은 내장 함수 호출은 사용자 변수를 그대로 둔다 (R9-1)', () => {
+    const spaced = "INSERT INTO t VALUES (CONCAT ('a','b')), (IFNULL/**/(NULL, 1)), (COALESCE\n(NULL, 2)), (JSON_OBJECT ('a', 1));";
+    expect(sqlModeOfP(run(`${COLLIDING}\n${MODE}\n${spaced}\n${READ}\n${PROC}`))).toBe('NO_ENGINE_SUBSTITUTION');
+    // Codex 재현: @OLD_SQL_MODE 저장·복원 사이에서 이름이 같은 저장 함수가 있는 CONCAT ( 을 불러도 복원을 받는다
+    const dump = ['CREATE FUNCTION `concat`() RETURNS INT DETERMINISTIC NO SQL RETURN 1;', "SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO';",
+      "INSERT INTO t VALUES (CONCAT ('a','b'));", ALTER, 'SET SQL_MODE=@OLD_SQL_MODE;', PROC].join('\n');
+    expect(sqlModeOfP(run(dump))).toBe(DEFAULT_SQL_MODE);
+  });
 
   it("저장 함수를 부르지 않는 무시 문장(내장 함수·모델에 없는 이름·프로시저·INTO 뒤 테이블·문자열과 주석 속 글자)은 사용자 변수를 그대로 둔다", () => {
     for (const sql of [
