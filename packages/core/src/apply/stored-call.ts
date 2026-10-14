@@ -3,7 +3,7 @@
 // 이름이 같은 저장 함수가 있어도 MySQL 이 내장 함수를 부르는 꼴은 native-functions.ts 가 가른다
 import type { Token } from '../lexer';
 import { callsNativeFunction } from './native-functions';
-import { isUnknown, routineKey, type State } from './state';
+import { routineKey, type State } from './state';
 
 const DIGITS = /^[0-9]+$/;
 const isOp = (t: Token | undefined, v: string): boolean => t?.t === 'op' && t.v === v;
@@ -46,11 +46,12 @@ function calleeBefore(toks: readonly Token[], open: number): Callee | undefined 
 const hasMode = (sqlMode: string, mode: string): boolean => sqlMode.split(',').includes(mode);
 
 // 호출을 읽는 세션 SQL_MODE 의 IGNORE_SPACE (리뷰 10회차 R10-1 — 공백을 끼운 NOW () 도 내장 함수가 된다). 모르면 undefined: 세션 SQL_MODE 를 모르거나(앞의 SET 이 값을 모르는
-// 변수에서 정했다), 처음 세션 SQL_MODE(서버가 기준 버전 루틴에서 짐작한 값 — 설계 4장)에 IGNORE_SPACE 가 있어 지금 값의 IGNORE_SPACE 가 짐작에서 왔을 수 있다 (보수적)
+// 변수에서 정했다), 지금 값이 처음 세션 SQL_MODE(서버가 기준 버전 루틴에서 짐작한 값 — 설계 4장)에서 왔을 수 있다 — SET 없이 시작했거나 DEFAULT·변수로 짐작한 값에 돌아왔다
+// (보수적). 리터럴로 정했으면 짐작한 값과 같아도 그 값을 따른다 (리뷰 11회차 R11-1 — 판정은 늘 지금 아는 모드를 따른다)
 function ignoreSpace(st: State): boolean | undefined {
   if (st.sqlModeUnknown !== undefined) return undefined;
   if (!hasMode(st.sqlMode, 'IGNORE_SPACE')) return false;
-  return hasMode(st.initialSqlMode, 'IGNORE_SPACE') ? undefined : true;
+  return st.sqlModeLiteral || st.sqlMode !== st.initialSqlMode ? true : undefined;
 }
 
 // 스키마 없이 쓴 이름이 MySQL 이 내장 함수로 읽는 꼴인가 (native-functions.ts — 이름과 '(' 사이의 원문으로 공백·주석을 가른다). 이름 토큰이 단어여야 한다 (백틱·숫자로 시작하는
@@ -87,14 +88,15 @@ export function storedFunctionCall(st: State, toks: readonly Token[], src: strin
 }
 
 // 무시하는 문장(조회·데이터 문장, 값을 버리는 서버 변수 대입 — no-op.ts·session.ts)이 저장 함수를 부르면, 함수가 바꿨을 수 있는 세션 상태를 모르는 값으로 둔다 (리뷰 8회차):
-// 사용자 변수는 모두 잊고(다른 변수에서 옮긴 값도 함께 — 함수는 어느 변수든 바꿀 수 있다. 저장한 값을 잊은 이름은 안내에 쓰려고 st.forgotten 에 남긴다), UTC 로 정한 세션
+// 사용자 변수는 모두 잊고(다른 변수에서 옮긴 값도 함께 — 함수는 어느 변수든 바꿀 수 있다. 호출 전에 저장한 이름은 안내에 쓰려고 st.forgotten 에 남긴다 — 이미 모르는 값이었던
+// 것도 같다: mysqldump 머리의 'SET @OLD_TIME_ZONE=@@TIME_ZONE' 은 따라가지 않는 변수를 읽어 모르는 값이지만 꼬리가 되돌리는 저장한 값이다, 리뷰 11회차 R11-3), UTC 로 정한 세션
 // time_zone 도 UTC 로 보지 않으며, 전역 sql_mode 도 바뀌었을 수 있다고 기억한다 (st.storedCall — 뒤의 SET sql_mode = DEFAULT 가 정한 세션 값을 모른다). 세션 sql_mode·
 // FOREIGN_KEY_CHECKS 는 MySQL 이 함수에서 돌아올 때 되돌린다 (8.0.46·8.4.11 실측).
 // 한계: 함수가 바꾼 그 밖의 세션 변수(default_storage_engine 등)는 따라가지 않는다 — 막으려면 호출 뒤의 CREATE TABLE 을 거의 모두 거부해야 한다 (설계 3.2)
 // call: 그 문장이(SET 문이면 그 대입이) 부르는 저장 함수 (storedFunctionCall, 없으면 undefined — 아무것도 바꾸지 않는다)
 export function forgetStateChangedBy(st: State, call: string | undefined): void {
   if (call === undefined) return;
-  for (const [name, value] of st.saved) if (!isUnknown(value)) st.forgotten.add(name);
+  for (const name of st.saved.keys()) st.forgotten.add(name);
   st.saved.clear();
   if (st.timeZoneUtc) st.timeZoneUnknown = `무시한 문장의 저장 함수 호출(\`${call}\`)이 세션 시간대를 바꿨을 수 있어`;
   st.timeZoneUtc = false;

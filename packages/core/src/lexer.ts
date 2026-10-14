@@ -18,12 +18,22 @@ const HEX_BIT = /0x[0-9A-Fa-f]+|0b[01]+|[xX]'[0-9A-Fa-f]*'|[bB]'[01]*'/y;
 // \% 와 \_ 는 LIKE 패턴 밖에서 백슬래시를 남긴 두 글자다 (MySQL 8.0.46·8.4.11 실측, 매뉴얼 "String Literals"). 그 밖의 모르는 이스케이프는 백슬래시만 버린다
 const ESCAPES: Record<string, string> = { '0': '\0', n: '\n', r: '\r', t: '\t', Z: '\x1a', b: '\b', '%': '\\%', _: '\\_' };
 
+// 렉서가 토큰 없이 지나가는 것 가운데 ALTER 적용이 따로 보는 것 (리뷰 11회차 R11-2·Claude F5). 덤프 파서는 주지 않으므로 토큰은 그대로다
+export interface LexWatch {
+  // '/*!' 를 실행 주석으로 열었다: at 은 '/*!' 의 원문 자리, digits 는 뒤에 붙은 버전 숫자 ('' 이면 번호 없음)
+  versioned(at: number, digits: string): void;
+  // ASCII 가 아닌 공백(NBSP U+00A0·U+3000·U+FEFF … — JS 의 \s)을 토큰 사이 공백으로 건너뛰었다 (MySQL 은 이름의 글자로 읽는다). at 은 그 글자의 원문 자리
+  space(at: number): void;
+}
+
 // 문자열 규칙. noBackslashEscapes: SQL_MODE 의 NO_BACKSLASH_ESCAPES (백슬래시를 이스케이프로 보지 않음)
 // discardVersioned: 버전 번호가 붙은 버전 주석(/*!NNNNN …*/)을 그 버전보다 낮은 서버처럼 주석으로 건너뛴다 (첫 '*/' 까지 —
 // 서버는 그 안의 따옴표를 보지 않는다). 번호 없는 '/*!' 는 어느 서버든 실행하므로 그대로 토큰으로 읽는다
+// watch: 실행 주석의 여는 표지와 건너뛴 ASCII 밖 공백을 알린다 (LexWatch — 토큰은 바뀌지 않는다)
 export interface LexMode {
   noBackslashEscapes?: boolean;
   discardVersioned?: boolean;
+  watch?: LexWatch;
 }
 
 export function tokenize(src: string, mode: LexMode = {}): Token[] {
@@ -36,23 +46,17 @@ export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
   let versioned = 0; // 열려 있는 /*!NNNNN 주석 수
   while (i < src.length) {
     const c = src[i];
-    if (/\s/.test(c)) { i++; continue; }
-    if (src.startsWith('/*!', i) && !(mode.discardVersioned === true && DIGIT.test(src[i + 3] ?? ''))) {
-      i += 3;
-      while (i < src.length && DIGIT.test(src[i])) i++;
+    if (/\s/.test(c)) { if (c.charCodeAt(0) > 0x7f) mode.watch?.space(i); i++; continue; }
+    const marked = versionMarkEnd(src, i, mode);
+    if (marked >= 0) {
+      i = marked;
       versioned++;
       continue;
     }
     if (versioned > 0 && src.startsWith('*/', i)) { i += 2; versioned--; continue; }
-    if (src.startsWith('/*', i)) {
-      const end = src.indexOf('*/', i + 2);
-      if (end < 0) throw new LexError(`닫히지 않은 주석 (위치 ${i})`);
-      i = end + 2;
-      continue;
-    }
-    if (isDashComment(src, i) || c === '#') {
-      const end = src.indexOf('\n', i);
-      i = end < 0 ? src.length : end + 1;
+    const comment = commentEnd(src, i);
+    if (comment >= 0) {
+      i = comment;
       continue;
     }
     if (c === '`' || c === "'" || c === '"') {
@@ -84,6 +88,27 @@ export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
     yield { t: 'op', v: c, s: i, e: i + 1 };
     i++;
   }
+}
+
+// i 자리의 '/*!' 실행 주석 표지 바로 뒤 자리 — 표지는 뒤에 붙은 버전 숫자까지다. 표지가 아니거나 discardVersioned 로 주석이 되면 -1
+function versionMarkEnd(src: string, i: number, mode: LexMode): number {
+  if (!src.startsWith('/*!', i) || (mode.discardVersioned === true && DIGIT.test(src[i + 3] ?? ''))) return -1;
+  let end = i + 3;
+  while (end < src.length && DIGIT.test(src[end])) end++;
+  mode.watch?.versioned(i, src.slice(i + 3, end));
+  return end;
+}
+
+// i 자리에서 시작하는 주석(블록 '/* … */', '-- …', '# …')의 끝 바로 뒤 자리. 주석이 아니면 -1
+function commentEnd(src: string, i: number): number {
+  if (src.startsWith('/*', i)) {
+    const end = src.indexOf('*/', i + 2);
+    if (end < 0) throw new LexError(`닫히지 않은 주석 (위치 ${i})`);
+    return end + 2;
+  }
+  if (!isDashComment(src, i) && src[i] !== '#') return -1;
+  const end = src.indexOf('\n', i);
+  return end < 0 ? src.length : end + 1;
 }
 
 // '--' 줄 주석: 뒤에 공백·탭·개행 같은 공백 문자나 제어 문자가 오거나 입력이 끝나야 한다 (MySQL 서버 sql_lex.cc 규칙).

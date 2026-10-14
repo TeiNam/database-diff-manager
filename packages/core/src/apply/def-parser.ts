@@ -5,6 +5,7 @@ import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import type { ColumnFormat, ColumnStorage, ForeignKey, Index, IndexKind } from '../model';
 import { indexKind, parseForeignKey, parseIndex, refAction } from '../parse-table';
+import { assertCommentLength } from './comment-length';
 import { splitList } from './lists';
 import { ER_INVALID_DEFAULT, ER_INVALID_ON_UPDATE, normalizeUserType } from './normalize-mysql';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type DefaultSpec, type NowSpec, type Position, type TableItem } from './types';
@@ -52,8 +53,10 @@ function columnAttr(c: Cursor, s: ColumnSpec): void {
   else if (c.acceptWord('UNIQUE')) {
     c.acceptWord('KEY');
     s.unique = true;
-  } else if (c.acceptWord('COMMENT')) s.comment = c.string();
-  else if (c.acceptWord('CHARACTER', 'SET') || c.acceptWord('CHARSET')) s.charset = wordName(c, '문자셋', ER_UNKNOWN_CHARACTER_SET);
+  } else if (c.acceptWord('COMMENT')) {
+    s.comment = c.string();
+    assertCommentLength('column', s.name, s.comment); // 1024자 (리뷰 11회차 Claude F1)
+  } else if (c.acceptWord('CHARACTER', 'SET') || c.acceptWord('CHARSET')) s.charset = wordName(c, '문자셋', ER_UNKNOWN_CHARACTER_SET);
   else if (c.acceptWord('COLLATE')) s.collation = wordName(c, '콜레이션', ER_UNKNOWN_COLLATION);
   else if (c.acceptWord('VISIBLE')) s.invisible = false;
   else if (c.acceptWord('INVISIBLE')) s.invisible = true;
@@ -205,6 +208,7 @@ export function parseIndexBody(c: Cursor, kind: IndexKind, name = ''): Index {
   const keyParts = c.isOp('(') ? topLevelLists(c)[0] : undefined; // 닫히지 않았으면 undefined — parseIndex 가 ParseError 를 낸다
   if (keyParts) checkList(keyParts, '키 파트');
   const { comment, ...parsed } = parseIndex(c, kind, name);
+  if (comment !== undefined) assertCommentLength('index', kind === 'PRIMARY' ? 'PRIMARY' : name, comment); // 1024자 (리뷰 11회차 Claude F1)
   const index: Index = comment ? { ...parsed, comment } : parsed;
   if (index.using !== undefined && !INDEX_TYPES.has(index.using)) badIndexType(index.using); // 키 파트 뒤에 쓴 USING (parse-table 은 \w+ 만 본다)
   if (index.keyBlockSize !== undefined && !Number.isSafeInteger(index.keyBlockSize)) fail('KEY_BLOCK_SIZE 는 정수여야 합니다 (MySQL 1064)');

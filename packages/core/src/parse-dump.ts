@@ -1,7 +1,7 @@
 // td-export SQL 파일 → SchemaModel
 import { isCreateTable, SqlTrail, sqlEvidence } from './completeness';
 import { lineOf } from './cursor';
-import { LexError, lexTokens, tokenize, type LexMode, type Token } from './lexer';
+import { LexError, lexTokens, tokenize, type LexMode, type LexWatch, type Token } from './lexer';
 import { UNIDENTIFIED_NAME, type Routine, type RoutineKind, type SchemaModel, type Table, type View } from './model';
 import { normalizeDdl, normalizeRoutineDdl } from './normalize';
 import { parseRoutine } from './parse-routine';
@@ -44,11 +44,30 @@ export interface DumpStatement {
   terminated: boolean; // 구분자로 끝났는지 (false: 파일 끝에서 끊긴 마지막 문장)
 }
 
-export interface DumpScan {
-  statements: DumpStatement[];
+export interface DumpScan<S extends DumpStatement = DumpStatement> {
+  statements: S[];
   // 파일이 문자열·주석 안에서 끝났다 (끊긴 파일). 그 앞까지의 문장만 statements 에 있고, 끊긴 문장은 terminated=false 로 남는다
   truncated: boolean;
 }
+
+// 실행 주석의 여는 표지 (ALTER 적용, 리뷰 11회차 R11-2): '/*!' 의 원문 자리와 뒤에 붙은 버전 숫자 ('' 은 번호 없는 '/*!')
+export interface VersionMark {
+  readonly at: number;
+  readonly digits: string;
+}
+
+// ALTER 적용이 쓰는 문장 (splitForApply). offset: ddl 의 원문 자리. marks: 이 문장의 덩어리(앞 구분자·DELIMITER 줄 뒤부터 이 문장의 끝까지)에서 렉서가 연 실행 주석
+// 표지 — 문장이 실행 주석 안에서 시작하면 여는 표지는 ddl 앞에 있다 ('/*!99999 ALTER … */;' 의 ddl 은 'ALTER … */'). spaces: 같은 덩어리에서 렉서가 공백으로
+// 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 Claude F5)
+export interface ApplyStatement extends DumpStatement {
+  readonly offset: number;
+  readonly marks: readonly VersionMark[];
+  readonly spaces: readonly number[];
+}
+
+// 문장 하나를 만든다: offset 은 ddl 의 원문 자리, from 은 그 덩어리가 시작한 자리 (앞 구분자·DELIMITER 줄 바로 뒤)
+type MakeStatement<S> = (statement: DumpStatement, offset: number, from: number) => S;
+const plain: MakeStatement<DumpStatement> = (statement) => statement;
 
 // 문장 끝: 기본은 ';', 'DELIMITER x' 줄 뒤로는 x ('DELIMITER ;' 로 복귀, x 는 delimiterArg). 문자열·주석 안의 구분자는 토큰화에서 이미 빠진다.
 // DELIMITER 줄은 클라이언트 명령이라 문장으로 내보내지 않는다
@@ -59,31 +78,61 @@ export function splitStatements(text: string): { ddl: string; line: number }[] {
 // splitStatements + 세션 SQL_MODE 추적. mysql 클라이언트처럼 SET … SQL_MODE 가 바꾼 문자열 규칙(NO_BACKSLASH_ESCAPES)으로 뒤 문장을 읽는다.
 // 닫히지 않은 문자열·주석은 LexError 로 실패한다
 export function splitDump(text: string): DumpStatement[] {
-  return scan(text, false).statements;
+  return scan(text, false, plain).statements;
+}
+
+// ALTER 적용용 splitDump: 문장마다 원문 자리와 그 덩어리에서 렉서가 알린 것(실행 주석 표지, ASCII 밖 공백)을 더한다 (apply/version-comment.ts·unicode-space.ts 가 본다).
+// 덤프 파서는 쓰지 않는다
+export function splitForApply(text: string): ApplyStatement[] {
+  const log = new ChunkLog();
+  return scan(text, false, (statement, offset, from) => ({ ...statement, offset, ...log.take(from) }), log).statements;
 }
 
 // 덤프 파일 읽기용: 닫히지 않은 문자열·주석에서 실패하지 않고 끊긴 파일로 표시한다 (그 문장은 terminated=false)
 export function scanDump(text: string): DumpScan {
-  return scan(text, true);
+  return scan(text, true, plain);
 }
 
-function scan(text: string, lenient: boolean): DumpScan {
-  const out: DumpStatement[] = [];
+// 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것만 넘긴다. 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 다음 문장의 덩어리 앞이라 버린다
+class ChunkLog implements LexWatch {
+  private marks: VersionMark[] = [];
+  private spaces: number[] = [];
+
+  versioned(at: number, digits: string): void {
+    this.marks.push({ at, digits });
+  }
+
+  space(at: number): void {
+    this.spaces.push(at);
+  }
+
+  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces'> {
+    const taken = { marks: this.marks.filter((m) => m.at >= from), spaces: this.spaces.filter((at) => at >= from) };
+    this.marks = [];
+    this.spaces = [];
+    return taken;
+  }
+}
+
+function scan<S extends DumpStatement>(text: string, lenient: boolean, make: MakeStatement<S>, watch?: LexWatch): DumpScan<S> {
+  const out: S[] = [];
   const session = new SessionMode();
-  const mode: LexMode = {};
+  const mode: LexMode = watch ? { watch } : {};
   let start: Token | undefined;
+  let from = 0; // 지금 덩어리가 시작한 자리 (앞 구분자·DELIMITER 줄 바로 뒤)
   let delimiter = ';';
   let skipUntil = 0; // DELIMITER 줄·구분자를 건너뛸 끝 오프셋
   const lineAt = lineCounter(text);
   const emit = (end: number, terminated: boolean) => {
     const ddl = text.slice(start!.s, end).trim();
-    out.push({ ddl, line: lineAt(start!.s), noBackslashEscapes: mode.noBackslashEscapes === true, terminated });
+    out.push(make({ ddl, line: lineAt(start!.s), noBackslashEscapes: mode.noBackslashEscapes === true, terminated }, start!.s, from));
     session.apply(ddl);
     mode.noBackslashEscapes = session.noBackslashEscapes;
   };
   try {
     for (const t of lexTokens(text, mode)) {
       if (t.e <= skipUntil) continue;
+      if (!start) from = skipUntil;
       if (!start && isDelimiterCommand(text, t)) {
         const end = lineEnd(text, t.s);
         delimiter = delimiterArg(text.slice(t.e, end));

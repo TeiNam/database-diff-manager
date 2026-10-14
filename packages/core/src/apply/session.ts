@@ -1,5 +1,6 @@
-// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
-// (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, unique_checks 등)는 스키마에 영향이 없어 값을 버린다 — 값을 모르는
+// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 세션 문자셋(SET NAMES·CHARACTER SET,
+// character_set_client·character_set_connection·collation_connection)도 따라간다 (client-charset.ts, 리뷰 11회차 Claude F4). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
+// (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(unique_checks·sql_notes 등)는 스키마에 영향이 없어 값을 버린다 — 값을 모르는
 // 변수에서 되돌려도 받는다 (리뷰 9회차). 값을 쓰는 대상(사용자 변수, 세션 SQL_MODE·TIME_ZONE·FOREIGN_KEY_CHECKS)도 값을 모르는 변수에서 정하면 그 SET 에서 거부하지 않고
 // 모르는 값으로 둔다 — 그 값에 기대는 뒤 문장만 거부한다 (리뷰 10회차, unknown-session.ts). 트랜잭션 특성·역할·자원 그룹의 SET(SET TRANSACTION·SET ROLE·SET DEFAULT ROLE·
 // SET RESOURCE GROUP)도 무시한다.
@@ -8,9 +9,10 @@
 // td-export·마이그레이션 스크립트의 'SET @OLD_X = @@X, X = 0' 저장과 'SET X = @OLD_X' 복원을 따른다
 import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
+import { assignCharset, CHARSET_VARIABLES, currentCharset, namesWrite } from './client-charset';
 import { splitList } from './lists';
 import { baseType } from './normalize-mysql';
-import { isUnknown, type SessionValue, type State } from './state';
+import { cappedReason, isUnknown, type SessionValue, type State } from './state';
 import { forgetStateChangedBy, storedFunctionCall } from './stored-call';
 import { DEFAULT_SQL_MODE, fail, RE_EXPORT, type DefaultSpec } from './types';
 
@@ -20,11 +22,11 @@ const SCHEMA_VARIABLES: ReadonlySet<string> = new Set([
   'restrict_fk_on_non_standard_key', 'default_collation_for_utf8mb4', 'character_set_database', 'collation_database', 'innodb_strict_mode',
 ]);
 
-// 값을 모델에 쓰는 세션 변수 (소문자, assignSession 이 따라가는 것): FOREIGN_KEY_CHECKS·SQL_MODE 는 값을, time_zone 은 UTC 로 정했는지를 쓴다. 사용자 변수도 뒤 SET 이 읽으므로
-// 값을 쓴다 — 값을 모르는 변수에서 정하면 모르는 값을 기억한다 (setUnknown). 그 밖의 세션 변수(unique_checks·sql_notes·character_set_client·collation_connection …)는 값을
+// 값을 쓰는 세션 변수 (소문자, assignValue 가 따라가는 것): FOREIGN_KEY_CHECKS·SQL_MODE 는 값을, time_zone 은 UTC 로 정했는지를, 문자셋 변수는 문자셋을 쓴다. 사용자 변수도
+// 뒤 SET 이 읽으므로 값을 쓴다 — 값을 모르는 변수에서 정하면 모르는 값을 기억한다 (setUnknown). 그 밖의 세션 변수(unique_checks·sql_notes·character_set_results …)는 값을
 // 버리므로, 값을 모르는 변수(저장하지 않았거나 저장 함수 호출 뒤 잊은 사용자 변수, @@global·@@persist 서버 변수)에서 되돌려도 받는다 — mysqldump·Workbench 꼬리의
 // 'SET UNIQUE_CHECKS = @OLD_UNIQUE_CHECKS' (리뷰 9회차 Claude 참고 1)
-const TRACKED_VARIABLES: ReadonlySet<string> = new Set(['foreign_key_checks', 'sql_mode', 'time_zone']);
+const TRACKED_VARIABLES: ReadonlySet<string> = new Set(['foreign_key_checks', 'sql_mode', 'time_zone', ...CHARSET_VARIABLES]);
 const usesValue = (target: string): boolean => target.startsWith('@') || TRACKED_VARIABLES.has(target);
 
 // MySQL 8.0/8.4 의 SQL_MODE 이름. SHOW CREATE·@@sql_mode 가 내는 순서(MySQL 내부 순서, 8.0.46 실측)대로 둔다 — resolveSqlMode 가 이 순서로 줄 세운다.
@@ -50,19 +52,29 @@ const FK_CHECKS_ON: ReadonlySet<string> = new Set(['1', 'ON', 'TRUE']);
 // 대입의 범위. server: GLOBAL·PERSIST·PERSIST_ONLY — 서버 값을 바꾸고 이 스크립트의 세션 값은 그대로라 무시한다
 type Scope = 'session' | 'server';
 
-// MySQL 은 대입의 값을 모두 먼저 계산하고(이때 저장 함수가 돈다) 차례로 대입한다. DEFAULT 는 대입할 때 전역 값을 읽으므로, 뒤 대입이 부르는 저장 함수가 바꾼 전역 sql_mode 를
-// 읽는다 (8.0.46·8.4.11 실측) — 그래서 문장 안의 저장 함수 호출을 대입보다 먼저 기억한다. 사용자 변수는 값을 계산할 때 읽으므로 대입마다 차례로 본다.
-// 저장 함수 호출은 문장을 읽을 때의 세션 SQL_MODE(IGNORE_SPACE)로 대입보다 먼저 가린다 — 앞 대입이 바꾼 sql_mode 로 뒤 대입을 읽지 않는다 (리뷰 10회차 R10-1)
+// 2단계에서 차례로 반영할 대입 하나 (applySet)
+type Write = () => void;
+
+// MySQL 은 대입의 값을 모두 먼저 계산하고(이때 저장 함수가 돈다) 그 뒤에 차례로 대입한다 (set_var.cc sql_set_variables — 리뷰 11회차 Claude F2, 8.0.46·8.4.11 실측).
+// 1단계는 값을 차례로 계산한다: 사용자 변수·@@변수는 대입하기 전의 값을 읽으므로 'SET SQL_MODE = …, @OLD_SQL_MODE = @@SQL_MODE' 의 @OLD_SQL_MODE 는 문장 전의 값이고,
+// 값을 계산하다 부른 저장 함수가 바꿨을 수 있는 값은 그 뒤에 계산하는 값부터 모른다 (forgetStateChangedBy). 2단계는 대입을 차례로 반영한다 — 호출 앞에서 계산한 대입도
+// 호출 뒤에 반영하므로 그 값을 안다. DEFAULT 는 대입할 때 전역 값을 읽어 앞 대입의 GLOBAL·뒤 대입이 부르는 저장 함수가 바꾼 전역 sql_mode 를 읽는다 — 그래서 문장 안의
+// 저장 함수 호출을 먼저 기억한다. 저장 함수 호출은 문장을 읽을 때의 세션 SQL_MODE(IGNORE_SPACE)로 먼저 가린다 — 앞 대입이 바꾼 sql_mode 로 뒤 대입을 읽지 않는다
+// (리뷰 10회차 R10-1)
 export function applySet(st: State, c: Cursor): void {
   c.expectWord('SET');
   if (isNonSchemaSet(c)) return;
   const items = splitList(c.toks.slice(c.i), 'SET');
   const calls = items.map((toks) => storedFunctionCall(st, toks, c.src));
   st.storedCall = calls.find((call) => call !== undefined) ?? st.storedCall;
+  const writes: Write[] = [];
   let scope: Scope = 'session';
   items.forEach((toks, k) => {
-    scope = assign(st, new Cursor(toks, c.src), scope, calls[k]);
+    const item = evaluate(st, new Cursor(toks, c.src), scope, calls[k]);
+    scope = item.scope;
+    if (item.write) writes.push(item.write);
   });
+  for (const write of writes) write();
 }
 
 // 스키마와 이 도구가 따라가는 세션 값에 상관없어 통째로 무시하는 SET (리뷰 9회차 Claude 참고 2·10회차 참고 3·4): 트랜잭션 특성(SET [GLOBAL|SESSION|LOCAL|PERSIST|PERSIST_ONLY]
@@ -78,22 +90,21 @@ function isNonSchemaSet(c: Cursor): boolean {
   return true;
 }
 
-// 대입 하나. call: 이 대입의 값이 부르는 저장 함수 (applySet 이 문장을 읽을 때 가렸다). 돌려주는 값은 다음 대입이 물려받는 범위다: 앞에 쓴 GLOBAL·PERSIST·PERSIST_ONLY·
-// SESSION·LOCAL 은 수식어 없는 뒤 대입에도 이어진다 (MySQL: 가장 최근 수식어를 따른다). '@@global.x' 처럼 이름에 붙인 범위는 그 대입에만 쓴다
-function assign(st: State, a: Cursor, inherited: Scope, call: string | undefined): Scope {
-  if (a.isWord('NAMES') || a.isWord('CHARACTER') || a.isWord('CHARSET')) return inherited;
+// 대입 하나의 값을 계산한다 (1단계). call: 이 대입의 값이 부르는 저장 함수 (applySet 이 문장을 읽을 때 가렸다). scope 는 다음 대입이 물려받는 범위다: 앞에 쓴 GLOBAL·
+// PERSIST·PERSIST_ONLY·SESSION·LOCAL 은 수식어 없는 뒤 대입에도 이어진다 (MySQL: 가장 최근 수식어를 따른다). '@@global.x' 처럼 이름에 붙인 범위는 그 대입에만 쓴다.
+// write 는 2단계에서 반영할 대입이다 (값을 버리는 대입은 없다)
+function evaluate(st: State, a: Cursor, inherited: Scope, call: string | undefined): { scope: Scope; write?: Write } {
+  if (a.isWord('NAMES') || a.isWord('CHARACTER') || a.isWord('CHARSET')) return { scope: inherited, write: namesWrite(st, a) };
   const scope = scopeWord(a) ?? inherited;
   const variable = target(a);
   if (!variable.name.startsWith('@') && (variable.scope ?? scope) === 'server') {
-    // 서버 변수: 값이 식이어도, 스키마에 영향을 주는 변수여도 이 세션과 상관없다. 다만 서버 sql_mode 를 바꾼 사실은 기억한다 (sqlModeDefault).
+    // 서버 변수: 값이 식이어도, 스키마에 영향을 주는 변수여도 이 세션과 상관없다. 다만 서버 sql_mode 를 바꾼 사실은 대입할 때 기억한다 (sqlModeDefault).
     // PERSIST_ONLY 는 실행 중인 값을 바꾸지 않지만 범위를 가르지 않고 함께 본다 (드물어 보수적으로 거부).
-    // 값을 읽지 않고 버려도 그 안의 저장 함수 호출은 실행되어 사용자 변수 등을 바꿀 수 있으므로 다른 무시하는 문장과 같이 그 값을 모르는 값으로 둔다 (리뷰 8회차)
-    if (variable.name === 'sql_mode') st.serverSqlModeChanged = true;
+    // 값을 읽지 않고 버려도 그 안의 저장 함수 호출은 값을 계산할 때 실행되어 사용자 변수 등을 바꿀 수 있으므로 다른 무시하는 문장과 같이 그 값을 모르는 값으로 둔다 (리뷰 8회차)
     forgetStateChangedBy(st, call);
-    return scope;
+    return { scope, write: variable.name === 'sql_mode' ? () => { st.serverSqlModeChanged = true; } : undefined };
   }
-  assignSession(st, a, variable.name);
-  return scope;
+  return { scope, write: sessionWrite(st, a, variable.name) };
 }
 
 function scopeWord(a: Cursor): Scope | undefined {
@@ -101,18 +112,25 @@ function scopeWord(a: Cursor): Scope | undefined {
   return a.acceptWord('SESSION') || a.acceptWord('LOCAL') ? 'session' : undefined;
 }
 
-function assignSession(st: State, a: Cursor, target: string): void {
+// 세션 변수·사용자 변수 대입의 값을 계산하고(1단계) 반영할 대입을 돌려준다. 값을 버리는 변수면 undefined — 모르는 값이어도 받는다
+function sessionWrite(st: State, a: Cursor, target: string): Write | undefined {
   if (SCHEMA_VARIABLES.has(target)) fail(`이후 테이블 정의 결과를 바꾸는 세션 변수는 받을 수 없습니다: ${target} — ${RE_EXPORT}`);
   if (!a.acceptOp('=') && !(a.acceptOp(':') && a.acceptOp('='))) fail(notAssignment(a));
   const written = a.peek(); // 쓴 값의 첫 토큰 (time_zone 은 리터럴만 UTC 로 본다)
   const value = valueOf(st, a);
   if (!a.done) fail(`SET 값은 리터럴·@변수·@@변수만 받습니다: ${a.src.slice(a.peek()!.s).trim()}`);
-  if (!usesValue(target)) return; // 값을 버리는 변수 — 모르는 값이어도 받는다
+  if (!usesValue(target)) return undefined;
   const assignment = `SET ${a.src.slice(a.toks[0].s, a.toks[a.toks.length - 1].e)}`; // 안내에 쓰는 이 대입 ('SET SQL_MODE=@OLD_SQL_MODE')
+  return () => assignValue(st, target, value, written, assignment);
+}
+
+// 계산해 둔 값을 대입한다 (2단계). 세션 sql_mode 의 DEFAULT 는 이때 전역 값을 읽는다 (sqlModeDefault)
+function assignValue(st: State, target: string, value: SessionValue, written: Token | undefined, assignment: string): void {
   if (target.startsWith('@')) {
-    st.saved.set(target, isUnknown(value) ? { unknown: `사용자 변수 ${target} 에 앞의 \`${assignment}\` 문장이 알 수 없는 값을 넣었습니다 — ${value.unknown}` } : value);
+    st.saved.set(target, isUnknown(value) ? { unknown: cappedReason(`사용자 변수 ${target} 에 앞의 \`${assignment}\` 문장이 알 수 없는 값을 넣었습니다 — ${value.unknown}`) } : value);
     return;
   }
+  if (CHARSET_VARIABLES.has(target)) return assignCharset(st, target, value, written, assignment);
   const tracked = target === 'sql_mode' && value === 'DEFAULT' ? sqlModeDefault(st) : value;
   if (isUnknown(tracked)) setUnknown(st, target, assignment, tracked.unknown);
   else setKnown(st, target, tracked, written);
@@ -124,8 +142,9 @@ function setKnown(st: State, target: string, value: string, written: Token | und
     st.fkChecks = foreignKeyChecksOf(value);
     st.fkChecksUnknown = undefined;
   } else if (target === 'sql_mode') {
-    st.sqlMode = resolveSqlMode(value);
+    st.sqlMode = sqlModeOf(value, written);
     st.sqlModeUnknown = undefined;
+    st.sqlModeLiteral = isLiteral(written);
   } else {
     st.timeZoneUtc = isUtcZone(written);
     st.timeZoneUnknown = undefined;
@@ -137,12 +156,31 @@ function setKnown(st: State, target: string, value: string, written: Token | und
 function setUnknown(st: State, target: string, assignment: string, why: string): void {
   if (target === 'time_zone') {
     st.timeZoneUtc = false;
-    st.timeZoneUnknown = `앞의 \`${assignment}\` 문장이 세션 시간대를 알 수 없는 값으로 정해(${why})`;
+    st.timeZoneUnknown = `앞의 \`${assignment}\` 문장이 세션 시간대를 알 수 없는 값으로 정해(${cappedReason(why)})`;
     return;
   }
-  const reason = `앞의 \`${assignment}\` 문장이 세션 ${target.toUpperCase()} 를 알 수 없는 값으로 정했습니다 — ${why}`;
-  if (target === 'sql_mode') st.sqlModeUnknown = reason;
-  else st.fkChecksUnknown = reason;
+  const reason = cappedReason(`앞의 \`${assignment}\` 문장이 세션 ${target.toUpperCase()} 를 알 수 없는 값으로 정했습니다 — ${why}`);
+  if (target === 'sql_mode') {
+    st.sqlModeUnknown = reason;
+    st.sqlModeLiteral = false;
+  } else st.fkChecksUnknown = reason;
+}
+
+// 값을 리터럴로 썼는가 (문자열·숫자, DEFAULT 가 아닌 단어). @변수·@@변수·DEFAULT 는 아니다
+const isLiteral = (written: Token | undefined): boolean =>
+  written?.t === 'string' || written?.t === 'number' || (written?.t === 'word' && written.v.toUpperCase() !== 'DEFAULT');
+
+// 대입한 SQL_MODE 값 (written: 쓴 값의 첫 토큰). 숫자 (리뷰 11회차 Claude F8, 8.0.46·8.4.11 실측): MySQL 은 정수를 모드 비트로 읽어 0·00 은 빈 모드, 1 은 REAL_AS_FLOAT 이고,
+// 0.0 은 1232, 0x00 은 1231 이다. 0 은 빈 모드로 받고 그 밖의 숫자는 비트를 재현하지 않아 거부한다. 변수(@m·@@foreign_key_checks)의 숫자는 정수(비트)인지
+// 문자열('0' 은 1231)인지 따라가지 않아 함께 거부한다. 따옴표 친 '0' 은 모드 이름이 아니라 1231 이다 (resolveSqlMode)
+function sqlModeOf(value: string, written: Token | undefined): string {
+  if (written?.t === 'number') {
+    return /^0+$/.test(value) ? '' : fail(`SQL_MODE 를 숫자 ${value} 로 쓰면 MySQL 이 모드 비트로 읽습니다 — 0(빈 모드) 밖의 숫자는 받지 않습니다 — ${RE_EXPORT}`);
+  }
+  if (written?.t !== 'string' && /^\d+$/.test(value)) {
+    fail(`SQL_MODE 에 넣은 변수 값 ${value} 가 숫자입니다 — MySQL 은 정수면 모드 비트로 읽고 문자열이면 1231 로 거부하는데, 이 도구는 변수 값이 정수인지 따라가지 않습니다 — ${RE_EXPORT}`);
+  }
+  return resolveSqlMode(value);
 }
 
 // UTC 를 쓴 리터럴인가. 변수에서 되돌리는 대입(SET time_zone = @OLD_TIME_ZONE)·@@time_zone·DEFAULT 는 서버 시간대일 수 있어 UTC 로 보지 않는다
@@ -219,11 +257,13 @@ function notAssignment(a: Cursor): string {
   return `'변수 = 값' 꼴이 아닌 SET 은 받지 않습니다: SET ${a.src.slice(a.toks[0].s, end.e)} … — ${RE_EXPORT}`;
 }
 
-// @@x 로 읽은 세션 값 (모르는 세션 값이면 그 까닭을 그대로 넘긴다). time_zone 등 그 밖의 값은 쓰지 않는다 — 되돌린 time_zone 은 UTC 로 보지 않는다
+// @@x 로 읽은 세션 값 (모르는 세션 값이면 그 까닭을 그대로 넘긴다). 이 도구가 값을 따라가지 않는 변수(time_zone — UTC 리터럴로 정했는지만 기억한다, unique_checks·
+// sql_notes·init_connect …)는 모르는 값이다 (리뷰 11회차 R11-3·Claude F6): '' 로 지어내면 'SET sql_mode = @@unique_checks'(MySQL 은 정수 1 이라 REAL_AS_FLOAT)·
+// 한정하지 않은 전역 전용 변수 'SET sql_mode = @@init_connect' 뒤의 루틴이 틀린 SQL_MODE 를 기억한다. 값을 버리는 변수에 옮기면 지금처럼 받는다
 function current(st: State, name: string): SessionValue {
   if (name === 'foreign_key_checks') return st.fkChecksUnknown !== undefined ? { unknown: st.fkChecksUnknown } : st.fkChecks ? '1' : '0';
   if (name === 'sql_mode') return st.sqlModeUnknown !== undefined ? { unknown: st.sqlModeUnknown } : st.sqlMode;
-  return '';
+  return currentCharset(st, name) ?? { unknown: `시스템 변수 @@${name} 의 값은 이 도구가 따라가지 않아 알 수 없습니다` };
 }
 
 // MySQL 8.0.46 실측: 단어 ON·OFF·TRUE·FALSE(대소문자 무관)와 숫자 0·1 을 받고, 따옴표를 친 'TRUE'·'FALSE'·'0'·'1' 은 1231 로 거부한다 (받아도 해가 없어 함께 받는다).

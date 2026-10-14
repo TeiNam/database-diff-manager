@@ -72,11 +72,20 @@ describe('저장 함수 호출 뒤 값을 모르는 변수에서 되돌리는 SE
   const SAVE = 'SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, @OLD_SQL_NOTES=@@SQL_NOTES, @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT, @OLD_TIME_ZONE=@@TIME_ZONE, @OLD_SQL_MODE=@@SQL_MODE, @OLD_FK=@@FOREIGN_KEY_CHECKS;';
 
   it.each([
-    'SET UNIQUE_CHECKS = @OLD_UNIQUE_CHECKS;', 'SET SQL_NOTES = @OLD_SQL_NOTES;', 'SET CHARACTER_SET_CLIENT = @OLD_CHARACTER_SET_CLIENT;', 'SET collation_connection = @old_collation_connection;',
+    'SET UNIQUE_CHECKS = @OLD_UNIQUE_CHECKS;', 'SET SQL_NOTES = @OLD_SQL_NOTES;', 'SET CHARACTER_SET_RESULTS = @OLD_CHARACTER_SET_RESULTS;',
     'SET @@session.unique_checks = @never_saved;', 'SET SESSION autocommit = @x, sql_notes = @y;', 'SET unique_checks = @@global.unique_checks;', 'SET NAMES utf8mb4, sql_notes = @OLD_SQL_NOTES;',
   ])('저장 함수 호출 뒤 값을 버리는 세션 변수의 %s 는 변수 값을 몰라도 받는다', (restore) => {
     expect(run([SAVE, ...HELPER, restore].join('\n'))).toMatchObject({ ok: true, applied: 3 });
   });
+
+  // 세션 문자셋 변수는 값을 따라간다 (리뷰 11회차 Claude F4): 모르는 값으로 되돌려도 그 SET 은 받고, 뒤의 ASCII 밖 글자가 든 DDL 만 거부한다
+  it.each(['SET CHARACTER_SET_CLIENT = @OLD_CHARACTER_SET_CLIENT;', 'SET collation_connection = @old_collation_connection;'])(
+    '저장 함수 호출 뒤 문자셋 변수의 %s 는 받고, 뒤의 한글 DDL 만 RE_EXPORT 로 거부한다', (restore) => {
+      expect(run([SAVE, ...HELPER, restore, 'ALTER TABLE t ADD COLUMN d INT;'].join('\n'))).toMatchObject({ ok: true, applied: 4 });
+      const r = run([SAVE, ...HELPER, restore, "ALTER TABLE t ADD COLUMN d INT COMMENT '설명';"].join('\n'));
+      expect(r).toMatchObject({ ok: false, error: { index: HELPER.length + 3, reason: expect.stringContaining('ASCII 밖 글자') } });
+      expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);
+    });
 
   it.each([
     ['SET TIME_ZONE = @OLD_TIME_ZONE;', [TS], '@old_time_zone'], ['SET SQL_MODE = @OLD_SQL_MODE;', [PROC], '@old_sql_mode'], ['SET FOREIGN_KEY_CHECKS = @OLD_FK;', [FK], '@old_fk'],

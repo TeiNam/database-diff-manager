@@ -165,3 +165,103 @@ describe('모르는 세션 FOREIGN_KEY_CHECKS', () => {
     expectRejected(run(`SET FOREIGN_KEY_CHECKS = @@global.foreign_key_checks;\n${MISSING}`), 2, CHECKED, '서버 변수 값(@@global·@@persist 의 foreign_key_checks)은 알 수 없습니다');
   });
 });
+
+// 리뷰 11회차 R11-3·Claude F6: 이 도구가 값을 따라가지 않는 시스템 변수(@@init_connect·@@unique_checks·@@sql_notes·@@time_zone …)를 읽으면 '' 가 아니라 모르는 값이다.
+// 한정하지 않은 @@init_connect 는 전역 값을 읽고(전역 전용 변수), @@unique_checks 는 정수 1 이라 sql_mode 가 REAL_AS_FLOAT 가 된다 — 지어낸 '' 로 정하면 루틴의 SQL_MODE 가 틀린다
+describe('추적하지 않는 시스템 변수 읽기', () => {
+  const PROC = 'CREATE PROCEDURE p() SELECT 1;';
+  const UNTRACKED = '시스템 변수 @@init_connect 의 값은 이 도구가 따라가지 않아 알 수 없습니다';
+
+  it('R11-3: SET GLOBAL init_connect 뒤 @@init_connect 로 정한 sql_mode 는 모르는 값이라 뒤 루틴을 거부한다', () => {
+    expectRejected(run(`SET GLOBAL init_connect='STRICT_TRANS_TABLES';\nSET sql_mode=@@init_connect;\n${PROC}`), 3, '앞의 `SET sql_mode=@@init_connect` 문장이', UNTRACKED);
+  });
+
+  it.each([
+    'SET sql_mode = @@init_connect;', 'SET SESSION sql_mode = @@init_connect;', 'SET LOCAL sql_mode = @@init_connect;', 'SET @@sql_mode = @@init_connect;',
+    'SET @@SESSION.sql_mode = @@init_connect;', 'SET @@LOCAL.sql_mode = @@init_connect;', 'SET @a = @@init_connect;\nSET @b = @a;\nSET sql_mode = @b;',
+    'SET @a = @@session.init_connect;\nSET SESSION sql_mode = @a;',
+  ])('%s 뒤의 루틴은 거부하고, 그 SET 과 SQL_MODE 에 기대지 않는 문장은 받는다', (set) => {
+    const at = set.split('\n').length + 1;
+    expectRejected(run(`${set}\n${PROC}`), at, UNTRACKED);
+    expect(run(`${set}\nALTER TABLE t ADD COLUMN y INT;`)).toMatchObject({ ok: true, applied: 1 });
+  });
+
+  it('@@unique_checks·@@sql_notes 를 sql_mode·FOREIGN_KEY_CHECKS 에 옮겨도 모르는 값이다 (Claude F6)', () => {
+    expectRejected(run(`SET sql_mode = @@unique_checks;\n${PROC}`), 2, '시스템 변수 @@unique_checks 의 값은 이 도구가 따라가지 않아 알 수 없습니다');
+    expectRejected(run(`SET @x = @@sql_notes;\nSET sql_mode = @x;\n${PROC}`), 3, '사용자 변수 @x 에 앞의 `SET @x = @@sql_notes` 문장이 알 수 없는 값을 넣었습니다');
+    const fk = run('SET FOREIGN_KEY_CHECKS = @@unique_checks;\nALTER TABLE t ADD FOREIGN KEY (v) REFERENCES missing (id);');
+    expectRejected(fk, 2, '세션 FOREIGN_KEY_CHECKS 를 알 수 없습니다', '@@unique_checks');
+  });
+
+  it('@@time_zone 도 값을 따라가지 않는다: 되돌린 시간대는 UTC 로 보지 않고 그 SET 을 밝혀 거부한다', () => {
+    const r = run("SET time_zone = '+00:00';\nSET @tz = @@time_zone;\nSET time_zone = @tz;\nALTER TABLE t ADD ts TIMESTAMP NULL DEFAULT '2020-01-01 00:00:00';");
+    expectRejected(r, 4, '앞의 `SET time_zone = @tz` 문장이 세션 시간대를 알 수 없는 값으로 정해', '@@time_zone');
+  });
+
+  it('값을 버리는 세션 변수에 옮기는 것은 지금처럼 받는다', () => {
+    expect(run('SET unique_checks = @@sql_notes, @@session.sql_notes = @@init_connect;\nALTER TABLE t ADD COLUMN y INT;')).toMatchObject({ ok: true, applied: 1 });
+  });
+});
+
+// 리뷰 11회차 R11-1 (10회차 R10-1 남은 가지): 처음 세션 SQL_MODE(서버가 기준 버전 루틴에서 짐작한 값)에서 온 IGNORE_SPACE 는 믿지 않지만, 스크립트가 SET SQL_MODE = '…'
+// 리터럴로 정한 뒤에는 짐작한 값과 같아도 그 모드로 내장 함수를 가른다. DEFAULT·변수로 짐작한 값에 돌아오면 다시 믿지 않는다 (보수적)
+describe('처음 세션 SQL_MODE 의 IGNORE_SPACE', () => {
+  const withSink = parseSqlDump(tdExport('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\nCREATE TABLE `sink` (\n  `v` longtext\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;')).model;
+  const NOW_FN = 'CREATE FUNCTION `now`() RETURNS INT DETERMINISTIC NO SQL RETURN 1;';
+  const runIgnoreSpace = (...lines: string[]) => applyScript(withSink, [NOW_FN, ...lines].join('\n'), { schemaName: 'shop', sqlMode: 'IGNORE_SPACE' });
+  const TAIL = ['SET @m=@@sql_mode;', 'INSERT INTO sink VALUES (NOW ());', 'ALTER TABLE t ADD y INT;', 'SET sql_mode=@m;', 'CREATE PROCEDURE p() SELECT 1;'];
+
+  it("R11-1: 처음 값에 IGNORE_SPACE 가 있어도 SET sql_mode='IGNORE_SPACE' 뒤의 NOW () 는 내장 함수라 @m 을 잊지 않는다", () => {
+    const r = runIgnoreSpace("SET sql_mode='IGNORE_SPACE';", ...TAIL);
+    expect(r).toMatchObject({ ok: true, applied: 3 });
+    expect(sqlModeOf(r, 'p')).toBe('IGNORE_SPACE');
+  });
+
+  it('SET 없이 처음 값 그대로이거나 DEFAULT 로 돌아온 세션의 NOW () 는 저장 함수 호출로 센다 (짐작한 값)', () => {
+    expectRejected(runIgnoreSpace(...TAIL), TAIL.length + 1, '무시한 문장의 저장 함수 호출(`NOW`)');
+    expectRejected(runIgnoreSpace("SET sql_mode='IGNORE_SPACE';", 'SET sql_mode = DEFAULT;', ...TAIL), TAIL.length + 3, '무시한 문장의 저장 함수 호출(`NOW`)');
+  });
+});
+
+// 리뷰 11회차 Claude F7: 모르는 값을 다른 변수로 옮길 때마다 앞 까닭을 감싸, 옮기는 SET 이 이어진 스크립트(495,000자 — 서버 한도 안)의 안내가 220만 자가 됐다.
+// 까닭이 500자를 넘으면 가운데를 줄여 앞(가장 가까운 대입)과 끝(값을 처음 모르게 만든 까닭)을 남긴다
+describe('모르는 값의 까닭 글 길이', () => {
+  it('옮기는 SET 이 45,000번 이어져도 안내는 짧고, 가장 가까운 대입과 처음 까닭을 밝힌다', () => {
+    const lines = ['SET @a = @@global.sql_mode;'];
+    for (let k = 0; k < 45000; k++) lines.push(k % 2 ? 'SET @a=@b;' : 'SET @b=@a;');
+    lines.push('SET sql_mode=@a;', 'CREATE PROCEDURE p() SELECT 1;');
+    const r = run(lines.join('\n'));
+    expectRejected(r, lines.length, 'PROCEDURE `p` 은(는) 만들 때의 세션 SQL_MODE 를 기억하는데', '앞의 `SET sql_mode=@a` 문장이 세션 SQL_MODE 를 알 수 없는 값으로 정했습니다',
+      '서버 변수 값(@@global·@@persist 의 sql_mode)은 알 수 없습니다', ' … ');
+    expect(!r.ok && r.error.reason.length).toBeLessThan(700);
+  });
+
+  it('세션 값과 사용자 변수를 번갈아 옮겨도 같고, TIME_ZONE·FOREIGN_KEY_CHECKS 도 같다', () => {
+    const chain = (target: string, source: string, dependent: string): ApplyResult => {
+      const lines = [`SET ${target} = ${source};`];
+      for (let k = 0; k < 2000; k++) lines.push(`SET @v${k} = @@${target};`, `SET ${target} = @v${k};`);
+      return run([...lines, dependent].join('\n'));
+    };
+    for (const [r, root] of [
+      [chain('sql_mode', '@@global.sql_mode', 'CREATE PROCEDURE p() SELECT 1;'), '서버 변수 값(@@global·@@persist 의 sql_mode)은 알 수 없습니다'],
+      [chain('foreign_key_checks', '@never_saved', 'ALTER TABLE t ADD FOREIGN KEY (v) REFERENCES missing (id);'), '값을 저장하지 않은 변수입니다: @never_saved'],
+    ] as const) {
+      expectRejected(r, 4002, root);
+      expect(!r.ok && r.error.reason.length).toBeLessThan(700);
+    }
+    const copies = Array.from({ length: 2000 }, (_, k) => (k % 2 ? 'SET @a = @b;' : 'SET @b = @a;'));
+    const tz = run(['SET @a = @never_saved;', ...copies, 'SET time_zone = @a;', "ALTER TABLE t ADD ts TIMESTAMP NULL DEFAULT '2020-01-01 00:00:00';"].join('\n'));
+    expectRejected(tz, 2003, '앞의 `SET time_zone = @a` 문장이 세션 시간대를 알 수 없는 값으로 정해', '값을 저장하지 않은 변수입니다: @never_saved');
+    expect(!tz.ok && tz.error.reason.length).toBeLessThan(700);
+  });
+});
+
+// 리뷰 11회차 Claude F9 (변이 M7 — setUnknown 의 st.timeZoneUtc = false): UTC 리터럴로 정한 뒤 모르는 값(@@global.time_zone)으로 다시 정한 time_zone 은 UTC 가 아니다.
+// 저장 함수 호출이 끼지 않아도 TIMESTAMP 리터럴 기본값을 거부해야 한다 (호출이 끼면 그 호출이 먼저 UTC 를 지워 이 줄을 시험하지 않는다)
+describe('UTC 로 정한 뒤 모르는 값으로 다시 정한 time_zone', () => {
+  it('뒤의 TIMESTAMP 리터럴 기본값을 그 SET 을 밝혀 RE_EXPORT 로 거부한다', () => {
+    const r = applyScript({ name: 'shop', tables: [], views: [], routines: [] },
+      "CREATE TABLE t (id INT PRIMARY KEY);\nSET time_zone = '+00:00';\nSET time_zone = @@global.time_zone;\nALTER TABLE t ADD ts TIMESTAMP NULL DEFAULT '2020-01-01 00:00:00';", { schemaName: 'shop' });
+    expectRejected(r, 4, '앞의 `SET time_zone = @@global.time_zone` 문장이 세션 시간대를 알 수 없는 값으로 정해', '서버 변수 값(@@global·@@persist 의 time_zone)은 알 수 없습니다');
+  });
+});

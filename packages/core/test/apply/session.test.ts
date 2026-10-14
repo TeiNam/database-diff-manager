@@ -104,8 +104,13 @@ describe('SET FOREIGN_KEY_CHECKS 값', () => {
     expect(st.fkChecks).toBe(false);
     setIn(st, 'SET @@session.foreign_key_checks = TRUE');
     expect(st.fkChecks).toBe(true);
-    setIn(st, 'SET @fk = FALSE, FOREIGN_KEY_CHECKS = @fk');
+    setIn(st, 'SET @fk = FALSE');
+    setIn(st, 'SET FOREIGN_KEY_CHECKS = @fk');
     expect(st.fkChecks).toBe(false);
+    // 한 문장 안의 앞 대입은 뒤 대입이 읽는 값을 바꾸지 않는다 (리뷰 11회차 Claude F2 — 8.0.46·8.4.11 실측: 문장 전 @fk 가 1 이면 1 이다)
+    setIn(st, 'SET @fk = 1');
+    setIn(st, 'SET @fk = FALSE, FOREIGN_KEY_CHECKS = @fk');
+    expect([st.fkChecks, st.saved.get('@fk')]).toEqual([true, 'FALSE']);
   });
 
   it.each([['2'], ['NULL'], ["'x'"], ["''"], ['maybe']])('= %s 는 거부하고 값을 바꾸지 않는다 (MySQL 1231)', (value) => {
@@ -387,9 +392,13 @@ describe('세션 time_zone 과 TIMESTAMP 리터럴 기본값', () => {
     "SET @@session.time_zone = 'UTC';", "SET LOCAL time_zone = 'gmt';", 'SET time_zone = UTC;', "SET NAMES utf8mb4, time_zone = '+00:00';", "SET time_zone = '+09:00'; SET time_zone = '+00:00';",
   ];
   const OTHER_ZONES = [
-    "SET time_zone = '+09:00';", "SET @@session.time_zone = 'SYSTEM';", "SET LOCAL TIME_ZONE = 'Asia/Seoul';", "SET time_zone = '+00:30';", 'SET @@time_zone = @@time_zone;',
+    "SET time_zone = '+09:00';", "SET @@session.time_zone = 'SYSTEM';", "SET LOCAL TIME_ZONE = 'Asia/Seoul';", "SET time_zone = '+00:30';",
     "SET GLOBAL time_zone = '+00:00';", "SET time_zone = '+00:00'; SET time_zone = DEFAULT;", "SET @tz = '+00:00'; SET time_zone = @tz;",
-    "/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */; /*!40103 SET TIME_ZONE='+00:00' */; /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;",
+  ];
+  // @@time_zone 으로 되돌린 시간대: 이 도구는 time_zone 의 값을 따라가지 않아 @@time_zone 은 모르는 값이고, 안내는 그 값으로 정한 SET 을 밝힌다 (리뷰 11회차 R11-3) — [시간대 문장, 정한 SET]
+  const UNKNOWN_ZONES: [string, string][] = [
+    ['SET @@time_zone = @@time_zone;', 'SET @@time_zone = @@time_zone'],
+    ["/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */; /*!40103 SET TIME_ZONE='+00:00' */; /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;", 'SET TIME_ZONE=@OLD_TIME_ZONE'],
   ];
   // [문장, 테이블, 컬럼, 모델에 남는 기본값]
   const LITERALS: [string, string, string, string][] = [
@@ -418,6 +427,13 @@ describe('세션 time_zone 과 TIMESTAMP 리터럴 기본값', () => {
 
   it.each(OTHER_ZONES.flatMap((zone) => LITERALS.map(([stmt]) => [zone, stmt])))('%s 뒤의 %s 는 RE_EXPORT 로 거부한다', (zone, stmt) => {
     expectUnknownZone(run(`${zone}\n${stmt}`), statementCount(zone) + 1);
+  });
+
+  it.each(UNKNOWN_ZONES.flatMap(([zone, set]) => LITERALS.map(([stmt]) => [zone, set, stmt])))('%s 뒤의 %s 문장이 정한 시간대에서 %s 는 RE_EXPORT 로 거부한다', (zone, set, stmt) => {
+    const r = run(`${zone}\n${stmt}`);
+    expect(r).toMatchObject({ ok: false, error: { index: statementCount(zone) + 1, reason: expect.stringContaining(`앞의 \`${set}\` 문장이 세션 시간대를 알 수 없는 값으로 정해`) } });
+    if (!r.ok) expect(r.error.reason).toContain('시스템 변수 @@time_zone 의 값은 이 도구가 따라가지 않아 알 수 없습니다');
+    if (!r.ok) expect(r.error.reason.endsWith(RE_EXPORT), r.error.reason).toBe(true);
   });
 
   it('거부 안내는 스크립트를 고치라고 하지 않는다 — 스크립트는 이미 서버 시간대로 실행됐다', () => {
@@ -473,5 +489,66 @@ describe('스키마와 상관없는 SET', () => {
     expect(message).toContain("'변수 = 값' 꼴이 아닌 SET 은 받지 않습니다");
     expect(message).not.toContain("':' 필요");
     expect(message.endsWith(RE_EXPORT), message).toBe(true);
+  });
+});
+
+// 리뷰 11회차 Claude F2 (MySQL set_var.cc sql_set_variables — 값 검사·계산(check)을 모두 마친 뒤 대입(update)한다, 8.0.46·8.4.11 실측): 한 SET 문의 대입은 값을 모두 먼저
+// 계산한 뒤 차례로 대입한다. 뒤 대입이 앞 대입이 바꾼 변수를 읽어도 문장 전의 값이다. 값 계산 중에 부른 저장 함수는 그 뒤에 계산하는 값만 바꿀 수 있고, 대입은 그 뒤에 한다
+describe('한 SET 문은 값을 모두 계산한 뒤 차례로 대입한다', () => {
+  const T = 'CREATE TABLE t (id INT PRIMARY KEY);';
+  const modesOf = (r: ApplyResult) => (r.ok ? r.model.routines.filter((x) => x.kind === 'procedure').map((x) => `${x.name}:${x.sqlMode}`) : r.error.reason);
+
+  it("설정을 앞에 쓴 'SET SQL_MODE = …, @OLD_SQL_MODE = @@SQL_MODE' 의 @OLD_SQL_MODE 는 문장 전의 SQL_MODE 다 (리뷰 재현)", () => {
+    const r = applyScript(empty, `${T}\nSET SQL_MODE='NO_AUTO_VALUE_ON_ZERO', @OLD_SQL_MODE=@@SQL_MODE;\nALTER TABLE t ADD c INT;\nSET SQL_MODE=@OLD_SQL_MODE;\nCREATE PROCEDURE p() SELECT 1;`, { schemaName: 'shop' });
+    expect(modesOf(r)).toEqual([`p:${DEFAULT_SQL_MODE}`]);
+  });
+
+  it('앞 대입이 바꾼 사용자 변수를 뒤 대입이 읽어도 문장 전의 값이다 (리뷰 재현)', () => {
+    const r = applyScript(empty, `${T}\nSET @m = 'STRICT_TRANS_TABLES';\nSET @m = 'NO_ENGINE_SUBSTITUTION', sql_mode = @m;\nCREATE PROCEDURE p() SELECT 1;`, { schemaName: 'shop' });
+    expect(modesOf(r)).toEqual(['p:STRICT_TRANS_TABLES']);
+  });
+
+  it('@@ 읽기와 사용자 변수 맞바꾸기도 문장 전의 값을 읽는다', () => {
+    const st = freshState();
+    setIn(st, 'SET FOREIGN_KEY_CHECKS = 0, @fk = @@FOREIGN_KEY_CHECKS');
+    expect([st.fkChecks, st.saved.get('@fk')]).toEqual([false, '1']);
+    setIn(st, "SET @a = 'x', @b = 'y'");
+    setIn(st, 'SET @a = @b, @b = @a');
+    expect([st.saved.get('@a'), st.saved.get('@b')]).toEqual(['y', 'x']);
+  });
+
+  it('값 계산 중 저장 함수 호출: 앞에서 계산한 대입은 호출 뒤에 반영하고, 뒤에서 읽는 사용자 변수는 모른다 (8.0.46·8.4.11 실측)', () => {
+    const FN = 'CREATE FUNCTION fn_one() RETURNS INT DETERMINISTIC NO SQL RETURN 1;';
+    const after = applyScript(empty, `${T}\n${FN}\nSET @a = 'NO_ENGINE_SUBSTITUTION', time_zone = '+00:00', GLOBAL max_connections = fn_one();\nSET sql_mode = @a;\nCREATE PROCEDURE p() SELECT 1;\nALTER TABLE t ADD ts TIMESTAMP NULL DEFAULT '2020-01-01 00:00:00';`, { schemaName: 'shop' });
+    expect(after).toMatchObject({ ok: true, applied: 4 });
+    expect(modesOf(after)).toEqual(['p:NO_ENGINE_SUBSTITUTION']);
+    const before = applyScript(empty, `${T}\n${FN}\nSET @a = 'NO_ENGINE_SUBSTITUTION';\nSET GLOBAL max_connections = fn_one(), @c = @a;\nSET sql_mode = @c;\nCREATE PROCEDURE p() SELECT 1;`, { schemaName: 'shop' });
+    expect(before).toMatchObject({ ok: false, error: { index: 6, reason: expect.stringContaining('사용자 변수 @a 의 값을 알 수 없습니다') } });
+  });
+});
+
+// 리뷰 11회차 Claude F8 (8.0.46·8.4.11 실측): MySQL 은 정수로 쓴 sql_mode 를 모드 비트로 읽는다 — 0·00 은 빈 모드, 1 은 REAL_AS_FLOAT. 문자열 '0' 은 1231, 0.0 은 1232,
+// 0x00 은 1231 이다. 0 은 빈 모드로 받고, 그 밖의 숫자는 비트를 재현하지 않아 RE_EXPORT 로 거부한다. 변수의 숫자는 정수인지 문자열인지 따라가지 않아 함께 거부한다
+describe('숫자로 쓴 SQL_MODE', () => {
+  it.each(['SET sql_mode = 0', 'SET SESSION sql_mode = 00', 'SET @@sql_mode = 0'])('%s 는 빈 모드다', (sql) => {
+    const st = freshState();
+    setIn(st, sql);
+    expect(st).toMatchObject({ sqlMode: '', sqlModeUnknown: undefined });
+  });
+
+  it.each(['SET sql_mode = 1', 'SET sql_mode = 4', 'SET sql_mode = 0.0', 'SET sql_mode = 0x00', "SET @m = 0, @n = '5'\nSET sql_mode = @m", "SET @n = '5'\nSET sql_mode = @n"])(
+    '%s 는 MySQL 오류 번호 없이 RE_EXPORT 로 거부한다', (sql) => {
+      const st = freshState();
+      const message = messageOf(() => sql.split('\n').forEach((one) => setIn(st, one)));
+      expect(message).toContain('숫자');
+      expect(message).not.toMatch(/\(MySQL \d+\)/);
+      expect(message.endsWith(RE_EXPORT), message).toBe(true);
+      expect(st.sqlMode).toBe(DEFAULT_SQL_MODE);
+    });
+
+  it("따옴표 친 '0' 은 MySQL 처럼 1231 이고, 0 으로 정한 뒤 만든 루틴은 빈 SQL_MODE 를 기억한다", () => {
+    expect(messageOf(() => setIn(freshState(), "SET sql_mode = '0'"))).toContain('(MySQL 1231)');
+    const r = applyScript(empty, 'CREATE TABLE t (id INT PRIMARY KEY);\nSET sql_mode = 0;\nCREATE PROCEDURE p() SELECT 1;', { schemaName: 'shop' });
+    expect(r.ok && r.model.routines.map((x) => x.sqlMode)).toEqual(['']);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { forgetOrigins, initialState, moveOrigins, nameTaken, needTable, objectName, objectNameList, trackNew } from '../../src/apply/state';
+import { cappedReason, forgetOrigins, initialState, moveOrigins, nameTaken, needTable, objectName, objectNameList, trackNew } from '../../src/apply/state';
 import { ApplyFailure, DEFAULT_SQL_MODE, MYSQL_DEFAULTS, RE_EXPORT } from '../../src/apply/types';
 import { Cursor } from '../../src/cursor';
 import { tokenize } from '../../src/lexer';
@@ -120,6 +120,26 @@ describe('보완', () => {
     expect(objectNameList(cursor('a, b CASCADE'), st)).toEqual(['a', 'b']);
     for (const src of ['a RESTRICT, b', 'a CASCADE, b CASCADE', 'a RESTRICT, b RESTRICT']) {
       expect(() => objectNameList(cursor(src), st), src).toThrow(/\(MySQL 1064\)/);
+    }
+  });
+});
+
+// 리뷰 11회차 Claude F7: 모르는 값의 까닭 글은 500자를 넘으면 가운데를 줄인다 (앞 200자와 끝을 남긴다). 4바이트 글자(대리 쌍)는 가르지 않는다
+describe('cappedReason', () => {
+  const EMOJI = '\u{1F600}';
+  const lonePair = (text: string) => /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(text);
+
+  it('500자까지는 그대로 두고, 넘으면 앞 200자와 끝을 남겨 500자 안으로 줄인다', () => {
+    expect(cappedReason('a'.repeat(500))).toBe('a'.repeat(500));
+    const capped = cappedReason(`${'a'.repeat(300)}${'b'.repeat(400)}`);
+    expect(capped).toBe(`${'a'.repeat(200)} … ${'b'.repeat(297)}`);
+  });
+
+  it('잘리는 자리의 대리 쌍은 통째로 빼고 길이는 500자를 넘지 않는다', () => {
+    for (const text of [`${'a'.repeat(199)}${EMOJI}${'b'.repeat(600)}`, `${'x'.repeat(600)}${EMOJI}${'y'.repeat(296)}`]) {
+      const capped = cappedReason(text);
+      expect(capped.length).toBeLessThanOrEqual(500);
+      expect(lonePair(capped), capped.slice(195, 210)).toBe(false);
     }
   });
 });

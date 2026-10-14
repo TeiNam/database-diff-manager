@@ -1,4 +1,4 @@
-// ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE·time_zone 이 UTC 인지 — 모르는 값이면 그 까닭), 기준 이름 추적
+// ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE·time_zone 이 UTC 인지·문자셋 — 모르는 값이면 그 까닭), 기준 이름 추적
 import { Cursor } from '../cursor';
 import { routineNameKey } from '../diff';
 import type { Column, ForeignKey, Routine, SchemaModel, Table } from '../model';
@@ -35,6 +35,22 @@ export interface Unknown {
 export type SessionValue = string | Unknown;
 export const isUnknown = (v: SessionValue): v is Unknown => typeof v !== 'string';
 
+// 모르는 값의 까닭 글 상한 (리뷰 11회차 Claude F7): 모르는 값을 다른 변수·세션 값으로 옮길 때마다 앞 까닭을 감싸므로, 옮기는 SET 이 이어진 스크립트(서버 한도 안의 495,000자)의
+// 안내가 수백만 자가 됐다. 감싼 까닭이 넘으면 가운데를 줄여 앞(가장 가까운 대입)과 끝(값을 처음 모르게 만든 까닭)을 남긴다 — 단계마다 줄이므로 늘 이 길이 안이다
+const MAX_REASON = 500;
+const REASON_HEAD = 200;
+const ELIDED = ' … ';
+const LOW_SURROGATE = /[\udc00-\udfff]/;
+
+// 대리 쌍(UTF-16 의 4바이트 글자)을 가르지 않는 자리: at 이 쌍의 뒤쪽이면 쌍 밖으로 옮긴다 (forward 면 뒤로, 아니면 앞으로 — 어느 쪽이든 줄인 글이 길어지지 않는다)
+const outsidePair = (text: string, at: number, forward: boolean): number => (LOW_SURROGATE.test(text[at] ?? '') ? at + (forward ? 1 : -1) : at);
+
+export function cappedReason(reason: string): string {
+  if (reason.length <= MAX_REASON) return reason;
+  const tail = outsidePair(reason, reason.length - (MAX_REASON - REASON_HEAD - ELIDED.length), true);
+  return `${reason.slice(0, outsidePair(reason, REASON_HEAD, false))}${ELIDED}${reason.slice(tail)}`;
+}
+
 export interface State {
   model: SchemaModel; // ponytail: 작업용 사본 하나를 고쳐 쓴다 (입력 모델은 그대로, 실패하면 통째로 버린다)
   readonly schemaName: string;
@@ -47,9 +63,16 @@ export interface State {
   sqlModeUnknown: string | undefined;
   // 처음 세션 SQL_MODE (ApplyOptions.sqlMode, 주지 않았으면 MySQL 기본 모드) — 스크립트를 실행한 서버의 sql_mode 다. SET sql_mode = DEFAULT 가 이 값으로 되돌린다 (session.ts)
   readonly initialSqlMode: string;
+  // 세션 SQL_MODE 를 마지막으로 정한 SET 이 리터럴로 썼는가 ('…'·숫자·따옴표 없는 모드 이름 — DEFAULT·변수는 아니다). 아니면서 값이 처음 세션 SQL_MODE 와 같으면 서버가 짐작한
+  // 값일 수 있다 — 그 IGNORE_SPACE 는 내장 함수 판정에 믿지 않는다 (stored-call.ts, 리뷰 11회차 R11-1)
+  sqlModeLiteral: boolean;
   // 스크립트가 서버(GLOBAL·PERSIST) sql_mode 를 바꿨는가 — 바꾼 뒤의 SET sql_mode = DEFAULT 는 바뀐 전역 값을 읽는데 그 값은 알 수 없어 세션 SQL_MODE 를 모르는 값으로 둔다
   // (session.ts sqlModeDefault, 리뷰 7회차 R7-1·10회차)
   serverSqlModeChanged: boolean;
+  // 세션 character_set_client·character_set_connection 의 문자셋 (소문자, 모르면 Unknown). 처음은 utf8mb4 다 — 스크립트는 UTF-8 이고 mysql 클라이언트 8.0 의 기본값이다.
+  // UTF-8 계열·binary 가 아니면 ASCII 밖 글자가 든 DDL 을 거부한다 (client-charset.ts, 리뷰 11회차 Claude F4)
+  clientCharset: SessionValue;
+  connectionCharset: SessionValue;
   timeZoneUtc: boolean; // 스크립트가 세션 time_zone 을 UTC 로 정했는가 — 아니면 서버 시간대라 TIMESTAMP 리터럴 기본값을 받지 않는다 (session.ts assertUtcTimestampDefault)
   // 세션 time_zone 을 모르는 까닭 ('…어' 로 끝나는 안내 글 — 그 뒤 time_zone 을 다시 정하면 지운다). 이때 timeZoneUtc 는 false 다: UTC 로 정한 세션 time_zone 을 바꿨을 수 있는
   // 저장 함수 호출(stored-call.ts), 값을 모르는 변수에서 정한 SET (session.ts). 없으면 서버 시간대라 모른다
@@ -86,7 +109,7 @@ export function initialState(base: SchemaModel, schemaName: string, defaults: Ap
   model.tables.forEach((t, k) => {
     if (!tableAt.has(t.name)) tableAt.set(t.name, k); // 같은 이름이 둘이면 앞의 것 (find 와 같다)
   });
-  const st: State = { model, schemaName, defaults, fkChecks: true, fkChecksUnknown: undefined, sqlMode, sqlModeUnknown: undefined, initialSqlMode: sqlMode, serverSqlModeChanged: false, timeZoneUtc: false, timeZoneUnknown: undefined, saved: new Map(), forgotten: new Set(), storedCall: undefined, origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
+  const st: State = { model, schemaName, defaults, fkChecks: true, fkChecksUnknown: undefined, sqlMode, sqlModeUnknown: undefined, initialSqlMode: sqlMode, sqlModeLiteral: false, serverSqlModeChanged: false, clientCharset: 'utf8mb4', connectionCharset: 'utf8mb4', timeZoneUtc: false, timeZoneUnknown: undefined, saved: new Map(), forgotten: new Set(), storedCall: undefined, origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
   for (const t of model.tables) countForeignKeys(st, t, 1);
   return st;
 }
