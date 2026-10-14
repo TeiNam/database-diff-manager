@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { applyScript, type ApplyResult } from '../../src/apply';
-import { applySet } from '../../src/apply/session';
+import { applySet, resolveSqlMode } from '../../src/apply/session';
 import { initialState, type State } from '../../src/apply/state';
 import { ApplyFailure, DEFAULT_SQL_MODE, MYSQL_DEFAULTS, RE_EXPORT } from '../../src/apply/types';
 import { Cursor } from '../../src/cursor';
@@ -189,6 +189,20 @@ describe('SET SQL_MODE 묶음 모드', () => {
 
   it.each([['ORACLE'], ['DB2'], ['MSSQL'], ['POSTGRESQL']])('%s 는 8.0 에 없는 이름이라 1231 이다', (name) => {
     expect(messageOf(() => setIn(freshState(), `SET SQL_MODE = '${name}'`))).toContain('(MySQL 1231)');
+  });
+});
+
+// 처음 세션 SQL_MODE(ApplyOptions.sqlMode — 리뷰 5회차 M-1)와 서버의 기준 버전 루틴 SQL_MODE 짐작도 SET SQL_MODE = '…' 와 같은 검사·순서를 쓴다
+describe('resolveSqlMode', () => {
+  it('SET SQL_MODE 처럼 대문자·MySQL 순서로 맞추고 중복·빈 항목을 지운다', () => {
+    expect(resolveSqlMode('no_zero_date,,strict_trans_tables,NO_ZERO_DATE')).toBe('STRICT_TRANS_TABLES,NO_ZERO_DATE');
+    expect(resolveSqlMode('')).toBe('');
+    expect(resolveSqlMode(DEFAULT_SQL_MODE)).toBe(DEFAULT_SQL_MODE);
+  });
+
+  it.each([['NO_SUCH_MODE'], ['ANSI'], ['TRADITIONAL'], ['REAL_AS_FLOAT'], ['ANSI_QUOTES']])('%s 는 SET SQL_MODE 와 같이 ApplyFailure 다', (mode) => {
+    expect(() => resolveSqlMode(mode)).toThrow(ApplyFailure);
+    expect(messageOf(() => resolveSqlMode(mode))).toBe(messageOf(() => setIn(freshState(), `SET SQL_MODE = '${mode}'`)));
   });
 });
 

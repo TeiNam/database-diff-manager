@@ -12,6 +12,9 @@ export interface ApplyDefaults {
 export interface ApplyOptions {
   schemaName: string; // `cur`.`t` 처럼 한정한 이름과 USE 는 이 스키마일 때만 받는다
   defaults?: Partial<ApplyDefaults>; // 안 준 값(undefined 포함)은 MYSQL_DEFAULTS. 문자셋만 주면 그 기본 콜레이션, 콜레이션만 주면 그 문자셋 (resolveDefaults)
+  // 스크립트가 SET SQL_MODE 를 하기 전의 세션 SQL_MODE — 스크립트를 실행한 서버의 sql_mode 다. SET SQL_MODE 없이 만든 루틴이 이 값을 기억한다.
+  // SET SQL_MODE = '…' 의 값처럼 검사하고 MySQL 순서로 맞춘다 (resolveSqlMode). 안 주면 DEFAULT_SQL_MODE (리뷰 5회차 M-1)
+  sqlMode?: string;
 }
 
 export interface ApplyError {
@@ -36,7 +39,7 @@ export const fail = (reason: string): never => {
 export const RE_EXPORT = 'td-export 로 다시 뽑아 올려 주세요';
 
 export const MYSQL_DEFAULTS: ApplyDefaults = { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' };
-// 스크립트에 SET SQL_MODE 가 없을 때 루틴에 붙는 SQL_MODE (MySQL 8.0/8.4 기본값)
+// 스크립트에 SET SQL_MODE 가 없고 ApplyOptions.sqlMode 도 주지 않았을 때 루틴에 붙는 SQL_MODE (MySQL 8.0/8.4 기본값)
 export const DEFAULT_SQL_MODE = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
 
 export interface NowSpec {

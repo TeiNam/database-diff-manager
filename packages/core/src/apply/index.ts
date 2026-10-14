@@ -10,7 +10,7 @@ import { alterTable, createIndex, dropIndexOn } from './alter-table';
 import { assertBmpText, canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
 import { noOpHandler } from './no-op';
 import { createRoutine, dropRoutine, dropView, isCreateRoutine } from './object-stmt';
-import { applySet } from './session';
+import { applySet, resolveSqlMode } from './session';
 import { initialState, type State } from './state';
 import { createTable, dropTable, renameTables } from './table-stmt';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
@@ -18,6 +18,7 @@ import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type A
 export { MYSQL_DEFAULTS, type ApplyDefaults, type ApplyError, type ApplyOptions, type ApplyResult } from './types';
 export { printSqlDump } from './print-dump';
 export { ApplyFailure } from './types'; // printSqlDump 가 출력할 수 없는 모델에 던진다 — 서버가 400 으로 바꾼다
+export { resolveSqlMode } from './session'; // 서버가 기준 버전 루틴의 SQL_MODE 중 처음 세션 SQL_MODE 로 쓸 수 있는 것을 가린다
 
 const MAX_STATEMENT_TEXT = 500;
 const VIEW_RE = /^(?:CREATE\s+(?:OR\s+REPLACE\s+)?|ALTER\s+)(?:ALGORITHM\s*=\s*\w+\s+)?(?:DEFINER\s*=\s*\S+\s+)?(?:SQL\s+SECURITY\s+\w+\s+)?VIEW\b/i;
@@ -31,15 +32,17 @@ const ACCOUNT_STATEMENT = '계정 문장(CREATE USER·ALTER USER·SET PASSWORD)�
 export function applyScript(base: SchemaModel, script: string, opts: ApplyOptions): ApplyResult {
   let statements;
   let defaults: ApplyDefaults;
+  let sqlMode: string;
   try {
     statements = splitDump(script.replace(/^\uFEFF/, ''));
     defaults = resolveDefaults(opts.defaults);
+    sqlMode = initialSqlMode(opts.sqlMode);
   } catch (e) {
     if (e instanceof LexError) return failure(0, 1, '', `스크립트를 문장으로 나누지 못했습니다: ${e.message}`);
     if (e instanceof ApplyFailure) return failure(0, 1, '', e.message);
     throw e;
   }
-  const st = initialState(base, opts.schemaName, defaults, DEFAULT_SQL_MODE);
+  const st = initialState(base, opts.schemaName, defaults, sqlMode);
   let applied = 0;
   for (const [i, s] of statements.entries()) {
     try {
@@ -65,6 +68,17 @@ export function resolveDefaults(given: Partial<ApplyDefaults> = {}): ApplyDefaul
   if (collation === undefined) return { charset, collation: primaryCollation(charset) };
   if (charsetOfCollation(collation) !== charset) fail(`스키마 기본 콜레이션 ${collation} 은 문자셋 ${charset} 의 콜레이션이 아닙니다 (MySQL 1253)`);
   return { charset, collation };
+}
+
+// 처음 세션 SQL_MODE (ApplyOptions.sqlMode). 안 주면 MySQL 8.0/8.4 기본 모드이고, 주면 SET SQL_MODE = '…' 의 값처럼 검사하고 MySQL 순서로 맞춘다
+function initialSqlMode(given: string | undefined): string {
+  if (given === undefined) return DEFAULT_SQL_MODE;
+  try {
+    return resolveSqlMode(given);
+  } catch (e) {
+    if (e instanceof ApplyFailure) return fail(`처음 세션 SQL_MODE(스크립트를 실행한 서버의 sql_mode)를 쓸 수 없습니다: ${e.message}`);
+    throw e;
+  }
 }
 
 type Handler = (st: State, c: Cursor) => void;
@@ -142,11 +156,13 @@ function assertOneStatement(toks: readonly Token[]): void {
   fail(`한 문장 뒤에 다른 문장이 이어져 있습니다 (DELIMITER 로 바꾼 구분자 대신 ';' 로 끝냈거나, DELIMITER 를 ';' 로 되돌리지 않았거나, '\\g' 를 썼습니다) — 뒤 문장이 버려지지 않도록 받지 않습니다 — ${RE_EXPORT}`);
 }
 
-// 문장 나누기(splitDump)는 SET SQL_MODE = '…' 꼴만 따라가 NO_BACKSLASH_ESCAPES 를 켜고 끈다. SET 문(applySet)이 바꾼 세션 SQL_MODE 와 어긋나면
-// (@@sql_mode·:=·@변수·큰따옴표, SET GLOBAL) 이 문장의 문자열을 MySQL 과 다른 이스케이프 규칙으로 읽었으므로, 백슬래시가 든 문장은 받지 않는다 (백슬래시가 없으면 두 규칙이 같다)
+// 문장 나누기(splitDump)는 SET SQL_MODE = '…' 꼴만 따라가 NO_BACKSLASH_ESCAPES 를 켜고 끈다 (처음에는 꺼져 있다). 세션 SQL_MODE 와 어긋나면
+// (SET 문이 @@sql_mode·:=·@변수·큰따옴표·SET GLOBAL 꼴로 바꿨거나, 처음 세션 SQL_MODE 에 있다) 이 문장의 문자열을 MySQL 과 다른 이스케이프 규칙으로 읽었으므로,
+// 백슬래시가 든 문장은 받지 않는다 (백슬래시가 없으면 두 규칙이 같다)
 function assertSameBackslashMode(st: State, ddl: string, noBackslashEscapes: boolean): void {
   if (routineLexMode(st.sqlMode).noBackslashEscapes === noBackslashEscapes || !ddl.includes('\\')) return;
-  fail(`앞의 SET 문이 바꾼 SQL_MODE 의 NO_BACKSLASH_ESCAPES 를 문장 나누기와 다르게 읽어 백슬래시가 든 이 문장을 MySQL 과 같게 읽을 수 없습니다 (SET SQL_MODE = '…' 꼴로 쓰면 됩니다) — ${RE_EXPORT}`);
+  fail(`앞의 SET 문이 바꾼 SQL_MODE 나 서버 SQL_MODE(SET 전의 세션 값)의 NO_BACKSLASH_ESCAPES 를 문장 나누기와 다르게 읽어 백슬래시가 든 이 문장을 MySQL 과 같게 읽을 수 없습니다 `
+    + `(그 앞에서 SET SQL_MODE = '…' 꼴로 정하면 됩니다) — ${RE_EXPORT}`);
 }
 
 // NO_BACKSLASH_ESCAPES 세션에서 ENUM·SET 값에 백슬래시가 있으면 거부한다: 타입 정규화가 타입 원문을 보통 이스케이프 규칙으로 다시 읽어 값이 바뀐다.

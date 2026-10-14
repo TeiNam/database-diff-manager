@@ -74,21 +74,50 @@ export function getVersionMeta(db: Db, id: number): VersionMeta {
 }
 
 // 버전을 가리키는 지문. 행 ID 는 가장 큰 ID 의 버전을 지우면 다른 업로드가 다시 쓰므로(SQLite rowid) ID 만으로는 같은 버전이라 할 수 없다.
-// 스키마 ID, 버전 번호(스키마마다 번호를 다시 쓰지 않는다), 저장된 모델 해시를 함께 본다 — 스키마까지 통째로 지우고 다시 만들어 앞의 둘이 같아져도 모델이 다르면 해시가 다르다
+// 스키마 ID, 버전 번호(스키마마다 번호를 다시 쓰지 않는다), 저장된 모델 해시만으로도 모자라다: 스키마까지 통째로 지우면 스키마 ID·버전 번호를 처음부터 다시 쓰고,
+// 모델 해시는 테이블·뷰·루틴만 보므로 같은 구조를 다른 스키마에 올리면 셋이 모두 같아진다 (리뷰 5회차 R5-01). 그래서 버전을 만든 시각(바꾸지 않는다)과
+// 데이터베이스·스키마 이름도 함께 본다. 데이터베이스 이름을 바꾼 경우도 다른 지문이 된다 — 미리보기를 다시 하면 된다
 export interface VersionFingerprint {
   schemaId: number;
   versionNo: number;
   modelHash: string;
+  uploadedAt: string; // 버전을 만든 시각 (ISO 8601, 밀리초까지)
+  databaseName: string;
+  schemaName: string;
 }
 
+interface FingerprintRecord {
+  schema_id: number; version_no: number; model_hash: string; uploaded_at: string; database_name: string; schema_name: string;
+}
+
+const FINGERPRINT_SQL = `
+  SELECT v.schema_id, v.version_no, v.model_hash, v.uploaded_at, d.name AS database_name, s.name AS schema_name
+    FROM schema_versions v JOIN schemas s ON s.id = v.schema_id JOIN databases d ON d.id = s.database_id
+   WHERE v.id = ?`;
+
 export function getVersionFingerprint(db: Db, id: number): VersionFingerprint {
-  const r = one<{ schema_id: number; version_no: number; model_hash: string }>(db, 'SELECT schema_id, version_no, model_hash FROM schema_versions WHERE id = ?', id);
+  const r = one<FingerprintRecord>(db, FINGERPRINT_SQL, id);
   if (!r) throw NOT_FOUND();
-  return { schemaId: Number(r.schema_id), versionNo: Number(r.version_no), modelHash: r.model_hash };
+  return {
+    schemaId: Number(r.schema_id), versionNo: Number(r.version_no), modelHash: r.model_hash, uploadedAt: r.uploaded_at, databaseName: r.database_name, schemaName: r.schema_name,
+  };
 }
 
 export const isSameFingerprint = (a: VersionFingerprint, b: VersionFingerprint): boolean =>
-  a.schemaId === b.schemaId && a.versionNo === b.versionNo && a.modelHash === b.modelHash;
+  a.schemaId === b.schemaId && a.versionNo === b.versionNo && a.modelHash === b.modelHash
+  && a.uploadedAt === b.uploadedAt && a.databaseName === b.databaseName && a.schemaName === b.schemaName;
+
+export interface VersionRef {
+  id: number;
+  versionNo: number;
+}
+
+// 스키마의 최신 SQL 버전 (ALTER 적용의 기준이 될 수 있는 버전 중 번호가 가장 큰 것). SQL 버전이 없으면 undefined
+export function latestSqlVersion(db: Db, schemaId: number): VersionRef | undefined {
+  const r = one<{ id: number; version_no: number }>(db,
+    "SELECT id, version_no FROM schema_versions WHERE schema_id = ? AND source_format = 'sql' ORDER BY version_no DESC LIMIT 1", schemaId);
+  return r && { id: Number(r.id), versionNo: Number(r.version_no) };
+}
 
 export function listVersions(db: Db, schemaId: number): VersionSummary[] {
   getSchema(db, schemaId);

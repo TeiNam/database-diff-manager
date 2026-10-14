@@ -77,7 +77,7 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
 | YEAR·DECIMAL 기본값의 비표준 꼴 | YEAR 기본값의 한두 자리(`20`, `'0'`, `0001`)와 `'+2020'`·`2020.5`, 가수가 15자리를 넘거나 지수가 70을 넘는 DECIMAL 지수 표기 | MySQL이 세기를 붙이거나(`20`→`'2020'`, `70`→`'1970'`) DOUBLE을 거쳐 값을 다시 쓴다 |
 | 다른 스키마 | 다른 스키마를 한정한 이름(`other.t`), 다른 스키마로의 `USE` | 버전은 스키마 하나를 나타낸다. 현재 스키마 이름으로 한정한 경우(`cur.t`, 루틴 `cur.f` 포함)는 허용한다 |
 | FLOAT·DOUBLE 기본값의 비표준 꼴 | MySQL이 반올림하거나 지수 표기로 다시 쓰는 값: (M,D)가 없을 때 유효숫자가 FLOAT 6·DOUBLE 15자리를 넘는 값, 지수 표기로 찍히는 값(`1e15`, `0.0000000000000001`), `-0`. (M,D)가 있을 때 소수 D자리 밖에 숫자가 있는 값, FLOAT 정밀도로 바뀌는 값, 찍는 자릿수가 DOUBLE 15자리를 넘는 값 | MySQL이 이진 부동소수점 값을 다시 찍는다(4장) |
-| 테이블 문장을 다르게 읽게 하는 SQL_MODE | `REAL_AS_FLOAT`·`ANSI_QUOTES`(묶음 모드 `ANSI`·`TRADITIONAL`과 같이), 문장 나누기와 다르게 읽은 `NO_BACKSLASH_ESCAPES`(`SET @@sql_mode`·`:=`·`@변수`·큰따옴표·`SET GLOBAL` 꼴) 뒤의 백슬래시가 든 문장, `NO_BACKSLASH_ESCAPES` 세션의 ENUM·SET 값 백슬래시 | `REAL`을 FLOAT로, `"…"`를 식별자로 읽는 규칙을 모델에 반영하지 않는다. 문장 나누기는 `SET SQL_MODE = '…'` 꼴만 따라가므로 다른 꼴에서는 문자열을 MySQL과 다르게 읽는다. ENUM·SET 값은 타입 정규화가 보통 이스케이프 규칙으로 다시 읽는다(같은 세션의 COMMENT·DEFAULT 백슬래시는 MySQL과 같다, 8.4.11 실측) |
+| 테이블 문장을 다르게 읽게 하는 SQL_MODE | `REAL_AS_FLOAT`·`ANSI_QUOTES`(묶음 모드 `ANSI`·`TRADITIONAL`과 같이), 문장 나누기와 다르게 읽은 `NO_BACKSLASH_ESCAPES`(`SET @@sql_mode`·`:=`·`@변수`·큰따옴표·`SET GLOBAL` 꼴, 기준 버전 루틴에서 짐작한 서버 SQL_MODE — 4장 루틴) 뒤의 백슬래시가 든 문장, `NO_BACKSLASH_ESCAPES` 세션의 ENUM·SET 값 백슬래시 | `REAL`을 FLOAT로, `"…"`를 식별자로 읽는 규칙을 모델에 반영하지 않는다. 문장 나누기는 `SET SQL_MODE = '…'` 꼴만 따라가고 처음에는 `NO_BACKSLASH_ESCAPES`가 꺼져 있으므로, 다른 꼴이나 짐작한 서버 SQL_MODE에서는 문자열을 MySQL과 다르게 읽는다. 스크립트 앞에서 `SET SQL_MODE = '…'` 꼴로 정하면 받는다. ENUM·SET 값은 타입 정규화가 보통 이스케이프 규칙으로 다시 읽는다(같은 세션의 COMMENT·DEFAULT 백슬래시는 MySQL과 같다, 8.4.11 실측) |
 | FK가 많은 테이블 | FK가 64개를 넘는 테이블을 만들거나 바꾸는 문장 | MySQL에는 한도가 없지만(테이블 하나에 FK 2,000개면 MySQL도 CREATE TABLE에 16초가 걸린다, 8.4.11 실측) 문장마다 테이블의 FK를 모두 다시 확인하므로, 요청 하나의 계산량을 묶으려고 받지 않는다 |
 | 바이트 한도를 넘는 정의 | 키 파트 하나가 3072바이트(`ROW_FORMAT=COMPACT`·`REDUNDANT`는 767바이트)를 넘는 키(FULLTEXT·SPATIAL 제외), 65535바이트를 넘는 `VARCHAR`·`VARBINARY`. 바이트는 글자 수(prefix가 있으면 prefix 길이) × 컬럼 문자셋의 글자당 최대 바이트(utf8mb4 4, utf8mb3 3, latin1 1, 이진 타입 1)다. `ROW_FORMAT`을 쓰지 않은 테이블은 DYNAMIC이다. 키·키에 든 컬럼의 정의(`MODIFY`·`CHANGE`, 지우고 다시 더한 컬럼)·`ROW_FORMAT`을 건드린 문장은 문장 끝 테이블의 키를 모두 보므로, 같은 문장의 `ROW_FORMAT` 변경과 `MODIFY`·`CHANGE`로 늘어난 컬럼도 걸린다 | 엄격 SQL_MODE는 1071·1074로 거부하지만, 엄격하지 않은 세션(`SQL_MODE='NO_AUTO_VALUE_ON_ZERO'` 같은 덤프 머리, 5.6 기본값을 둔 서버)은 일반 인덱스의 키 파트를 한도까지의 prefix로 줄이고(utf8mb4 `VARCHAR(769)`의 `KEY (c)`→`c(768)`, COMPACT의 `VARCHAR(192)`→`c(191)`) 긴 `VARCHAR`를 TEXT·BLOB 계열로 바꿔(utf8mb4 `VARCHAR(16384)`→`mediumtext`) 받는다(8.0/8.4 실측, 시나리오 `byte-limits`·`error-key-part-bytes`·`error-key-part-compact`·`error-varchar-bytes`). 쓴 그대로 저장하면 틀린 모델이 되므로 SQL_MODE와 상관없이 거부한다 |
 
@@ -157,7 +157,11 @@ ALTER 문 몇 개 때문에 실제 DB에 적용하고 td-export로 다시 뽑아
   - 파티션된 기준 테이블(파티션 절 자체는 3.2에서 거부하지만 덤프에는 있다): 8.0/8.4 실측으로 파티션 식이 쓰는 컬럼을 지우거나 이름을 바꾸면 3855이고, PRIMARY KEY·UNIQUE가 파티션 컬럼을 (prefix 없이) 모두 포함하지 않으면 1503이다. 파티션 절은 그대로 둔다(시나리오 `partitioned-base`).
 - **루틴:**
   - 본문은 쓴 그대로 저장한다. MySQL의 `SHOW CREATE FUNCTION`도 그렇다. 다만 `DELIMITER`를 `;`가 아닌 것으로 바꾸고 `RETURN x + 1; //`처럼 끝에 `;`를 함께 쓰면 MySQL은 그 `;`를 본문에 넣지 않는다(8.0/8.4 실측: 공백이 끼어도 `;`가 여럿이어도 같고, 뒤에 주석이 따르는 `;`는 남는다). 같은 규칙으로 끝의 `;`를 뗀다(시나리오 `routine-terminator`).
-  - `sqlMode`는 스크립트에서 그 문장 앞의 마지막 `SET [SESSION] SQL_MODE` 값을 쓴다. 없으면 MySQL 8.0/8.4 기본 모드(`ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`)를 쓴다. 모드 이름은 MySQL 순서로 정렬하고 중복을 지운다(SHOW CREATE 의 `sql_mode` 표기). 묶음 모드(`ANSI`·`TRADITIONAL`)와 테이블 문장을 다르게 읽게 하는 `REAL_AS_FLOAT`·`ANSI_QUOTES`는 거부하고 다시 추출하도록 안내한다(3.2).
+  - `sqlMode`는 스크립트에서 그 문장 앞의 마지막 `SET [SESSION] SQL_MODE` 값을 쓴다. 없으면 스크립트를 실행한 서버의 sql_mode다(MySQL은 루틴을 만든 세션의 값을 저장하고, 클라이언트가 바꾸지 않은 세션 값은 서버 값이다).
+    - 스크립트만으로는 서버 값을 알 수 없어, 서버가 기준 버전 루틴의 `sqlMode` 최빈값으로 짐작해 `applyScript`의 처음 세션 SQL_MODE(`ApplyOptions.sqlMode`)로 준다. td-export 0.1.52+는 루틴마다 SQL_MODE를 남기고, 기준 버전의 루틴은 대개 같은 서버에서 만들었다. 개수가 같으면 종류·이름순으로 먼저 나온 루틴의 값이다. 모드 이름을 아래 규칙으로 맞춰 센다.
+    - SQL_MODE 기록이 없는 루틴(td-export 0.1.52 전)과 아래에서 거부하는 값의 루틴은 세지 않는다. 셀 루틴이 없으면 MySQL 8.0/8.4 기본 모드(`ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`)를 쓴다(리뷰 5회차 M-1).
+    - 한계: 기준 버전의 루틴을 서버 값과 다른 SQL_MODE로 만들었으면(`SET sql_mode` 뒤에 만든 루틴이 많으면) 그 값을 서버 값으로 잘못 짐작한다. 짐작한 값에 `NO_BACKSLASH_ESCAPES`가 있으면 백슬래시가 든 문장은 거부한다(3.2). 대화상자에 서버 SQL_MODE 칸은 두지 않는다.
+    - 모드 이름은 MySQL 순서로 정렬하고 중복을 지운다(SHOW CREATE 의 `sql_mode` 표기). 묶음 모드(`ANSI`·`TRADITIONAL`)와 테이블 문장을 다르게 읽게 하는 `REAL_AS_FLOAT`·`ANSI_QUOTES`는 거부하고 다시 추출하도록 안내한다(3.2).
   - DEFINER는 저장하지 않는다. 비교 대상이 아니다.
   - 함수의 `RETURNS` 타입은 타입 규칙으로 정규화한다. 문자열 타입이면 MySQL처럼 ` CHARSET <스키마 기본 문자셋>`을 붙이고, 스키마 기본 콜레이션이 그 문자셋의 기본(`utf8mb4_0900_ai_ci`·`latin1_swedish_ci`·`utf8mb3_general_ci` …)이 아니면 ` COLLATE <콜레이션>`도 붙인다(8.0/8.4 실측, 시나리오 `schema-defaults-unicode`). `RETURNS` 안에 `CHARSET`·`COLLATE`를 직접 쓴 경우는 1차에서 거부한다.
 - **테이블 옵션:**
@@ -197,7 +201,7 @@ MySQL의 모든 검사를 재현하지는 않는다. 화면 안내와 이 문서
 
 | 파일 | 책임 |
 |---|---|
-| `index.ts` | `applyScript(model, script, { schemaName, defaults? }): ApplyResult` — 문장을 나누고(기존 `splitDump`·세션 SQL_MODE 추적 재사용) 문장마다 처리기로 보낸다. 실패하면 즉시 `{ ok: false, error }` |
+| `index.ts` | `applyScript(model, script, { schemaName, defaults?, sqlMode? }): ApplyResult` — 문장을 나누고(기존 `splitDump`·세션 SQL_MODE 추적 재사용) 문장마다 처리기로 보낸다. 실패하면 즉시 `{ ok: false, error }`. `sqlMode`는 처음 세션 SQL_MODE(스크립트를 실행한 서버의 sql_mode)이고, `SET SQL_MODE` 값처럼 검사해(`resolveSqlMode`, 받지 않는 값은 특정 문장이 아닌 실패) MySQL 순서로 맞춘다. 안 주면 MySQL 기본 모드다 |
 | `types.ts` | 공용 타입, `ApplyFailure`, `MYSQL_DEFAULTS`, `DEFAULT_SQL_MODE` |
 | `normalize-mysql.ts` | 4장의 정규화 규칙(타입·기본값·NULL·문자셋), `finalizeColumn` |
 | `options.ts` | 테이블 옵션 값 정규화와 SHOW CREATE 옵션 순서 |
@@ -228,10 +232,13 @@ type ApplyResult =
   - `schema_version_derivations(version_id PK → schema_versions ON DELETE CASCADE, base_version_id → schema_versions ON DELETE SET NULL, base_version_no INTEGER NOT NULL, script TEXT NOT NULL, statement_count INTEGER NOT NULL, default_charset TEXT NOT NULL, default_collation TEXT NOT NULL)`. `base_version_no`는 기준 버전이 지워져도 배지에 `기준 vN`을 보여 주려고 남긴다
 - **`POST /versions/:id/alter`:**
   - 권한은 admin·dba이다. `onRequest`에서 검사하는 기존 방식을 따르고 CSRF 헤더도 기존대로 요구한다.
-  - 본문은 JSON `{ script: string, filename?: string, note?: string, dryRun?: boolean, defaults?: { charset?: string, collation?: string }, expectedBase?: { schemaId: number, versionNo: number, modelHash: string } }`이다. 저장(`dryRun`이 아님)에는 `expectedBase`가 꼭 있어야 한다(없으면 400). `script`는 1,000,000자까지, 요청 본문은 4 MiB까지 받는다(`apps/server/src/limits.ts`의 `MAX_ALTER_SCRIPT`·`ALTER_BODY_LIMIT`). JSON 문자열의 따옴표 이스케이프로 본문이 늘어나는 만큼 본문 한도에 여유를 둔다.
+  - 본문은 JSON `{ script: string, filename?: string, note?: string, dryRun?: boolean, defaults?: { charset?: string, collation?: string }, expectedBase?: { schemaId: number, versionNo: number, modelHash: string, uploadedAt: string, databaseName: string, schemaName: string, latestVersionNo: number } }`이다. 저장(`dryRun`이 아님)에는 `expectedBase`가 꼭 있어야 한다(없으면 400). `script`는 1,000,000자까지, 요청 본문은 4 MiB까지 받는다(`apps/server/src/limits.ts`의 `MAX_ALTER_SCRIPT`·`ALTER_BODY_LIMIT`). JSON 문자열의 따옴표 이스케이프로 본문이 늘어나는 만큼 본문 한도에 여유를 둔다.
   - `:id` 버전이 SQL 출처가 아니거나 stale이면 400을 돌려준다.
   - 스크립트 적용이 실패해도 400이다. 메시지는 `N번째 문장 (줄 L): 이유`이고(특정 문장이 아닌 실패는 이유만), `details.error`에 `{ index, line, statement, reason }`을 담는다.
-  - `dryRun: true`면 저장하지 않고 `{ status: 'preview', applied, changes, renames, base }`를 돌려준다. `base`는 기준 버전 지문 `{ schemaId, versionNo, modelHash }`다. 저장할 때 이 값을 `expectedBase`로 돌려보내고, 그사이 기준 버전이 바뀌었으면(지운 버전의 ID를 새 업로드가 다시 받은 경우 등) 409로 거부하고 아무것도 저장하지 않는다. `changes`는 기준과 결과를 기존 비교 엔진으로 비교해 바뀌는 객체를 모은 목록이고 항목은 `{ kind, name, op }`이다(`kind`는 table·view·function·procedure, `op`는 add·drop·modify·rename). `renames`는 `applyScript`가 모은 이름 대응이다. 저장하면 `{ status: 'ok' | 'duplicate', versionId, versionNo, applied, changes }`를 돌려준다.
+  - `dryRun: true`면 저장하지 않고 `{ status: 'preview', applied, changes, renames, base }`를 돌려준다. `base`는 기준 버전 지문 `{ schemaId, versionNo, modelHash, uploadedAt, databaseName, schemaName }`(`uploadedAt`은 버전을 만든 시각이고 바뀌지 않는다)과 미리보기 때 그 스키마의 최신 SQL 버전 번호 `latestVersionNo`다. 저장할 때 이 값을 그대로 `expectedBase`로 돌려보낸다. 아래 두 경우는 409로 거부하고 아무것도 저장하지 않는다. `expectedBase`를 보낸 미리보기는 첫 경우(지문)만 대조한다.
+    - 기준 버전이 바뀌었다(지문이 다르다). 지운 버전의 ID를 새 업로드가 다시 받은 경우, 스키마를 통째로 지우고 다시 올려 스키마 ID·버전 번호가 처음부터 다시 쓰인 경우(같은 구조를 올리면 모델 해시까지 같다 — 모델 해시는 테이블·뷰·루틴만 본다, 리뷰 5회차 R5-01), 데이터베이스 이름을 바꾼 경우다. 메시지는 미리보기를 다시 하라는 안내다.
+    - 미리보기 때 최신 SQL 버전이던 기준 버전(`latestVersionNo`가 기준 버전 번호와 같다) 뒤에 더 새 SQL 버전이 저장됐다(다른 사용자의 ALTER 적용·업로드). 그대로 저장하면 그 버전의 변경이 빠진 결과가 스키마의 최신 버전이 된다. 메시지는 다른 사용자가 더 새 버전(vN)을 저장했으니 최신 버전에서 미리보기를 다시 하라는 안내이고, `details.latestVersion`에 그 버전 `{ id, versionNo }`를 담는다. 미리보기 때 이미 더 새 SQL 버전이 있던 옛 기준 버전을 고른 경우는 일부러 고른 것으로 보고 지금처럼 저장한다. MD 버전은 기준이 될 수 없어 세지 않는다(리뷰 5회차 M-2). 중복 판정이 먼저다: 결과가 스키마의 최신 버전과 같으면(같은 저장을 다시 보냄 — 응답을 받지 못해 다시 누름, 같은 미리보기를 연 다른 탭) 빠지는 변경이 없으므로 지금처럼 `duplicate`로 그 버전을 돌려준다. 그래서 이 검사는 저장이 새 버전을 만들 때만 한다.
+  - `changes`는 기준과 결과를 기존 비교 엔진으로 비교해 바뀌는 객체를 모은 목록이고 항목은 `{ kind, name, op }`이다(`kind`는 table·view·function·procedure, `op`는 add·drop·modify·rename). `renames`는 `applyScript`가 모은 이름 대응이다. 저장하면 `{ status: 'ok' | 'duplicate', versionId, versionNo, applied, changes }`를 돌려준다.
   - 결과 모델을 `printSqlDump`로 출력하고 다시 파싱한 모델을 쓴다. 그래야 저장 모델과 원문 재파싱 모델이 항상 같아서 서버 시작 시 stale로 잘못 표시되지 않는다.
   - **안전망:** 다시 파싱한 모델이 적용 결과와 객체마다 같아야 저장한다(미리보기도 같다). 객체 목록이 같아야 하고, 스크립트가 바꾼 객체는 적용 결과와, 건드리지 않은 객체는 기준 버전의 객체와 같아야 한다. 파싱한 객체의 `rawDdl`은 보지 않는다(파생 버전의 원문은 출력한 덤프다). 파싱하지 못한 객체(`parseError`)만은 기준을 그대로 출력·다시 읽은 결과와 비교하고, 그 객체의 경고가 기준을 다시 읽을 때도 똑같이 났으면 받는다. 그래서 기준에 이상한 객체가 있어도 그 객체를 건드리지 않는 ALTER는 쓸 수 있다. 어긋나면 400이고, 이 도구의 출력·읽기가 어긋난 것이라 다시 뽑아 올리라고 안내하지 않는다: 메시지에 어긋난 객체와 요청 ID를 적고, 같은 내용을 서버 로그(warn)에 남긴다(스크립트는 남기지 않는다).
   - "변경 없음" 판정은 모델 해시가 아니라 기존 비교 엔진으로 한다(`diffSchemas(기준, 결과, renames)`의 변경이 0개).
@@ -261,6 +268,7 @@ type ApplyResult =
 - `.sql` 파일은 UTF-8 로만 읽는다(덤프 업로드와 같다). 다른 인코딩이면 한글 COMMENT·DEFAULT 가 깨진 채 저장되므로 이유를 알리고 지금 스크립트는 그대로 둔다.
 - 대화상자는 연 스키마의 것이다. 주소가 다른 스키마로 바뀌면 닫는다. 고른 기준 버전이 목록에서 사라지면(다른 곳에서 지움) 미리보기를 지우고 미리보기·저장을 막은 채 다시 고르게 한다.
 - 요청이 가는 동안에는 기준 버전·스키마 기본값·메모 칸을 잠가, 보낸 값과 화면의 값이 어긋나지 않게 한다.
+- 저장은 미리보기가 돌려준 `base`를 `expectedBase`로 그대로 보낸다. 409로 거부되면 미리보기를 지우고 서버 메시지를 보이며 버전 목록을 다시 받는다. 응답에 `details.latestVersion`이 있으면(미리보기 뒤에 더 새 버전이 저장됨) 다시 받은 목록에 그 버전이 나타날 때 기준 버전을 그 버전으로 옮긴다. 옛 기준 버전에 다시 미리보기하면 서버가 일부러 고른 옛 버전으로 보고 받아, 그 버전의 변경이 빠진 결과가 최신 버전이 되기 때문이다.
 - SQL 출처 버전이 없으면 버튼을 보이지 않는다. 기준 버전이 stale 이면(목록에서는 알 수 없다) 서버가 400 으로 이유를 돌려주고 대화상자가 그대로 보여 준다.
 - 버전 이력의 배지는 `ALTER 적용 (기준 vN)`이다. 배지를 누르면 스크립트 원문을 보는 패널이 열린다.
 

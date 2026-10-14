@@ -12,13 +12,21 @@ import { applyAlter } from '../services/alter';
 import { suggestAlterDefaults } from '../services/alter-defaults';
 
 const CharsetName = z.string().regex(/^\w{1,64}$/, '문자셋·콜레이션 이름은 영문·숫자·_ 만 쓸 수 있습니다');
-// 미리보기가 돌려준 기준 버전 지문(base)을 그대로 되돌려 받는다. 모델 해시는 형식을 따지지 않고 길이만 막는다 — 저장된 값과 다르면 어차피 409 다
+// 미리보기가 돌려준 기준 버전 지문(base)을 그대로 되돌려 받는다. 문자열(모델 해시·버전을 만든 시각·이름)은 형식을 따지지 않고 길이만 막는다 — 저장된 값과 다르면 어차피 409 다.
+// 이름은 저장할 때 128자까지라 그보다 넉넉하게 둔다
 const MAX_MODEL_HASH_LENGTH = 128;
+const MAX_FINGERPRINT_TEXT_LENGTH = 256;
 const INVALID_FINGERPRINT = '기준 버전 지문(expectedBase)은 미리보기가 돌려준 base 그대로여야 합니다';
-const VersionFingerprintBody = z.object({
-  schemaId: z.number(INVALID_FINGERPRINT).int(INVALID_FINGERPRINT).positive(INVALID_FINGERPRINT),
-  versionNo: z.number(INVALID_FINGERPRINT).int(INVALID_FINGERPRINT).positive(INVALID_FINGERPRINT),
-  modelHash: z.string(INVALID_FINGERPRINT).min(1, INVALID_FINGERPRINT).max(MAX_MODEL_HASH_LENGTH, INVALID_FINGERPRINT),
+const FingerprintNumber = z.number(INVALID_FINGERPRINT).int(INVALID_FINGERPRINT).positive(INVALID_FINGERPRINT);
+const FingerprintText = (max: number) => z.string(INVALID_FINGERPRINT).min(1, INVALID_FINGERPRINT).max(max, INVALID_FINGERPRINT);
+const PreviewBaseBody = z.object({
+  schemaId: FingerprintNumber,
+  versionNo: FingerprintNumber,
+  modelHash: FingerprintText(MAX_MODEL_HASH_LENGTH),
+  uploadedAt: FingerprintText(MAX_FINGERPRINT_TEXT_LENGTH),
+  databaseName: FingerprintText(MAX_FINGERPRINT_TEXT_LENGTH),
+  schemaName: FingerprintText(MAX_FINGERPRINT_TEXT_LENGTH),
+  latestVersionNo: FingerprintNumber, // 미리보기 때 그 스키마의 최신 SQL 버전 번호
 }, INVALID_FINGERPRINT);
 const AlterBody = z.object({
   script: z.string().min(1, '스크립트가 비어 있습니다').max(MAX_ALTER_SCRIPT, `스크립트는 ${MAX_ALTER_SCRIPT}자 이하여야 합니다`),
@@ -26,7 +34,7 @@ const AlterBody = z.object({
   note: NoteSchema.optional(),
   dryRun: z.boolean().optional(),
   defaults: z.object({ charset: CharsetName.optional(), collation: CharsetName.optional() }).optional(),
-  expectedBase: VersionFingerprintBody.optional(), // 저장(dryRun 아님)에는 꼭 있어야 한다 — 서비스(applyAlter)가 확인한다
+  expectedBase: PreviewBaseBody.optional(), // 저장(dryRun 아님)에는 꼭 있어야 한다 — 서비스(applyAlter)가 확인한다
 });
 
 export function versionRoutes(app: FastifyInstance, ctx: AppContext): void {

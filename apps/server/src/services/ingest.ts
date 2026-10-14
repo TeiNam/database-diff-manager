@@ -13,6 +13,7 @@ export interface IngestInput {
   note?: string;
   userId: number;
   evidence?: SchemaEvidence; // 완전성 판정을 원문 대신 이 값으로 (ALTER 적용 버전: 기준 버전의 판정을 물려받는다)
+  beforeCreate?: () => void; // 중복이 아니어서 새 버전을 만들기 직전에 같은 트랜잭션 안에서 부른다. 던지면 아무것도 만들지 않는다 (duplicate 면 부르지 않는다)
   onCreated?: (versionId: number) => void; // 새 버전을 만든 같은 트랜잭션 안에서 부른다 (duplicate 면 부르지 않는다)
 }
 
@@ -108,6 +109,7 @@ export function ingest(db: Db, input: IngestInput): IngestResult {
     // 버전과는 합치지 않는다 — 같은 원문을 다시 올려 지금 파서 모델로 새 버전을 만드는 것이 stale 버전을 벗어나는 길이다 (16회차 2)
     if (latest && latest.model_hash === hash && knowsRoutines(latest.source_format) === knowsRoutines(format) && storedEvidenceJson(db, latest.id) === evidenceJson(evidence)
       && loadStaleReason(db, latest.id) === undefined) return { status: 'duplicate', versionId: Number(latest.id), versionNo: Number(latest.version_no), warnings };
+    input.beforeCreate?.();
     const versionNo = takeNumber(db, 'UPDATE schemas SET next_version_no = next_version_no + 1 WHERE id = ? RETURNING next_version_no - 1 AS n', schemaId);
     const versionId = run(db, `
       INSERT INTO schema_versions (schema_id, version_no, source_format, source_filename, source_sha256, model_hash, note, uploaded_by, uploaded_at)

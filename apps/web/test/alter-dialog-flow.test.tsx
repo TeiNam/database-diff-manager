@@ -12,6 +12,7 @@ import { json, mockApi, renderWithProviders } from './render';
 // 문자셋 칸을 고치는 동안 콜레이션(M-2), 저장한 뒤 기준 버전(M-4)
 // 2way 리뷰 3회차 (web): 중복 응답이 받아 둔 목록에 없는 버전을 가리킬 때의 기준 버전(R3-01)
 // 2way 리뷰 4회차 (web): 기준 버전 지문 — 행 ID 가 지운 뒤 다시 쓰여도 미리보기가 다른 버전에 저장되지 않는다(R4-01)
+// 2way 리뷰 5회차 (web): 미리보기 뒤에 더 새 버전이 저장돼 거절되면 그 버전으로 기준 버전을 옮긴다(M-2)
 type User = ReturnType<typeof userEvent.setup>;
 
 const SCRIPT = 'ALTER TABLE a ADD b INT;';
@@ -434,12 +435,13 @@ describe('HistoryPage — 저장 뒤 기준 버전', () => {
 
 // R4-01: 행 ID 는 가장 큰 ID 의 버전을 지우면 다른 업로드가 다시 쓴다. 미리보기는 서버가 돌려준 기준 버전 지문이 지금 고른 기준 버전과 같을 때만 남기고,
 // 저장은 그 지문을 expectedBase 로 보낸다. 서버가 409 로 거절하면(미리보기 뒤에 기준 버전이 바뀜) 미리보기를 지우고 목록을 다시 받는다
+const route = { route: '/db/1/schema/7/history', path: '/db/:dbId/schema/:schemaId/history' };
+const pageRoutes = {
+  '/api/auth/me': { id: 3, username: 'park', role: 'dba' },
+  '/api/schemas/7': { id: 7, name: 'shop', databaseId: 1, databaseName: 'db' },
+};
+
 describe('AlterDialog — 기준 버전 지문', () => {
-  const route = { route: '/db/1/schema/7/history', path: '/db/:dbId/schema/:schemaId/history' };
-  const pageRoutes = {
-    '/api/auth/me': { id: 3, username: 'park', role: 'dba' },
-    '/api/schemas/7': { id: 7, name: 'shop', databaseId: 1, databaseName: 'db' },
-  };
   const STALE = '기준 버전이 바뀌었습니다 — 미리보기 뒤에 다른 곳에서 지우고 다시 올렸을 수 있습니다. 미리보기를 다시 실행하세요';
   const staleResponse = () => json({ error: STALE }, 409);
   const baseOptions = () => [...baseSelect().querySelectorAll('option')].map((o) => o.textContent);
@@ -647,5 +649,69 @@ describe('AlterDialog — 기준 버전 지문', () => {
     expect(alert).toHaveTextContent('v2 버전을 새로 받은 목록에서 찾지 못했습니다');
     expect(baseSelect()).toHaveValue('11');
     expect(previewButton()).toBeDisabled();
+  });
+});
+
+// M-2: 대화상자를 연 동안 다른 사용자가 더 새 버전을 저장하면 서버가 옛 미리보기의 저장을 409 로 거절하고 그 버전을 details.latestVersion 으로 알려 준다.
+// 화면은 미리보기를 지우고 목록을 다시 받아 그 버전을 기준 버전으로 옮긴다 — 옛 기준 버전에 다시 미리보기하면 서버는 일부러 고른 옛 버전으로 보고 받는다
+describe('AlterDialog — 미리보기 뒤에 저장된 더 새 버전', () => {
+  const NEWER = '미리보기 뒤에 다른 사용자가 더 새 버전(v2)을 저장했습니다 — 이대로 저장하면 최신 버전에서 그 변경이 빠지므로, 최신 버전에서 미리보기를 다시 실행하세요';
+  const newerResponse = (details: unknown) => json({ error: NEWER, details }, 409);
+
+  it('저장이 409 로 거절되면 미리보기를 지우고 메시지를 보이며, 다시 받은 목록에서 그 버전으로 기준 버전을 옮긴다 — 그 버전으로 다시 낸 미리보기로 저장된다', async () => {
+    let isNewerSaved = false; // 미리보기 뒤에 다른 사용자가 v1(id 11)에서 v2(id 12)를 저장했다
+    let listFetches = 0;
+    const calls = mockApi({
+      ...pageRoutes,
+      '/api/schemas/7/versions': () => {
+        listFetches += 1;
+        return isNewerSaved ? [version(12, 2, 'sql'), version(11, 1, 'sql')] : [version(11, 1, 'sql')];
+      },
+      'GET /api/versions/11/alter-defaults': NO_SUGGESTION,
+      'GET /api/versions/12/alter-defaults': NO_SUGGESTION,
+      'POST /api/versions/11/alter': (init: RequestInit) => {
+        if (!isSaveRequest(init)) return previewOf(1);
+        isNewerSaved = true;
+        return newerResponse({ latestVersion: { id: 12, versionNo: 2 } });
+      },
+      'POST /api/versions/12/alter': (init: RequestInit) => (isSaveRequest(init) ? { ...SAVED, versionId: 13, versionNo: 3 } : previewOf(2)),
+    });
+    renderWithProviders(<HistoryPage />, route);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'ALTER 적용' }));
+    await waitFor(() => expect(charsetField()).toBeEnabled());
+    await runPreview(user);
+    await user.click(saveButton());
+    expect(await screen.findByRole('alert')).toHaveTextContent('다른 사용자가 더 새 버전(v2)을 저장했습니다');
+    expect(previewList()).not.toBeInTheDocument();
+    await waitFor(() => expect(baseSelect()).toHaveValue('12'));
+    expect(listFetches).toBe(2);
+    expect(screen.getByRole('alert')).toHaveTextContent('최신 버전에서 미리보기를 다시 실행하세요'); // 기준 버전을 옮겨도 안내는 남는다
+    expect(saveButton()).toBeDisabled();
+    await waitFor(() => expect(previewButton()).toBeEnabled());
+    await user.click(previewButton());
+    await screen.findByRole('list', { name: '미리보기 결과' });
+    await user.click(saveButton());
+    expect(await screen.findByText('v3 생성')).toBeInTheDocument();
+    expect(alterBodies(calls, 12).at(-1)).toMatchObject({ dryRun: false, expectedBase: fingerprint(2) });
+    expect(alterBodies(calls, 11)).toHaveLength(2); // 옛 기준 버전으로는 다시 보내지 않았다
+  });
+
+  it('409 의 details 가 버전 모양이 아니면 기준 버전을 옮기지 않는다 — 미리보기만 지우고 다시 낼 수 있다', async () => {
+    const malformed: unknown[] = [undefined, null, 'v2', { latestVersion: null }, { latestVersion: { id: '12', versionNo: 2 } }, { latestVersion: { id: 12, versionNo: 0 } }, { latestVersion: { id: 1.5, versionNo: 2 } }];
+    for (const details of malformed) {
+      mockAlterApi({ 'POST /api/versions/1/alter': (init: RequestInit) => (isSaveRequest(init) ? newerResponse(details) : PREVIEW) });
+      const view = renderWithProviders(<AlterDialog versions={[version(1, 1, 'sql')]} onClose={() => undefined} />);
+      const user = userEvent.setup();
+      await waitFor(() => expect(charsetField()).toBeEnabled());
+      await runPreview(user);
+      await user.click(saveButton());
+      expect(await screen.findByRole('alert'), JSON.stringify(details)).toHaveTextContent('다른 사용자가 더 새 버전');
+      expect(previewList()).not.toBeInTheDocument();
+      expect(baseSelect()).toHaveValue('1');
+      expect(screen.queryByText(/새 기준 버전을 목록에 불러오는 중/)).not.toBeInTheDocument();
+      expect(previewButton(), JSON.stringify(details)).toBeEnabled();
+      view.unmount();
+    }
   });
 });

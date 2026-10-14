@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { printSqlDump } from '@tdm/core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { one, run, type Db } from '../src/db/connection';
 import { loadEvidence, loadStaleReason } from '../src/repos/evidence';
 import { listRenames } from '../src/repos/renames';
@@ -29,8 +29,18 @@ const dump = (db: string, table = TABLE) => [
 
 // 지문은 서버의 계산을 거치지 않고 저장된 값에서 직접 읽는다 (서버가 돌려주는 지문과 대조하는 테스트가 순환하지 않게)
 const fingerprintOf = (db: Db, id: number) => {
-  const r = one<{ schema_id: number; version_no: number; model_hash: string }>(db, 'SELECT schema_id, version_no, model_hash FROM schema_versions WHERE id = ?', id)!;
-  return { schemaId: Number(r.schema_id), versionNo: Number(r.version_no), modelHash: r.model_hash };
+  const r = one<{ schema_id: number; version_no: number; model_hash: string; uploaded_at: string; database_name: string; schema_name: string }>(db, `
+    SELECT v.schema_id, v.version_no, v.model_hash, v.uploaded_at, d.name AS database_name, s.name AS schema_name
+      FROM schema_versions v JOIN schemas s ON s.id = v.schema_id JOIN databases d ON d.id = s.database_id WHERE v.id = ?`, id)!;
+  return {
+    schemaId: Number(r.schema_id), versionNo: Number(r.version_no), modelHash: r.model_hash, uploadedAt: r.uploaded_at, databaseName: r.database_name, schemaName: r.schema_name,
+  };
+};
+// 미리보기가 돌려주는 기준 버전: 지문과, 그때 그 스키마의 최신 SQL 버전 번호 (SQL 버전이 없으면 — MD 기준 — 그 버전 자신)
+const previewBaseOf = (db: Db, id: number) => {
+  const fingerprint = fingerprintOf(db, id);
+  const latest = one<{ n: number | null }>(db, "SELECT max(version_no) AS n FROM schema_versions WHERE schema_id = ? AND source_format = 'sql'", fingerprint.schemaId)!.n;
+  return { ...fingerprint, latestVersionNo: latest === null ? fingerprint.versionNo : Number(latest) };
 };
 
 async function setup() {
@@ -39,12 +49,19 @@ async function setup() {
   const schemaId = Number(one<{ schema_id: number }>(ctx.db, 'SELECT schema_id FROM schema_versions WHERE id = ?', base.versionId)!.schema_id);
   const alter = (id: number, payload: Record<string, unknown>, headers: Record<string, string> = ctx.admin) =>
     ctx.app.inject({ method: 'POST', url: `/api/versions/${id}/alter`, headers, payload });
-  const fingerprint = (id: number) => fingerprintOf(ctx.db, id);
-  // 저장 요청에는 미리보기가 돌려준 기준 버전 지문(expectedBase)이 필요하다. 지문이 주제가 아닌 테스트는 지금 저장된 지문을 붙여 보낸다
+  const fingerprint = (id: number) => previewBaseOf(ctx.db, id);
+  // 저장 요청에는 미리보기가 돌려준 기준 버전 지문(expectedBase)이 필요하다. 지문이 주제가 아닌 테스트는 지금 미리보기했다면 받았을 값을 붙여 보낸다
   const save = (id: number, payload: Record<string, unknown>, headers: Record<string, string> = ctx.admin) =>
     alter(id, { expectedBase: fingerprint(id), ...payload }, headers);
   return { ...ctx, baseId: base.versionId, schemaId, alter, save, fingerprint };
 }
+type Ctx = Awaited<ReturnType<typeof setup>>;
+const versionCount = (db: Db) => one<{ n: number }>(db, 'SELECT count(*) AS n FROM schema_versions')!.n;
+const derivationCount = (db: Db) => one<{ n: number }>(db, 'SELECT count(*) AS n FROM schema_version_derivations')!.n;
+const columnsOf = async (ctx: Ctx, versionId: number) => {
+  const detail = (await ctx.app.inject({ method: 'GET', url: `/api/versions/${versionId}`, headers: ctx.viewer })).json();
+  return detail.model.tables[0].columns.map((c: { name: string }) => c.name);
+};
 
 describe('POST /versions/:id/alter', () => {
   it('미리보기는 저장하지 않고 변경 목록과 rename 을, 기준 버전 지문과 함께 돌려준다', async () => {
@@ -336,25 +353,24 @@ describe('기동 재판정 — 기준 버전의 stale', () => {
 });
 
 // 2way 리뷰 4회차 (R4-01): 행 ID 는 가장 큰 ID 의 버전을 지우면 다시 쓰이므로, ID 만으로는 미리보기한 그 기준 버전인지 알 수 없다.
-// 미리보기가 기준 버전의 지문(스키마 ID·버전 번호·저장된 모델 해시)을 돌려주고, 저장은 그 지문을 expectedBase 로 되돌려 보내야 한다
+// 미리보기가 기준 버전의 지문(스키마 ID·버전 번호·저장된 모델 해시)을 돌려주고, 저장은 그 지문을 expectedBase 로 되돌려 보내야 한다.
+// 2way 리뷰 5회차 (R5-01): 스키마까지 통째로 지우면 스키마 ID·버전 번호·행 ID 를 처음부터 다시 쓰고, 모델 해시는 테이블·뷰·루틴만 보므로 같은 구조를
+// 다른 스키마에 올리면 세 필드가 모두 같아진다. 지문에 버전을 만든 시각과 데이터베이스·스키마 이름을 더한다
 describe('POST /versions/:id/alter — 기준 버전 지문', () => {
   const SCRIPT = 'ALTER TABLE member ADD x INT;';
   const REPLACEMENT = dump('shop', TABLE.replace('`name`', '`title`'));
-  type Ctx = Awaited<ReturnType<typeof setup>>;
-  const versionCount = (db: Db) => one<{ n: number }>(db, 'SELECT count(*) AS n FROM schema_versions')!.n;
-  const derivationCount = (db: Db) => one<{ n: number }>(db, 'SELECT count(*) AS n FROM schema_version_derivations')!.n;
   const removeVersion = (ctx: Ctx, id: number) => ctx.app.inject({ method: 'DELETE', url: `/api/versions/${id}`, headers: ctx.admin });
-  const columnsOf = async (ctx: Ctx, versionId: number) => {
-    const detail = (await ctx.app.inject({ method: 'GET', url: `/api/versions/${versionId}`, headers: ctx.viewer })).json();
-    return detail.model.tables[0].columns.map((c: { name: string }) => c.name);
-  };
+  const removeSchema = (ctx: Ctx) => ctx.app.inject({ method: 'DELETE', url: `/api/schemas/${ctx.schemaId}`, headers: ctx.admin, payload: { confirmName: 'shop' } });
+  afterEach(() => {
+    vi.useRealTimers(); // 시각을 고정한 테스트가 중간에 실패해도 다음 테스트는 실제 시각을 쓴다
+  });
   // 미리보기를 낸 상태. stale 은 그때 받은 지문이다
   async function previewed() {
     const ctx = await setup();
     const preview = await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true });
     expect(preview.statusCode).toBe(200);
     expect(preview.json().base, '미리보기가 기준 버전 지문을 돌려준다').toBeDefined();
-    return { ctx, stale: preview.json().base as ReturnType<typeof fingerprintOf> };
+    return { ctx, stale: preview.json().base as ReturnType<typeof previewBaseOf> };
   }
   const expectStale = (res: Awaited<ReturnType<Ctx['alter']>>, stale: { modelHash: string }) => {
     expect(res.statusCode, res.body).toBe(409);
@@ -363,18 +379,17 @@ describe('POST /versions/:id/alter — 기준 버전 지문', () => {
     expect(res.body).not.toContain(stale.modelHash); // 저장된 값을 알려 주지 않는다
   };
 
-  it('미리보기가 돌려주는 지문은 저장된 스키마 ID·버전 번호·모델 해시다', async () => {
+  it('미리보기가 돌려주는 지문은 저장된 스키마 ID·버전 번호·모델 해시·버전을 만든 시각과 데이터베이스·스키마 이름이다', async () => {
     const { ctx, stale } = await previewed();
-    const stored = one<{ model_hash: string }>(ctx.db, 'SELECT model_hash FROM schema_versions WHERE id = ?', ctx.baseId)!;
-    expect(stale).toEqual({ schemaId: ctx.schemaId, versionNo: 1, modelHash: stored.model_hash });
+    const stored = one<{ model_hash: string; uploaded_at: string }>(ctx.db, 'SELECT model_hash, uploaded_at FROM schema_versions WHERE id = ?', ctx.baseId)!;
+    expect(stale).toEqual({ schemaId: ctx.schemaId, versionNo: 1, modelHash: stored.model_hash, uploadedAt: stored.uploaded_at, databaseName: 'db-01', schemaName: 'shop', latestVersionNo: 1 });
   });
 
-  it('미리보기가 돌려준 지문을 그대로 보내면 저장된다 — 그 사이 다른 버전이 올라와도 기준 버전이 그대로면 막지 않는다', async () => {
+  it('미리보기가 돌려준 지문을 그대로 보내면 저장된다 (그 사이 더 새 버전이 생긴 경우는 아래 M-2)', async () => {
     const { ctx, stale } = await previewed();
-    ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: REPLACEMENT, userId: 1 }); // v2: 기준(v1)은 그대로다
     const res = await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: stale });
     expect(res.statusCode, res.body).toBe(200);
-    expect(res.json()).toMatchObject({ status: 'ok', versionNo: 3 });
+    expect(res.json()).toMatchObject({ status: 'ok', versionNo: 2 });
     expect(await columnsOf(ctx, res.json().versionId)).toEqual(['id', 'name', 'x']);
   });
 
@@ -428,6 +443,35 @@ describe('POST /versions/:id/alter — 기준 버전 지문', () => {
     expect(versionCount(ctx.db)).toBe(1);
   });
 
+  it('스키마를 통째로 지우고 같은 구조를 다른 이름의 스키마에 올려 스키마 ID·버전 번호·행 ID·모델 해시가 모두 같아져도 409 — 다른 스키마에 파생 버전을 만들지 않는다', async () => {
+    const { ctx, stale } = await previewed();
+    expect((await removeSchema(ctx)).statusCode).toBe(200);
+    const other = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'other', filename: 'other.sql', text: dump('other'), userId: 1 });
+    expect(other).toMatchObject({ status: 'ok', versionId: ctx.baseId, versionNo: 1 });
+    expect(fingerprintOf(ctx.db, ctx.baseId)).toMatchObject({ schemaId: stale.schemaId, versionNo: stale.versionNo, modelHash: stale.modelHash });
+    expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: stale }), stale);
+    expect(versionCount(ctx.db)).toBe(1);
+    expect(derivationCount(ctx.db)).toBe(0);
+  });
+
+  it('같은 데이터베이스·같은 이름·같은 구조로 다시 만들어 이름까지 같아져도, 버전을 만든 시각이 달라 409', async () => {
+    const { ctx, stale } = await previewed();
+    expect((await removeSchema(ctx)).statusCode).toBe(200);
+    // 다시 올리는 시각을 미리보기한 버전을 만든 시각과 다르게 둔다 (같은 밀리초에 지우고 다시 올리지는 않는다)
+    const later = Date.parse(stale.uploadedAt) + 60_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(later);
+    const again = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: dump('shop'), userId: 1 });
+    vi.useRealTimers();
+    expect(again).toMatchObject({ status: 'ok', versionId: ctx.baseId, versionNo: 1 });
+    const { uploadedAt, ...rest } = fingerprintOf(ctx.db, ctx.baseId);
+    expect(rest).toEqual({ schemaId: stale.schemaId, versionNo: stale.versionNo, modelHash: stale.modelHash, databaseName: stale.databaseName, schemaName: stale.schemaName });
+    expect(uploadedAt).toBe(new Date(later).toISOString());
+    expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: stale }), stale);
+    expect(versionCount(ctx.db)).toBe(1);
+    expect(derivationCount(ctx.db)).toBe(0);
+  });
+
   it('미리보기에 expectedBase 를 보내도 대조한다 — 맞으면 지문을 돌려주고, 어긋나면 409', async () => {
     const { ctx, stale } = await previewed();
     const ok = await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: stale });
@@ -436,6 +480,9 @@ describe('POST /versions/:id/alter — 기준 버전 지문', () => {
     expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, modelHash: '0'.repeat(64) } }), stale);
     expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, versionNo: stale.versionNo + 1 } }), stale);
     expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, schemaId: stale.schemaId + 1 } }), stale);
+    expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, uploadedAt: '2000-01-01T00:00:00.000Z' } }), stale);
+    expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, databaseName: 'db-02' } }), stale);
+    expectStale(await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: { ...stale, schemaName: 'other' } }), stale);
   });
 
   it('저장에는 expectedBase 가 필요하다 — 없으면 400 이고 아무것도 만들지 않는다. 미리보기에는 필요 없다', async () => {
@@ -454,6 +501,9 @@ describe('POST /versions/:id/alter — 기준 버전 지문', () => {
     const malformed: [string, unknown][] = [
       ['객체가 아님', 'x'], ['null', null], ['필드 없음', { schemaId: 1 }], ['소수 스키마 ID', { ...stale, schemaId: 1.5 }], ['0 버전 번호', { ...stale, versionNo: 0 }],
       ['문자열 버전 번호', { ...stale, versionNo: '1' }], ['빈 해시', { ...stale, modelHash: '' }], ['숫자 해시', { ...stale, modelHash: 5 }], ['너무 긴 해시', { ...stale, modelHash: 'a'.repeat(129) }],
+      ['시각 없음', { ...stale, uploadedAt: undefined }], ['숫자 시각', { ...stale, uploadedAt: 0 }], ['너무 긴 시각', { ...stale, uploadedAt: 'a'.repeat(257) }],
+      ['빈 데이터베이스 이름', { ...stale, databaseName: '' }], ['스키마 이름 없음', { ...stale, schemaName: undefined }], ['너무 긴 스키마 이름', { ...stale, schemaName: 's'.repeat(257) }],
+      ['최신 버전 번호 없음', { ...stale, latestVersionNo: undefined }], ['소수 최신 버전 번호', { ...stale, latestVersionNo: 1.5 }], ['문자열 최신 버전 번호', { ...stale, latestVersionNo: '1' }],
     ];
     for (const [label, expectedBase] of malformed) {
       for (const dryRun of [true, false]) {
@@ -463,5 +513,159 @@ describe('POST /versions/:id/alter — 기준 버전 지문', () => {
       }
     }
     expect(versionCount(ctx.db)).toBe(1);
+  });
+});
+
+// 2way 리뷰 5회차 (M-2): 대화상자를 연 동안 다른 사용자가 같은 기준에서 더 새 버전을 저장해도, 지문은 기준 버전만 보므로 옛 미리보기가 그대로 저장돼
+// 최신 버전에서 그 변경이 조용히 빠졌다. 미리보기가 그때 스키마의 최신 SQL 버전 번호(latestVersionNo)를 함께 돌려주고, 저장할 때 기준 버전이 그때 최신이었는데
+// 더 새 SQL 버전이 생겼으면 409 로 막는다. 미리보기 때 이미 더 새 버전이 있던 옛 기준 버전을 고른 것은 일부러 고른 것이라 막지 않는다
+describe('POST /versions/:id/alter — 미리보기 뒤에 저장된 더 새 버전', () => {
+  const SCRIPT = 'ALTER TABLE member ADD x INT;';
+  const REPLACEMENT = dump('shop', TABLE.replace('`name`', '`title`'));
+  const preview = async (ctx: Ctx, id: number, script = SCRIPT, headers: Record<string, string> = ctx.admin) => {
+    const res = await ctx.alter(id, { script, dryRun: true }, headers);
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json().base as ReturnType<typeof previewBaseOf>;
+  };
+  const expectNewer = (res: Awaited<ReturnType<Ctx['alter']>>, latest: { id: number; versionNo: number }) => {
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toContain(`다른 사용자가 더 새 버전(v${latest.versionNo})을 저장했습니다`);
+    expect(res.json().error).toContain('최신 버전에서 미리보기를 다시 실행하세요');
+    expect(res.json().details).toEqual({ latestVersion: latest }); // 화면이 그 버전으로 기준 버전을 옮긴다
+  };
+
+  it('미리보기 때 최신이던 기준 버전 뒤에 다른 사용자가 더 새 버전을 저장했으면 409 — 옛 미리보기로 저장해 최신 버전에서 그 변경이 빠지지 않게 한다', async () => {
+    const ctx = await setup();
+    const mine = await preview(ctx, ctx.baseId, 'ALTER TABLE member ADD a INT;');
+    expect(mine).toMatchObject({ versionNo: 1, latestVersionNo: 1 });
+    const theirs = await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD b INT;', expectedBase: await preview(ctx, ctx.baseId, 'ALTER TABLE member ADD b INT;', ctx.dba) }, ctx.dba);
+    expect(theirs.json()).toMatchObject({ status: 'ok', versionNo: 2 });
+    expectNewer(await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD a INT;', expectedBase: mine }), { id: theirs.json().versionId, versionNo: 2 });
+    expect(versionCount(ctx.db)).toBe(2);
+    expect(derivationCount(ctx.db)).toBe(1);
+    // 최신 버전에서 다시 낸 미리보기로는 저장되고, 앞 사람의 변경이 남는다
+    const again = await preview(ctx, theirs.json().versionId, 'ALTER TABLE member ADD a INT;');
+    const saved = await ctx.alter(theirs.json().versionId, { script: 'ALTER TABLE member ADD a INT;', expectedBase: again });
+    expect(saved.json()).toMatchObject({ status: 'ok', versionNo: 3 });
+    expect(await columnsOf(ctx, saved.json().versionId)).toEqual(['id', 'name', 'b', 'a']);
+  });
+
+  it('업로드로 올라온 SQL 버전도 더 새 버전이다 — MD 버전은 ALTER 의 기준이 될 수 없어 세지 않는다', async () => {
+    const ctx = await setup();
+    const mine = await preview(ctx, ctx.baseId);
+    ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: SAMPLE_MD, text: sampleText(SAMPLE_MD), userId: 1 }); // v2 (MD)
+    const saved = await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: mine });
+    expect(saved.json()).toMatchObject({ status: 'ok', versionNo: 3 });
+    const next = await preview(ctx, saved.json().versionId, 'ALTER TABLE member ADD y INT;');
+    expect(next).toMatchObject({ versionNo: 3, latestVersionNo: 3 });
+    const uploaded = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: REPLACEMENT, userId: 1 }); // v4 (SQL)
+    expectNewer(await ctx.alter(saved.json().versionId, { script: 'ALTER TABLE member ADD y INT;', expectedBase: next }), { id: uploaded.versionId, versionNo: 4 });
+    expect(versionCount(ctx.db)).toBe(4);
+  });
+
+  it('미리보기 때 이미 더 새 버전이 있던 옛 기준 버전을 고른 것은 일부러 고른 것이라, 그 뒤에 새 버전이 더 생겨도 저장된다', async () => {
+    const ctx = await setup();
+    ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: REPLACEMENT, userId: 1 }); // v2
+    const mine = await preview(ctx, ctx.baseId);
+    expect(mine).toMatchObject({ versionNo: 1, latestVersionNo: 2 });
+    ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: dump('shop', TABLE.replace('`name`', '`label`')), userId: 1 }); // v3
+    const res = await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: mine });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ status: 'ok', versionNo: 4 });
+    expect(await columnsOf(ctx, res.json().versionId)).toEqual(['id', 'name', 'x']);
+  });
+
+  // 같은 저장을 다시 보내면(응답을 받지 못해 다시 누름, 같은 미리보기를 연 다른 탭) 결과가 처음 저장한 버전과 같아 빠지는 변경이 없다.
+  // 409 를 주면 저장에 실패한 줄 알게 되므로, 중복 판정이 먼저고 새 버전을 만들 때만 더 새 버전을 본다
+  it('같은 expectedBase 로 다시 저장하면 지금처럼 duplicate 로 처음 저장한 버전을 돌려준다', async () => {
+    const ctx = await setup();
+    const mine = await preview(ctx, ctx.baseId);
+    const otherTab = await preview(ctx, ctx.baseId);
+    const first = await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: mine });
+    expect(first.json()).toMatchObject({ status: 'ok', versionNo: 2 });
+    for (const expectedBase of [mine, otherTab]) {
+      const again = await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase });
+      expect(again.statusCode, again.body).toBe(200);
+      expect(again.json()).toMatchObject({ status: 'duplicate', versionId: first.json().versionId, versionNo: 2 });
+    }
+    expect(versionCount(ctx.db)).toBe(2);
+    expect(derivationCount(ctx.db)).toBe(1);
+    // 결과가 다르면(다른 스크립트) 중복이 아니라 더 새 버전 검사로 막는다
+    expectNewer(await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD y INT;', expectedBase: mine }), { id: first.json().versionId, versionNo: 2 });
+  });
+
+  it('미리보기는 expectedBase 의 지문만 대조한다 — 더 새 버전은 저장이 새 버전을 만들 때 본다. 새 미리보기는 지금의 최신 SQL 버전 번호를 돌려준다', async () => {
+    const ctx = await setup();
+    const mine = await preview(ctx, ctx.baseId);
+    const uploaded = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'shop', filename: 'shop.sql', text: REPLACEMENT, userId: 1 }); // v2
+    const dry = await ctx.alter(ctx.baseId, { script: SCRIPT, dryRun: true, expectedBase: mine });
+    expect(dry.statusCode, dry.body).toBe(200);
+    expect(dry.json().base).toEqual({ ...mine, latestVersionNo: 2 });
+    expectNewer(await ctx.alter(ctx.baseId, { script: SCRIPT, expectedBase: mine }), { id: uploaded.versionId, versionNo: 2 });
+    expect(versionCount(ctx.db)).toBe(2);
+  });
+});
+
+// 2way 리뷰 5회차 (M-1): SET SQL_MODE 없이 만든 루틴은 스크립트를 실행한 서버의 sql_mode 를 기억하는데, 늘 MySQL 기본 모드로 두어 서버 sql_mode 가 기본과
+// 다르면 틀린 모델이 됐다. 서버는 기준 버전 루틴의 SQL_MODE 최빈값을 처음 세션 SQL_MODE 로 준다 (루틴이 없으면 지금처럼 MySQL 기본 모드)
+describe('POST /versions/:id/alter — SET SQL_MODE 없이 만든 루틴의 SQL_MODE', () => {
+  const RELAXED = 'STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+  const DEFAULT_MODE = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+  const NEW_PROC = 'DELIMITER $$\nCREATE PROCEDURE sp_new()\nBEGIN\n  SELECT 1;\nEND$$\nDELIMITER ;';
+  // td-export 0.1.52 꼴 루틴 블록 (mode 가 없으면 0.1.52 전 꼴 — 루틴의 SQL_MODE 를 남기지 않는다)
+  const routine = (name: string, mode?: string) => [
+    ...(mode === undefined ? [] : [`SET @OLD_ROUTINE_SQL_MODE = @@SQL_MODE, SQL_MODE = '${mode}';`]),
+    'DELIMITER ;;', `CREATE DEFINER=\`root\`@\`%\` PROCEDURE \`${name}\`()\nBEGIN\n  SELECT 1;\nEND ;;`, 'DELIMITER ;',
+    ...(mode === undefined ? [] : ['SET SQL_MODE = @OLD_ROUTINE_SQL_MODE;']),
+  ].join('\n');
+  const baseWith = (ctx: Ctx, routines: string[]) =>
+    ingest(ctx.db, { databaseName: 'db-01', schemaName: 'routines', filename: 'routines.sql', text: dump('routines', [...routines, '', TABLE].join('\n')), userId: 1 }).versionId;
+  const modeOf = async (ctx: Ctx, versionId: number, name: string) => {
+    const detail = (await ctx.app.inject({ method: 'GET', url: `/api/versions/${versionId}`, headers: ctx.viewer })).json();
+    return (detail.model.routines as { name: string; sqlMode?: string }[]).find((r) => r.name === name)?.sqlMode;
+  };
+  const saveNew = async (ctx: Ctx, baseId: number, script = NEW_PROC) => {
+    const res = await ctx.save(baseId, { script });
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json().versionId as number;
+  };
+
+  it('기준 버전 루틴의 SQL_MODE 최빈값을 쓴다 — 같은 서버에서 SET SQL_MODE 없이 만든 루틴과 같은 값이다', async () => {
+    const ctx = await setup();
+    const baseId = baseWith(ctx, [routine('sp_a', RELAXED), routine('sp_b', RELAXED), routine('sp_c', DEFAULT_MODE)]);
+    expect(await modeOf(ctx, baseId, 'sp_a')).toBe(RELAXED);
+    const id = await saveNew(ctx, baseId);
+    expect(await modeOf(ctx, id, 'sp_new')).toBe(RELAXED);
+    const source = (await ctx.app.inject({ method: 'GET', url: `/api/versions/${id}/source`, headers: ctx.viewer })).body;
+    expect(source).toContain(`SQL_MODE = '${RELAXED}';\nDELIMITER ;;\nCREATE PROCEDURE \`sp_new\``);
+    // 다음 추출과 견줘도 sp_new 의 SQL_MODE 가 바뀌지 않는다
+    const diff = (await ctx.app.inject({ method: 'GET', url: `/api/diff?base=${baseId}&target=${id}`, headers: ctx.viewer })).json();
+    expect(diff.ddl).toContain(`SQL_MODE = '${RELAXED}'`);
+  });
+
+  it('스크립트의 SET SQL_MODE 가 앞선다', async () => {
+    const ctx = await setup();
+    const baseId = baseWith(ctx, [routine('sp_a', RELAXED)]);
+    const id = await saveNew(ctx, baseId, `SET SQL_MODE = 'NO_ENGINE_SUBSTITUTION';\n${NEW_PROC}`);
+    expect(await modeOf(ctx, id, 'sp_new')).toBe('NO_ENGINE_SUBSTITUTION');
+  });
+
+  it('루틴이 없거나 루틴에 SQL_MODE 기록이 없으면(td-export 0.1.52 전) 지금처럼 MySQL 기본 모드다', async () => {
+    const ctx = await setup();
+    expect(await modeOf(ctx, await saveNew(ctx, ctx.baseId), 'sp_new')).toBe(DEFAULT_MODE);
+    const legacy = baseWith(ctx, [routine('sp_a'), routine('sp_b')]);
+    expect(await modeOf(ctx, legacy, 'sp_a')).toBeUndefined();
+    expect(await modeOf(ctx, await saveNew(ctx, legacy), 'sp_new')).toBe(DEFAULT_MODE);
+  });
+
+  it('처음 세션 SQL_MODE 로 쓸 수 없는 값(묶음 모드·ANSI_QUOTES 등)의 루틴은 세지 않고, 그런 루틴뿐이어도 ALTER 는 받는다', async () => {
+    const ctx = await setup();
+    const traditional = 'STRICT_TRANS_TABLES,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,TRADITIONAL,NO_ENGINE_SUBSTITUTION';
+    const mixed = baseWith(ctx, [routine('sp_a', traditional), routine('sp_b', traditional), routine('sp_c', 'ANSI_QUOTES'), routine('sp_d', RELAXED)]);
+    expect(await modeOf(ctx, await saveNew(ctx, mixed), 'sp_new')).toBe(RELAXED);
+    const unusable = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'odd', filename: 'odd.sql', text: dump('odd', [routine('sp_a', traditional), '', TABLE].join('\n')), userId: 1 }).versionId;
+    const altered = await ctx.save(unusable, { script: 'ALTER TABLE member ADD x INT;' });
+    expect(altered.json()).toMatchObject({ status: 'ok' });
+    expect(await modeOf(ctx, await saveNew(ctx, altered.json().versionId), 'sp_new')).toBe(DEFAULT_MODE);
   });
 });
