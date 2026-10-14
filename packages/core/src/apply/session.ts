@@ -178,14 +178,15 @@ const BOOLEAN_INTEGERS: ReadonlyMap<string, string> = new Map([['FALSE', '0'], [
 // REAL_AS_FLOAT 이고, 0.0 은 1232, 0x00 은 1231 이다. 0 은 빈 모드로 받고 그 밖의 숫자는 비트를 재현하지 않아 거부한다. 변수(@m·@@foreign_key_checks)의 숫자·TRUE·FALSE 는
 // 정수(비트)인지 문자열('0' 은 1231)인지 따라가지 않아 함께 거부한다. 따옴표 친 '0'·'FALSE' 는 모드 이름이 아니라 1231 이다 (resolveSqlMode)
 function sqlModeOf(value: string, written: Token | undefined): string {
-  const integer = written?.t === 'number' ? value : written?.t === 'word' ? BOOLEAN_INTEGERS.get(value) : undefined;
+  const boolean = BOOLEAN_INTEGERS.get(value);
+  const shown = boolean === undefined ? value : `${value}(정수 ${boolean})`;
+  const integer = written?.t === 'number' ? value : written?.t === 'word' ? boolean : undefined;
   if (integer !== undefined) {
-    const shown = integer === value ? `숫자 ${value}` : `${value}(정수 ${integer})`;
-    return /^0+$/.test(integer) ? '' : fail(`SQL_MODE 를 ${shown} 로 쓰면 MySQL 이 모드 비트로 읽습니다 — 0(빈 모드) 밖의 숫자는 받지 않습니다 — ${RE_EXPORT}`);
+    const literal = boolean === undefined ? `숫자 ${value}` : shown;
+    return /^0+$/.test(integer) ? '' : fail(`SQL_MODE 를 ${literal} 로 쓰면 MySQL 이 모드 비트로 읽습니다 — 0(빈 모드) 밖의 숫자는 받지 않습니다 — ${RE_EXPORT}`);
   }
-  if (written?.t !== 'string' && (/^\d+$/.test(value) || BOOLEAN_INTEGERS.has(value))) {
-    fail(`SQL_MODE 에 넣은 변수 값 ${value} 가 숫자(TRUE·FALSE 는 정수 1·0)입니다 — MySQL 은 정수면 모드 비트로 읽고 문자열이면 1231 로 거부하는데, 이 도구는 변수 값이 정수인지 `
-      + `따라가지 않습니다 — ${RE_EXPORT}`);
+  if (written?.t !== 'string' && (/^\d+$/.test(value) || boolean !== undefined)) {
+    fail(`SQL_MODE 에 넣은 변수 값 ${shown} 가 숫자입니다 — MySQL 은 정수면 모드 비트로 읽고 문자열이면 1231 로 거부하는데, 이 도구는 변수 값이 정수인지 따라가지 않습니다 — ${RE_EXPORT}`);
   }
   return resolveSqlMode(value);
 }
