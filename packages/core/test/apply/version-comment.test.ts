@@ -125,3 +125,19 @@ describe('문장 나누기와 렉서 (덤프 파서와 함께 쓴다)', () => {
     expect(dump.model.tables[0].columns.map((c) => [c.name, c.invisible])).toEqual([['id', false], ['c', true]]);
   });
 });
+
+// 리뷰 12회차 Claude F5 (변이 M15 — parse-dump.ts ChunkLog.take 의 표지 걸러내기): 문장 없이 끝난 덩어리('/*!80400 */;')와 DELIMITER 줄의 실행 주석 표지는 뒤 문장의 것이
+// 아니다. 안에 토큰이 없어 판에 따라 갈리는 번호도 8.0·8.4 가 실행하든 건너뛰든 같다 (8.0.46·8.4.11 실측). 번호를 다르게 읽는 것과 건너뛰는 것 안의 주석·줄 주석은 문장 안의
+// 것처럼 거부한다
+describe('문장 없이 끝난 덩어리의 실행 주석', () => {
+  it.each(['/*!80400 */;', '/*!80047 */ ;', '/*!40101 */;', '/*! */;', '/*!99999 */;\n/*!80499 -- 메모\n*/;', 'DELIMITER ;; /*!80400 */\nDELIMITER ;'])(
+    '%j 뒤의 DDL 도 적용한다', (chunk) => {
+      expect(columnsOf(run(`${chunk}\nALTER TABLE t ADD c INT;`))).toEqual(['id', 'c']);
+    });
+
+  it('건너뛰는 주석 안의 주석·줄 주석과 다섯 자리가 아닌 번호는 거부한다', () => {
+    expectReExport(run('/*!99999 -- 메모\n*/;\nALTER TABLE t ADD c INT;'), 1, '/*!99999', '줄 주석');
+    expectReExport(run('/*!99999 /* 메모 */ */;\nALTER TABLE t ADD c INT;'), 1, '/*!99999', '안의 주석');
+    expectReExport(run('/*!1 */;\nALTER TABLE t ADD c INT;'), 1, '/*!1', '다섯 자리');
+  });
+});

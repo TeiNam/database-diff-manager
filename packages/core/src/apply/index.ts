@@ -16,9 +16,9 @@ import { applySet, resolveSqlMode } from './session';
 import { initialState, type State } from './state';
 import { createTable, dropTable, renameTables } from './table-stmt';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
-import { assertAsciiSpaces } from './unicode-space';
+import { assertAsciiSpaces, assertLeadingSpaces } from './unicode-space';
 import { assertKnownRealType, assertModeIndependentText } from './unknown-session';
-import { executedText, lineCommentAfterLast, lineCommentReason, skippedComments } from './version-comment';
+import { executedText, leadingSkippedComments, lineCommentAfterLast, lineCommentReason, skippedComments } from './version-comment';
 
 export { MYSQL_DEFAULTS, type ApplyDefaults, type ApplyError, type ApplyOptions, type ApplyResult } from './types';
 export { printSqlDump } from './print-dump';
@@ -95,6 +95,7 @@ type Handler = (st: State, c: Cursor) => void;
 // 모드 검사는 쓴 글 그대로 본다 — 건너뛰는 실행 주석 안의 글도 문장 나누기는 읽었다 (보수적)
 function applyStatement(st: State, s: ApplyStatement, script: string): boolean {
   const { noBackslashEscapes } = s;
+  assertLeadingSpaces(script, s, leadingSkippedComments(script, s)); // 앞 문장 뒤의 문장 없는 덩어리·DELIMITER 줄 (리뷰 12회차 Claude F5)
   const skipped = skippedComments(script, s); // 실행 주석의 버전 번호 (리뷰 11회차 R11-2)
   const statement = executedText(s, skipped);
   assertSameBackslashMode(st, s.ddl, noBackslashEscapes);

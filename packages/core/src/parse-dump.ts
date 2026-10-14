@@ -63,9 +63,11 @@ export interface LexNotes {
 }
 
 // ALTER 적용이 쓰는 문장 (splitForApply). offset: ddl 의 원문 자리. marks·spaces: 이 문장의 덩어리(앞 구분자·DELIMITER 줄 뒤부터 이 문장의 끝까지)에서 렉서가 알린 것 —
-// 문장이 실행 주석 안에서 시작하면 여는 표지는 ddl 앞에 있다 ('/*!99999 ALTER … */;' 의 ddl 은 'ALTER … */')
+// 문장이 실행 주석 안에서 시작하면 여는 표지는 ddl 앞에 있다 ('/*!99999 ALTER … */;' 의 ddl 은 'ALTER … */'). leading: 그 앞(앞 문장 뒤부터)의 문장 없이 끝난 덩어리
+// ('/*!99999 */;'·'<NBSP>;')와 DELIMITER 줄에서 알린 것 (apply/version-comment.ts·unicode-space.ts, 리뷰 12회차 Claude F5 — 11회차는 버렸다)
 export interface ApplyStatement extends DumpStatement, LexNotes {
   readonly offset: number;
+  readonly leading: LexNotes;
 }
 
 // splitForApply 의 결과. trailing: 마지막 문장 뒤(문장 없이 끝난 덩어리·DELIMITER 줄·파일 끝)에서 렉서가 알린 것 — 줄 주석이 뒤 DDL 을 삼킨 건너뛰는 실행 주석을 가린다
@@ -104,8 +106,8 @@ export function scanDump(text: string): DumpScan {
   return scan(text, true, plain);
 }
 
-// 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것만 넘긴다. 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 다음 문장의 덩어리 앞이라 버리고,
-// 마지막 문장 뒤의 것은 rest 가 넘긴다
+// 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것을 넘긴다. 그 앞의 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 덩어리의 것과 가르고(leading — 문장 없는
+// 덩어리의 표지를 뒤 문장의 것으로 읽으면 '/*!80400 */;' 뒤의 문장을 거부한다), 마지막 문장 뒤의 것은 rest 가 넘긴다
 class ChunkLog implements LexWatch {
   private marks: VersionMark[] = [];
   private spaces: number[] = [];
@@ -118,8 +120,9 @@ class ChunkLog implements LexWatch {
     this.spaces.push(at);
   }
 
-  take(from: number): LexNotes {
-    const taken = { marks: this.marks.filter((m) => m.at >= from), spaces: this.spaces.filter((at) => at >= from) };
+  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'leading'> {
+    const leading = { marks: this.marks.filter((m) => m.at < from), spaces: this.spaces.filter((at) => at < from) };
+    const taken = { marks: this.marks.filter((m) => m.at >= from), spaces: this.spaces.filter((at) => at >= from), leading };
     this.marks = [];
     this.spaces = [];
     return taken;

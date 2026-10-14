@@ -47,3 +47,27 @@ describe('따옴표·주석 밖의 ASCII 가 아닌 공백', () => {
     expect(tokenize(`ADD ${NBSP}nick INT`).map((t) => t.v)).toEqual(['ADD', 'nick', 'INT']);
   });
 });
+
+// 리뷰 12회차 Claude F5 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 앞 문장 뒤의 문장 없는 덩어리와 DELIMITER 줄에 든 것도 거부한다 — mysql 클라이언트는 이 글자를 공백으로
+// 보지 않아 그 글을 문장으로 보내 1064 로 멈추고('<NBSP>;'), 버퍼가 비지 않아 뒤의 DELIMITER 줄을 명령으로 읽지 않는다 (11회차는 렉서가 공백으로 건너뛴 것을 버려 루틴과
+// 뒤 ALTER 를 받았다). 건너뛰는 실행 주석 안의 것은 MySQL 에 주석이라 받고, 마지막 문장 뒤의 것은 앞 DDL 을 모두 적용한 뒤라 모델이 같아 받는다
+describe('문장 앞 덩어리의 ASCII 가 아닌 공백', () => {
+  const ROUTINE = 'DELIMITER ;;\nCREATE PROCEDURE p() BEGIN SELECT 1; END ;;\nDELIMITER ;\nALTER TABLE t ADD b INT;';
+  it.each([
+    ['NBSP 만 있는 줄 다음의 DELIMITER 줄 (Claude 재현)', `ALTER TABLE t ADD a INT;\n${NBSP}\n${ROUTINE}`, 2, 2],
+    ['같은 줄의 DELIMITER 앞', `ALTER TABLE t ADD a INT;\n${NBSP}${ROUTINE}`, 2, 2],
+    ['DELIMITER 와 인자 사이', `ALTER TABLE t ADD a INT;\nDELIMITER ${NBSP};;\nCREATE PROCEDURE p() BEGIN SELECT 1; END ;;\nDELIMITER ;`, 2, 2],
+    ['문장 없이 끝난 덩어리', `ALTER TABLE t ADD a INT;\n${NBSP};\nALTER TABLE t ADD b INT;`, 2, 2],
+    ['실행하는 실행 주석만 있는 덩어리', `/*!40101 ${IDEOGRAPHIC} */;\nALTER TABLE t ADD b INT;`, 1, 1],
+  ])('%s 의 것은 RE_EXPORT 로 거부한다', (_name, script, index, line) => {
+    const r = run(script);
+    expectRejected(r, index, script.includes(IDEOGRAPHIC) ? '3000' : '00A0');
+    expect(!r.ok && r.error.reason).toContain(`줄 ${line}`);
+  });
+
+  it('건너뛰는 실행 주석·주석 안의 것과 마지막 문장 뒤의 것은 받는다', () => {
+    expect(run(`/*!99999 ${NBSP} */;\nALTER TABLE t ADD a INT;`)).toMatchObject({ ok: true, applied: 1 });
+    expect(run(`ALTER TABLE t ADD a INT;\n-- ${NBSP}\n/* ${NBSP} */;\n${ROUTINE}`)).toMatchObject({ ok: true, applied: 3 });
+    expect(run(`ALTER TABLE t ADD a INT;\n${NBSP}\n`)).toMatchObject({ ok: true, applied: 1 });
+  });
+});
