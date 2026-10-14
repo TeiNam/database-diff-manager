@@ -61,9 +61,10 @@ export function resolveDefaults(given: Partial<ApplyDefaults> = {}): ApplyDefaul
 }
 
 // DDL 을 적용했으면 true, 세션 문장(SET·USE)과 무시하는 문장(isNoOp)이면 false
-function applyStatement(st: State, ddl: string, noBackslashEscapes: boolean): boolean {
-  assertSameBackslashMode(st, ddl, noBackslashEscapes);
-  const c = new Cursor(withoutCommentEnd(tokenize(ddl, { noBackslashEscapes })), ddl);
+function applyStatement(st: State, statement: string, noBackslashEscapes: boolean): boolean {
+  assertSameBackslashMode(st, statement, noBackslashEscapes);
+  const { toks, ddl } = withoutCommentEnd(statement, tokenize(statement, { noBackslashEscapes }));
+  const c = new Cursor(toks, ddl);
   if (c.isWord('SET') || c.isWord('USE') || isNoOp(c)) assertOneStatement(c.toks);
   if (c.isWord('SET')) {
     applySet(st, c);
@@ -142,11 +143,12 @@ function assertBmpStrings(toks: readonly Token[]): void {
 }
 
 // 실행 주석(/*!NNNNN … */)으로 감싼 문장 ('/*!40101 SET … */;' — mysqldump 머리·꼬리): 문장 나누기가 여는 표지만 떼고 닫는 '*/' 를 문장 끝에 남긴다.
-// 문장 끝에 붙은 '*' '/' 는 올바른 문장에 있을 수 없으므로 실행 주석의 끝으로 보고 뗀다. 안의 문장은 MySQL 이 그대로 실행한다
-function withoutCommentEnd(toks: Token[]): Token[] {
+// 문장 끝에 붙은 '*' '/' 는 올바른 문장에 있을 수 없으므로 실행 주석의 끝으로 보고 토큰과 원문에서 함께 뗀다 (원문은 루틴 본문이 된다 — 리뷰 1회차 F2).
+// 안의 문장은 MySQL 이 그대로 실행한다
+function withoutCommentEnd(statement: string, toks: Token[]): { toks: Token[]; ddl: string } {
   const [star, slash] = toks.slice(-2);
   const closes = star?.t === 'op' && star.v === '*' && slash?.t === 'op' && slash.v === '/' && star.e === slash.s;
-  return closes ? toks.slice(0, -2) : toks;
+  return closes ? { toks: toks.slice(0, -2), ddl: statement.slice(0, star.s).trimEnd() } : { toks, ddl: statement };
 }
 
 function unsupported(ddl: string): string {
