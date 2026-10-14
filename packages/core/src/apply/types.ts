@@ -39,6 +39,9 @@ export const fail = (reason: string): never => {
 export const RE_EXPORT = 'td-export 로 다시 뽑아 올려 주세요';
 
 export const MYSQL_DEFAULTS: ApplyDefaults = { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' };
+// 처음 세션의 문자셋·콜레이션: mysql 클라이언트 8.0·8.4 의 기본 연결 (8.0.46·8.4.11 실측 — character_set_client·connection·results 는 utf8mb4, collation_connection 은
+// utf8mb4_0900_ai_ci). 스크립트는 UTF-8 이다 (client-charset.ts)
+export const CLIENT_DEFAULTS: ApplyDefaults = { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' };
 // 스크립트에 SET SQL_MODE 가 없고 ApplyOptions.sqlMode 도 주지 않았을 때 루틴에 붙는 SQL_MODE (MySQL 8.0/8.4 기본값)
 export const DEFAULT_SQL_MODE = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
 

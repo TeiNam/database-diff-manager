@@ -46,12 +46,12 @@ function calleeBefore(toks: readonly Token[], open: number): Callee | undefined 
 const hasMode = (sqlMode: string, mode: string): boolean => sqlMode.split(',').includes(mode);
 
 // 호출을 읽는 세션 SQL_MODE 의 IGNORE_SPACE (리뷰 10회차 R10-1 — 공백을 끼운 NOW () 도 내장 함수가 된다). 모르면 undefined: 세션 SQL_MODE 를 모르거나(앞의 SET 이 값을 모르는
-// 변수에서 정했다), 지금 값이 처음 세션 SQL_MODE(서버가 기준 버전 루틴에서 짐작한 값 — 설계 4장)에서 왔을 수 있다 — SET 없이 시작했거나 DEFAULT·변수로 짐작한 값에 돌아왔다
-// (보수적). 리터럴로 정했으면 짐작한 값과 같아도 그 값을 따른다 (리뷰 11회차 R11-1 — 판정은 늘 지금 아는 모드를 따른다)
+// 변수에서 정했다), 지금 값이 처음 세션 SQL_MODE(서버가 기준 버전 루틴에서 짐작한 값 — 설계 4장)에서 왔다 — SET 없이 시작했거나, DEFAULT 나 짐작한 값을 저장한 변수로 그 값에
+// 돌아왔다 (보수적, st.sqlModeGuessed). 리터럴로 정한 값은 짐작한 값과 같아도, @@sql_mode·사용자 변수로 옮겨 되돌려도 그 값을 따른다 (리뷰 11회차 R11-1·12회차 R12-1)
 function ignoreSpace(st: State): boolean | undefined {
   if (st.sqlModeUnknown !== undefined) return undefined;
   if (!hasMode(st.sqlMode, 'IGNORE_SPACE')) return false;
-  return st.sqlModeLiteral || st.sqlMode !== st.initialSqlMode ? true : undefined;
+  return st.sqlModeGuessed && st.sqlMode === st.initialSqlMode ? undefined : true;
 }
 
 // 스키마 없이 쓴 이름이 MySQL 이 내장 함수로 읽는 꼴인가 (native-functions.ts — 이름과 '(' 사이의 원문으로 공백·주석을 가른다). 이름 토큰이 단어여야 한다 (백틱·숫자로 시작하는
@@ -98,6 +98,7 @@ export function forgetStateChangedBy(st: State, call: string | undefined): void 
   if (call === undefined) return;
   for (const name of st.saved.keys()) st.forgotten.add(name);
   st.saved.clear();
+  st.guessedSqlModes.clear();
   if (st.timeZoneUtc) st.timeZoneUnknown = `무시한 문장의 저장 함수 호출(\`${call}\`)이 세션 시간대를 바꿨을 수 있어`;
   st.timeZoneUtc = false;
   st.storedCall = call;

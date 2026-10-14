@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseSqlDump } from '../../src/parse-dump';
 import { tdExport } from '../helpers';
-import { checkCase, clauses, lines, TEST_TIMEOUT_MS, type Case } from './perf-cases';
+import { checkCase, clauses, fill, lines, MAX_SCRIPT, TEST_TIMEOUT_MS, type Case } from './perf-cases';
 
 // 문장 수·같은 테이블의 키와 컬럼 (perf-cases.ts)
 const CASES: Case[] = [
@@ -46,4 +46,21 @@ describe('applyScript — 1,000,000자 스크립트의 계산량: 키·컬럼이
     expect(WIDE.tables[0].indexes.map((i) => i.parts.length)).toEqual([1, ...Array.from({ length: WIDE_KEYS }, () => KEY_PARTS)]);
   });
   it.each(WIDE_CASES)('%s', (_name, make, expected) => checkCase(make, expected, WIDE), TEST_TIMEOUT_MS);
+});
+
+// 건너뛰는 실행 주석·NBSP 가 많은 문장 하나 (리뷰 12회차 Claude F2): 건너뛰는 주석마다 문장 전체를 다시 잇던 blank 와 NBSP 마다 건너뛰는 주석을 모두 훑던 공백 검사가 제곱
+// 시간이라, 1,000,000자 문장 하나가 4~28 초였다. 두 배열은 원문 자리 순서라 한 번에 훑고 조각은 한 번에 잇는다. 여기서는 3 초 안을 본다
+const SKIPPED_BOUND_MS = 3000;
+const SKIPPED_COMMENTS = 50_000;
+const NBSP = '\u00a0';
+const SKIPPED_CASES: Case[] = [
+  ['건너뛰는 실행 주석이 가득한 문장', () => fill(() => '/*!99999*/', '', 'ALTER TABLE member ADD a INT ', ';'), { ok: true }],
+  ['건너뛰는 실행 주석 50,000개 뒤에 NBSP 가 가득한 건너뛰는 주석', () => {
+    const head = `ALTER TABLE member ADD a INT ${'/*!99999*/'.repeat(SKIPPED_COMMENTS)}/*!99999 `;
+    return `${head}${NBSP.repeat(MAX_SCRIPT - head.length - '*/;'.length)}*/;`;
+  }, { ok: true }],
+];
+
+describe('applyScript — 1,000,000자 스크립트의 계산량: 건너뛰는 실행 주석과 NBSP', () => {
+  it.each(SKIPPED_CASES)('%s', (_name, make, expected) => checkCase(make, expected, undefined, SKIPPED_BOUND_MS), TEST_TIMEOUT_MS);
 });

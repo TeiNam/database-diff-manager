@@ -1,10 +1,10 @@
 // ALTER 스크립트 → 새 모델. 문장마다 MySQL 과 같은 결과를 만들고, 받을 수 없는 문장에서 멈춘다 (부분 적용하지 않는다)
-import { Cursor, ParseError } from '../cursor';
+import { Cursor, lineOf, ParseError } from '../cursor';
 import type { RenameMapping } from '../diff';
 import { LexError, tokenize, type Token } from '../lexer';
 import type { SchemaModel } from '../model';
 import { routineLexMode } from '../normalize';
-import { splitForApply, type ApplyStatement } from '../parse-dump';
+import { splitForApply, type ApplySplit, type ApplyStatement } from '../parse-dump';
 import { UnsafeValueError } from '../sql-safety';
 import { alterTable, createIndex, dropIndexOn } from './alter-table';
 import { assertUtf8Session } from './client-charset';
@@ -16,9 +16,9 @@ import { applySet, resolveSqlMode } from './session';
 import { initialState, type State } from './state';
 import { createTable, dropTable, renameTables } from './table-stmt';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
-import { assertAsciiSpaces } from './unicode-space';
+import { assertAsciiSpaces, assertLeadingSpaces } from './unicode-space';
 import { assertKnownRealType, assertModeIndependentText } from './unknown-session';
-import { executedText, skippedComments } from './version-comment';
+import { executedText, leadingSkippedComments, lineCommentAfterLast, lineCommentReason, skippedComments } from './version-comment';
 
 export { MYSQL_DEFAULTS, type ApplyDefaults, type ApplyError, type ApplyOptions, type ApplyResult } from './types';
 export { printSqlDump } from './print-dump';
@@ -36,11 +36,11 @@ const ACCOUNT_STATEMENT = '계정 문장(CREATE USER·ALTER USER·SET PASSWORD)�
 
 export function applyScript(base: SchemaModel, script: string, opts: ApplyOptions): ApplyResult {
   const text = script.replace(/^\uFEFF/, '');
-  let statements: ApplyStatement[];
+  let split: ApplySplit;
   let defaults: ApplyDefaults;
   let sqlMode: string;
   try {
-    statements = splitForApply(text);
+    split = splitForApply(text);
     defaults = resolveDefaults(opts.defaults);
     sqlMode = initialSqlMode(opts.sqlMode);
   } catch (e) {
@@ -50,7 +50,7 @@ export function applyScript(base: SchemaModel, script: string, opts: ApplyOption
   }
   const st = initialState(base, opts.schemaName, defaults, sqlMode);
   let applied = 0;
-  for (const [i, s] of statements.entries()) {
+  for (const [i, s] of split.statements.entries()) {
     try {
       if (applyStatement(st, s, text)) applied++;
     } catch (e) {
@@ -58,6 +58,8 @@ export function applyScript(base: SchemaModel, script: string, opts: ApplyOption
       throw e;
     }
   }
+  const hidden = lineCommentAfterLast(text, split.trailing); // 마지막 문장 뒤에서 줄 주석이 DDL 을 삼킨 건너뛰는 실행 주석 (리뷰 12회차 R12-3)
+  if (hidden) return failure(0, lineOf(text, hidden.at), text.slice(hidden.at), lineCommentReason(hidden));
   if (applied === 0) return failure(0, 1, '', '적용할 DDL 문장이 없습니다');
   return { ok: true, model: st.model, applied, renames: collectRenames(st), defaults };
 }
@@ -93,6 +95,7 @@ type Handler = (st: State, c: Cursor) => void;
 // 모드 검사는 쓴 글 그대로 본다 — 건너뛰는 실행 주석 안의 글도 문장 나누기는 읽었다 (보수적)
 function applyStatement(st: State, s: ApplyStatement, script: string): boolean {
   const { noBackslashEscapes } = s;
+  assertLeadingSpaces(script, s, leadingSkippedComments(script, s)); // 앞 문장 뒤의 문장 없는 덩어리·DELIMITER 줄 (리뷰 12회차 Claude F5)
   const skipped = skippedComments(script, s); // 실행 주석의 버전 번호 (리뷰 11회차 R11-2)
   const statement = executedText(s, skipped);
   assertSameBackslashMode(st, s.ddl, noBackslashEscapes);

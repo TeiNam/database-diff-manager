@@ -1,5 +1,5 @@
-// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 세션 문자셋(SET NAMES·CHARACTER SET,
-// character_set_client·character_set_connection·collation_connection)도 따라간다 (client-charset.ts, 리뷰 11회차 Claude F4). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
+// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 세션 문자셋(SET NAMES·CHARACTER SET, character_set_client·
+// character_set_connection·character_set_results·collation_connection)도 따라간다 (client-charset.ts, 리뷰 11회차 Claude F4·12회차 R12-2). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
 // (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(unique_checks·sql_notes 등)는 스키마에 영향이 없어 값을 버린다 — 값을 모르는
 // 변수에서 되돌려도 받는다 (리뷰 9회차). 값을 쓰는 대상(사용자 변수, 세션 SQL_MODE·TIME_ZONE·FOREIGN_KEY_CHECKS)도 값을 모르는 변수에서 정하면 그 SET 에서 거부하지 않고
 // 모르는 값으로 둔다 — 그 값에 기대는 뒤 문장만 거부한다 (리뷰 10회차, unknown-session.ts). 트랜잭션 특성·역할·자원 그룹의 SET(SET TRANSACTION·SET ROLE·SET DEFAULT ROLE·
@@ -23,7 +23,7 @@ const SCHEMA_VARIABLES: ReadonlySet<string> = new Set([
 ]);
 
 // 값을 쓰는 세션 변수 (소문자, assignValue 가 따라가는 것): FOREIGN_KEY_CHECKS·SQL_MODE 는 값을, time_zone 은 UTC 로 정했는지를, 문자셋 변수는 문자셋을 쓴다. 사용자 변수도
-// 뒤 SET 이 읽으므로 값을 쓴다 — 값을 모르는 변수에서 정하면 모르는 값을 기억한다 (setUnknown). 그 밖의 세션 변수(unique_checks·sql_notes·character_set_results …)는 값을
+// 뒤 SET 이 읽으므로 값을 쓴다 — 값을 모르는 변수에서 정하면 모르는 값을 기억한다 (setUnknown). 그 밖의 세션 변수(unique_checks·sql_notes·autocommit …)는 값을
 // 버리므로, 값을 모르는 변수(저장하지 않았거나 저장 함수 호출 뒤 잊은 사용자 변수, @@global·@@persist 서버 변수)에서 되돌려도 받는다 — mysqldump·Workbench 꼬리의
 // 'SET UNIQUE_CHECKS = @OLD_UNIQUE_CHECKS' (리뷰 9회차 Claude 참고 1)
 const TRACKED_VARIABLES: ReadonlySet<string> = new Set(['foreign_key_checks', 'sql_mode', 'time_zone', ...CHARSET_VARIABLES]);
@@ -117,34 +117,39 @@ function sessionWrite(st: State, a: Cursor, target: string): Write | undefined {
   if (SCHEMA_VARIABLES.has(target)) fail(`이후 테이블 정의 결과를 바꾸는 세션 변수는 받을 수 없습니다: ${target} — ${RE_EXPORT}`);
   if (!a.acceptOp('=') && !(a.acceptOp(':') && a.acceptOp('='))) fail(notAssignment(a));
   const written = a.peek(); // 쓴 값의 첫 토큰 (time_zone 은 리터럴만 UTC 로 본다)
-  const value = valueOf(st, a);
+  const evaluated = valueOf(st, a);
   if (!a.done) fail(`SET 값은 리터럴·@변수·@@변수만 받습니다: ${a.src.slice(a.peek()!.s).trim()}`);
   if (!usesValue(target)) return undefined;
   const assignment = `SET ${a.src.slice(a.toks[0].s, a.toks[a.toks.length - 1].e)}`; // 안내에 쓰는 이 대입 ('SET SQL_MODE=@OLD_SQL_MODE')
-  return () => assignValue(st, target, value, written, assignment);
+  return () => assignValue(st, target, evaluated, written, assignment);
 }
 
-// 계산해 둔 값을 대입한다 (2단계). 세션 sql_mode 의 DEFAULT 는 이때 전역 값을 읽는다 (sqlModeDefault)
-function assignValue(st: State, target: string, value: SessionValue, written: Token | undefined, assignment: string): void {
-  if (target.startsWith('@')) {
-    st.saved.set(target, isUnknown(value) ? { unknown: cappedReason(`사용자 변수 ${target} 에 앞의 \`${assignment}\` 문장이 알 수 없는 값을 넣었습니다 — ${value.unknown}`) } : value);
-    return;
-  }
+// 계산해 둔 값을 대입한다 (2단계). 세션 sql_mode 의 DEFAULT 는 이때 전역 값, 곧 짐작한 처음 세션 SQL_MODE 를 읽는다 (sqlModeDefault)
+function assignValue(st: State, target: string, { value, guessed }: Evaluated, written: Token | undefined, assignment: string): void {
+  if (target.startsWith('@')) return saveVariable(st, target, value, guessed, assignment);
   if (CHARSET_VARIABLES.has(target)) return assignCharset(st, target, value, written, assignment);
-  const tracked = target === 'sql_mode' && value === 'DEFAULT' ? sqlModeDefault(st) : value;
+  const isDefault = target === 'sql_mode' && value === 'DEFAULT';
+  const tracked = isDefault ? sqlModeDefault(st) : value;
   if (isUnknown(tracked)) setUnknown(st, target, assignment, tracked.unknown);
-  else setKnown(st, target, tracked, written);
+  else setKnown(st, target, tracked, written, isDefault || guessed);
 }
 
-// 아는 값으로 정한 세션 값 (모르던 값이면 다시 안다)
-function setKnown(st: State, target: string, value: string, written: Token | undefined): void {
+// 사용자 변수에 저장한다. guessed: 짐작한 세션 SQL_MODE 를 담는다 (guessedSqlModes — 다시 저장하면 그 값을 따른다)
+function saveVariable(st: State, name: string, value: SessionValue, guessed: boolean, assignment: string): void {
+  st.saved.set(name, isUnknown(value) ? { unknown: cappedReason(`사용자 변수 ${name} 에 앞의 \`${assignment}\` 문장이 알 수 없는 값을 넣었습니다 — ${value.unknown}`) } : value);
+  if (guessed) st.guessedSqlModes.add(name);
+  else st.guessedSqlModes.delete(name);
+}
+
+// 아는 값으로 정한 세션 값 (모르던 값이면 다시 안다). guessed: SQL_MODE 가 짐작한 처음 값에서 왔다 (DEFAULT, 짐작한 값을 담은 @@sql_mode·사용자 변수)
+function setKnown(st: State, target: string, value: string, written: Token | undefined, guessed: boolean): void {
   if (target === 'foreign_key_checks') {
     st.fkChecks = foreignKeyChecksOf(value);
     st.fkChecksUnknown = undefined;
   } else if (target === 'sql_mode') {
     st.sqlMode = sqlModeOf(value, written);
     st.sqlModeUnknown = undefined;
-    st.sqlModeLiteral = isLiteral(written);
+    st.sqlModeGuessed = guessed;
   } else {
     st.timeZoneUtc = isUtcZone(written);
     st.timeZoneUnknown = undefined;
@@ -162,23 +167,26 @@ function setUnknown(st: State, target: string, assignment: string, why: string):
   const reason = cappedReason(`앞의 \`${assignment}\` 문장이 세션 ${target.toUpperCase()} 를 알 수 없는 값으로 정했습니다 — ${why}`);
   if (target === 'sql_mode') {
     st.sqlModeUnknown = reason;
-    st.sqlModeLiteral = false;
+    st.sqlModeGuessed = false;
   } else st.fkChecksUnknown = reason;
 }
 
-// 값을 리터럴로 썼는가 (문자열·숫자, DEFAULT 가 아닌 단어). @변수·@@변수·DEFAULT 는 아니다
-const isLiteral = (written: Token | undefined): boolean =>
-  written?.t === 'string' || written?.t === 'number' || (written?.t === 'word' && written.v.toUpperCase() !== 'DEFAULT');
+// 따옴표 없는 단어 FALSE·TRUE 는 MySQL 에서 정수 0·1 이다 (Item_func_false·Item_func_true — 리뷰 12회차 Claude F4, 8.0.46·8.4.11 실측: FALSE 는 빈 모드, TRUE 는 REAL_AS_FLOAT)
+const BOOLEAN_INTEGERS: ReadonlyMap<string, string> = new Map([['FALSE', '0'], ['TRUE', '1']]);
 
-// 대입한 SQL_MODE 값 (written: 쓴 값의 첫 토큰). 숫자 (리뷰 11회차 Claude F8, 8.0.46·8.4.11 실측): MySQL 은 정수를 모드 비트로 읽어 0·00 은 빈 모드, 1 은 REAL_AS_FLOAT 이고,
-// 0.0 은 1232, 0x00 은 1231 이다. 0 은 빈 모드로 받고 그 밖의 숫자는 비트를 재현하지 않아 거부한다. 변수(@m·@@foreign_key_checks)의 숫자는 정수(비트)인지
-// 문자열('0' 은 1231)인지 따라가지 않아 함께 거부한다. 따옴표 친 '0' 은 모드 이름이 아니라 1231 이다 (resolveSqlMode)
+// 대입한 SQL_MODE 값 (written: 쓴 값의 첫 토큰). 숫자 (리뷰 11회차 Claude F8, 8.0.46·8.4.11 실측): MySQL 은 정수를 모드 비트로 읽어 0·00·FALSE 는 빈 모드, 1·TRUE 는
+// REAL_AS_FLOAT 이고, 0.0 은 1232, 0x00 은 1231 이다. 0 은 빈 모드로 받고 그 밖의 숫자는 비트를 재현하지 않아 거부한다. 변수(@m·@@foreign_key_checks)의 숫자·TRUE·FALSE 는
+// 정수(비트)인지 문자열('0' 은 1231)인지 따라가지 않아 함께 거부한다. 따옴표 친 '0'·'FALSE' 는 모드 이름이 아니라 1231 이다 (resolveSqlMode)
 function sqlModeOf(value: string, written: Token | undefined): string {
-  if (written?.t === 'number') {
-    return /^0+$/.test(value) ? '' : fail(`SQL_MODE 를 숫자 ${value} 로 쓰면 MySQL 이 모드 비트로 읽습니다 — 0(빈 모드) 밖의 숫자는 받지 않습니다 — ${RE_EXPORT}`);
+  const boolean = BOOLEAN_INTEGERS.get(value);
+  const shown = boolean === undefined ? value : `${value}(정수 ${boolean})`;
+  const integer = written?.t === 'number' ? value : written?.t === 'word' ? boolean : undefined;
+  if (integer !== undefined) {
+    const literal = boolean === undefined ? `숫자 ${value}` : shown;
+    return /^0+$/.test(integer) ? '' : fail(`SQL_MODE 를 ${literal} 로 쓰면 MySQL 이 모드 비트로 읽습니다 — 0(빈 모드) 밖의 숫자는 받지 않습니다 — ${RE_EXPORT}`);
   }
-  if (written?.t !== 'string' && /^\d+$/.test(value)) {
-    fail(`SQL_MODE 에 넣은 변수 값 ${value} 가 숫자입니다 — MySQL 은 정수면 모드 비트로 읽고 문자열이면 1231 로 거부하는데, 이 도구는 변수 값이 정수인지 따라가지 않습니다 — ${RE_EXPORT}`);
+  if (written?.t !== 'string' && (/^\d+$/.test(value) || boolean !== undefined)) {
+    fail(`SQL_MODE 에 넣은 변수 값 ${shown} 가 숫자입니다 — MySQL 은 정수면 모드 비트로 읽고 문자열이면 1231 로 거부하는데, 이 도구는 변수 값이 정수인지 따라가지 않습니다 — ${RE_EXPORT}`);
   }
   return resolveSqlMode(value);
 }
@@ -219,25 +227,32 @@ function systemName(a: Cursor): Variable {
   return { name: a.ident().toLowerCase(), scope: NAME_SCOPES.get(first) };
 }
 
+// 1단계에서 계산한 값. guessed: 짐작한 처음 세션 SQL_MODE 를 읽었는가 — 그 값인 동안의 @@sql_mode 나 그 값을 담은 사용자 변수다. 리터럴로 정한 SQL_MODE 는 @@sql_mode·
+// 사용자 변수로 옮겨도 아니다 (리뷰 12회차 R12-1 — 11회차는 변수에서 되돌린 값을 모두 짐작한 값으로 보았다)
+interface Evaluated {
+  readonly value: SessionValue;
+  readonly guessed: boolean;
+}
+
 // 쓴 값: 리터럴·@변수·@@변수 (식은 assignSession 이 거부한다 — 값 안의 저장 함수 호출이 숨지 않게 값을 버리는 변수도 같다). 값을 알 수 없는 읽기(저장하지 않았거나 저장 함수
 // 호출 뒤 잊은 사용자 변수, @@global·@@persist 서버 변수, 모르는 세션 값의 @@sql_mode·@@foreign_key_checks)는 왜 모르는지 밝힌 Unknown 이다 — 거부는 그 값에 기대는 뒤 문장이 한다
-function valueOf(st: State, a: Cursor): SessionValue {
+function valueOf(st: State, a: Cursor): Evaluated {
   if (a.acceptOp('@')) return a.acceptOp('@') ? systemValue(st, a) : userValue(st, a);
   const t = a.next();
-  if (t.t === 'string' || t.t === 'number') return t.v;
-  if (t.t === 'word') return t.v.toUpperCase();
+  if (t.t === 'string' || t.t === 'number') return { value: t.v, guessed: false };
+  if (t.t === 'word') return { value: t.v.toUpperCase(), guessed: false };
   return fail(`SET 값을 읽을 수 없습니다: ${t.v}`);
 }
 
-function systemValue(st: State, a: Cursor): SessionValue {
+function systemValue(st: State, a: Cursor): Evaluated {
   const source = systemName(a);
-  if (source.scope !== 'server') return current(st, source.name);
-  return { unknown: `서버 변수 값(@@global·@@persist 의 ${source.name})은 알 수 없습니다` };
+  if (source.scope === 'server') return { value: { unknown: `서버 변수 값(@@global·@@persist 의 ${source.name})은 알 수 없습니다` }, guessed: false };
+  return { value: current(st, source.name), guessed: source.name === 'sql_mode' && st.sqlModeGuessed };
 }
 
-function userValue(st: State, a: Cursor): SessionValue {
+function userValue(st: State, a: Cursor): Evaluated {
   const name = `@${a.ident().toLowerCase()}`;
-  return st.saved.get(name) ?? { unknown: unknownVariable(st, name) };
+  return { value: st.saved.get(name) ?? { unknown: unknownVariable(st, name) }, guessed: st.guessedSqlModes.has(name) };
 }
 
 // 값을 모르는 사용자 변수. 무시한 문장이 저장 함수를 부른 뒤로 다시 정하지 않은 변수는 그 함수가 바꿨을 수 있다 (리뷰 7회차 R7-2·8회차). 호출 전에 저장한 변수

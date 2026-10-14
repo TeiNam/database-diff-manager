@@ -56,13 +56,25 @@ export interface VersionMark {
   readonly digits: string;
 }
 
-// ALTER 적용이 쓰는 문장 (splitForApply). offset: ddl 의 원문 자리. marks: 이 문장의 덩어리(앞 구분자·DELIMITER 줄 뒤부터 이 문장의 끝까지)에서 렉서가 연 실행 주석
-// 표지 — 문장이 실행 주석 안에서 시작하면 여는 표지는 ddl 앞에 있다 ('/*!99999 ALTER … */;' 의 ddl 은 'ALTER … */'). spaces: 같은 덩어리에서 렉서가 공백으로
-// 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 Claude F5)
-export interface ApplyStatement extends DumpStatement {
-  readonly offset: number;
+// 원문의 한 구간에서 렉서가 알린 것: marks 는 렉서가 연 실행 주석 표지, spaces 는 렉서가 공백으로 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 R11-2·Claude F5)
+export interface LexNotes {
   readonly marks: readonly VersionMark[];
   readonly spaces: readonly number[];
+}
+
+// ALTER 적용이 쓰는 문장 (splitForApply). offset: ddl 의 원문 자리. marks·spaces: 이 문장의 덩어리(앞 구분자·DELIMITER 줄 뒤부터 이 문장의 끝까지)에서 렉서가 알린 것 —
+// 문장이 실행 주석 안에서 시작하면 여는 표지는 ddl 앞에 있다 ('/*!99999 ALTER … */;' 의 ddl 은 'ALTER … */'). leading: 그 앞(앞 문장 뒤부터)의 문장 없이 끝난 덩어리
+// ('/*!99999 */;'·'<NBSP>;')와 DELIMITER 줄에서 알린 것 (apply/version-comment.ts·unicode-space.ts, 리뷰 12회차 Claude F5 — 11회차는 버렸다)
+export interface ApplyStatement extends DumpStatement, LexNotes {
+  readonly offset: number;
+  readonly leading: LexNotes;
+}
+
+// splitForApply 의 결과. trailing: 마지막 문장 뒤(문장 없이 끝난 덩어리·DELIMITER 줄·파일 끝)에서 렉서가 알린 것 — 줄 주석이 뒤 DDL 을 삼킨 건너뛰는 실행 주석을 가린다
+// (apply/version-comment.ts, 리뷰 12회차 R12-3)
+export interface ApplySplit {
+  readonly statements: ApplyStatement[];
+  readonly trailing: LexNotes;
 }
 
 // 문장 하나를 만든다: offset 은 ddl 의 원문 자리, from 은 그 덩어리가 시작한 자리 (앞 구분자·DELIMITER 줄 바로 뒤)
@@ -81,11 +93,12 @@ export function splitDump(text: string): DumpStatement[] {
   return scan(text, false, plain).statements;
 }
 
-// ALTER 적용용 splitDump: 문장마다 원문 자리와 그 덩어리에서 렉서가 알린 것(실행 주석 표지, ASCII 밖 공백)을 더한다 (apply/version-comment.ts·unicode-space.ts 가 본다).
-// 덤프 파서는 쓰지 않는다
-export function splitForApply(text: string): ApplyStatement[] {
+// ALTER 적용용 splitDump: 문장마다 원문 자리와 그 덩어리에서 렉서가 알린 것(실행 주석 표지, ASCII 밖 공백)을 더하고, 마지막 문장 뒤의 것은 따로 넘긴다
+// (apply/version-comment.ts·unicode-space.ts 가 본다). 덤프 파서는 쓰지 않는다
+export function splitForApply(text: string): ApplySplit {
   const log = new ChunkLog();
-  return scan(text, false, (statement, offset, from) => ({ ...statement, offset, ...log.take(from) }), log).statements;
+  const { statements } = scan(text, false, (statement, offset, from) => ({ ...statement, offset, ...log.take(from) }), log);
+  return { statements, trailing: log.rest() };
 }
 
 // 덤프 파일 읽기용: 닫히지 않은 문자열·주석에서 실패하지 않고 끊긴 파일로 표시한다 (그 문장은 terminated=false)
@@ -93,7 +106,8 @@ export function scanDump(text: string): DumpScan {
   return scan(text, true, plain);
 }
 
-// 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것만 넘긴다. 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 다음 문장의 덩어리 앞이라 버린다
+// 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것을 넘긴다. 그 앞의 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 덩어리의 것과 가르고(leading — 문장 없는
+// 덩어리의 표지를 뒤 문장의 것으로 읽으면 '/*!80400 */;' 뒤의 문장을 거부한다), 마지막 문장 뒤의 것은 rest 가 넘긴다
 class ChunkLog implements LexWatch {
   private marks: VersionMark[] = [];
   private spaces: number[] = [];
@@ -106,11 +120,16 @@ class ChunkLog implements LexWatch {
     this.spaces.push(at);
   }
 
-  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces'> {
-    const taken = { marks: this.marks.filter((m) => m.at >= from), spaces: this.spaces.filter((at) => at >= from) };
+  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'leading'> {
+    const leading = { marks: this.marks.filter((m) => m.at < from), spaces: this.spaces.filter((at) => at < from) };
+    const taken = { marks: this.marks.filter((m) => m.at >= from), spaces: this.spaces.filter((at) => at >= from), leading };
     this.marks = [];
     this.spaces = [];
     return taken;
+  }
+
+  rest(): LexNotes {
+    return { marks: this.marks, spaces: this.spaces };
   }
 }
 

@@ -72,7 +72,7 @@ describe('storedFunctionCall — IGNORE_SPACE', () => {
 
   // 리뷰 11회차 R11-1: 짐작한 처음 값과 같아도 리터럴로 정한 SQL_MODE 는 믿는다 — 내장 함수 판정은 늘 지금 아는 모드를 따른다
   it('처음 세션 SQL_MODE 와 같은 값이어도 리터럴로 정했으면 공백 낀 꼴은 내장 함수다', () => {
-    expect(callIn('SELECT NOW ()', { ...withMode('IGNORE_SPACE', 'IGNORE_SPACE'), sqlModeLiteral: true })).toBeUndefined();
+    expect(callIn('SELECT NOW ()', { ...withMode('IGNORE_SPACE', 'IGNORE_SPACE'), sqlModeGuessed: false })).toBeUndefined();
   });
 });
 
