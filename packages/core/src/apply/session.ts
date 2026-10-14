@@ -1,8 +1,9 @@
-// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 바꾸었는지만 기억한다 (assertZoneFreeDefault). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
+// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
 // (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, unique_checks 등)는 스키마에 영향이 없어 무시한다.
 // 서버 변수(SET GLOBAL·PERSIST·PERSIST_ONLY, @@global.x)는 이 스크립트의 세션을 바꾸지 않아 무시한다.
 // td-export·마이그레이션 스크립트의 'SET @OLD_X = @@X, X = 0' 저장과 'SET X = @OLD_X' 복원을 따른다
 import { Cursor } from '../cursor';
+import type { Token } from '../lexer';
 import { splitList } from './lists';
 import { baseType } from './normalize-mysql';
 import type { State } from './state';
@@ -26,6 +27,10 @@ const KNOWN_SQL_MODES: ReadonlySet<string> = new Set(SQL_MODES);
 const COMBINATION_SQL_MODES: ReadonlySet<string> = new Set(['ANSI', 'TRADITIONAL']);
 // 이후 테이블 정의를 다르게 읽게 하는 모드: REAL_AS_FLOAT 는 REAL 을 FLOAT 로, ANSI_QUOTES 는 "…" 를 문자열이 아닌 식별자로 읽는다. 모델에 반영하지 않으므로 거부한다
 const DDL_SQL_MODES: ReadonlySet<string> = new Set(['REAL_AS_FLOAT', 'ANSI_QUOTES']);
+
+// 세션 time_zone 이 UTC 인 값 (8.0.46·8.4.11 실측: '+0:00'·'-00:00' 은 '+00:00' 이 되고, 시간대 이름은 대소문자를 가리지 않으며 따옴표 없이도 쓴다)
+const UTC_OFFSET = /^[+-]0?0:00$/;
+const UTC_NAMES: ReadonlySet<string> = new Set(['UTC', 'GMT']);
 
 const FK_CHECKS_OFF: ReadonlySet<string> = new Set(['0', 'OFF', 'FALSE']);
 const FK_CHECKS_ON: ReadonlySet<string> = new Set(['1', 'ON', 'TRUE']);
@@ -61,20 +66,27 @@ function assignSession(st: State, a: Cursor, target: string): void {
     a.expectOp(':');
     a.expectOp('=');
   }
+  const written = a.peek(); // 쓴 값의 첫 토큰 (time_zone 은 리터럴만 UTC 로 본다)
   const value = valueOf(st, a);
   if (!a.done) fail(`SET 값은 리터럴·@변수·@@변수만 받습니다: ${a.src.slice(a.peek()!.s).trim()}`);
   if (target.startsWith('@')) st.saved.set(target, value);
   else if (target === 'foreign_key_checks') st.fkChecks = foreignKeyChecksOf(value);
   else if (target === 'sql_mode') st.sqlMode = sqlModeOf(value);
-  else if (target === 'time_zone') st.timeZoneSet = true; // 되돌리는 대입(SET time_zone = @OLD_TIME_ZONE)도 바꾼 것으로 본다 — 값이 문장 앞과 같은지 모른다
+  else if (target === 'time_zone') st.timeZoneUtc = isUtcZone(written);
 }
 
-// 세션 time_zone 을 바꾼 뒤의 TIMESTAMP 리터럴 기본값 (리뷰 3회차 M-1, 8.0.46·8.4.11 실측): MySQL 은 그 값을 세션 시간대에서 UTC 로 바꿔 저장하고, SHOW CREATE 는 읽는 세션의
-// 시간대로 다시 바꿔 찍는다 ('+09:00' 세션의 '2020-01-01 09:00:00' 을 UTC 세션에서 읽으면 '2020-01-01 00:00:00'). mysqldump·phpMyAdmin 머리의 SET TIME_ZONE='+00:00' 뒤의 값은
-// UTC 글자라 td-export(서버 기본 시간대 세션)로 다시 뽑으면 달라진다. 어느 시간대로 읽을지 모르므로 받지 않는다. CURRENT_TIMESTAMP·NULL 과 DATETIME 은 시간대를 타지 않는다
-export function assertZoneFreeDefault(st: Pick<State, 'timeZoneSet'>, column: string, type: string, value: DefaultSpec | undefined): void {
-  if (!st.timeZoneSet || value === undefined || value.kind === 'null' || value.kind === 'now' || baseType(type) !== 'timestamp') return;
-  fail(`세션 time_zone 을 바꾼 뒤의 TIMESTAMP 컬럼 \`${column}\` 리터럴 기본값은 MySQL 이 그 시간대로 바꿔 저장해 다시 뽑으면 달라집니다 (time_zone 을 바꾸지 않은 세션에서 쓰면 됩니다) — ${RE_EXPORT}`);
+// UTC 를 쓴 리터럴인가. 변수에서 되돌리는 대입(SET time_zone = @OLD_TIME_ZONE)·@@time_zone·DEFAULT 는 서버 시간대일 수 있어 UTC 로 보지 않는다
+const isUtcZone = (t: Token | undefined): boolean =>
+  (t?.t === 'string' || t?.t === 'word') && (UTC_OFFSET.test(t.v) || UTC_NAMES.has(t.v.toUpperCase()));
+
+// TIMESTAMP 컬럼의 리터럴 기본값 (리뷰 3회차 M-1·4회차 M-1, 8.0.46·8.4.11 실측): MySQL 은 그 값을 쓰는 세션의 시간대에서 UTC 로 바꿔 저장하고, SHOW CREATE 는 읽는 세션의
+// 시간대로 다시 바꿔 찍는다 ('+09:00' 세션의 '2020-01-01 09:00:00' 을 UTC 세션에서 읽으면 '2020-01-01 00:00:00'). td-export 는 UTC 세션(sqlx 기본값 time_zone='+00:00')에서
+// SHOW CREATE 를 읽으므로 기준 버전의 값은 UTC 글자다. 스크립트가 앞에서 세션 time_zone 을 UTC 로 정했으면 (mysqldump·phpMyAdmin 머리의 SET TIME_ZONE='+00:00') 쓴 글자가
+// 곧 UTC 라 그대로 받는다. 그 밖에는 서버 시간대(KST 서버의 SYSTEM 등)나 다른 시간대에서 바뀌어 저장된 값을 알 수 없으므로 받지 않는다. 스크립트는 이미 그 시간대로
+// 실행됐으므로 스크립트를 고치라고 안내하지 않는다. CURRENT_TIMESTAMP·NULL 과 DATETIME 은 시간대를 타지 않는다
+export function assertUtcTimestampDefault(st: Pick<State, 'timeZoneUtc'>, column: string, type: string, value: DefaultSpec | undefined): void {
+  if (st.timeZoneUtc || value === undefined || value.kind === 'null' || value.kind === 'now' || baseType(type) !== 'timestamp') return;
+  fail(`TIMESTAMP 컬럼 \`${column}\` 의 리터럴 기본값은 MySQL 이 세션 시간대에서 UTC 로 바꿔 저장하는데, 스크립트를 실행한 서버의 시간대를 알 수 없어 저장된 값을 정할 수 없습니다 — ${RE_EXPORT}`);
 }
 
 interface Variable {

@@ -1,4 +1,6 @@
-import { describe, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { parseSqlDump } from '../../src/parse-dump';
+import { tdExport } from '../helpers';
 import { checkCase, clauses, lines, TEST_TIMEOUT_MS, type Case } from './perf-cases';
 
 // 문장 수·같은 테이블의 키와 컬럼 (perf-cases.ts)
@@ -15,4 +17,33 @@ const CASES: Case[] = [
 
 describe('applyScript — 1,000,000자 스크립트의 계산량: 문장·키·컬럼', () => {
   it.each(CASES)('%s', (_name, make, expected) => checkCase(make, expected), TEST_TIMEOUT_MS);
+});
+
+// 키·컬럼이 한도까지 많은 테이블 (리뷰 4회차 M-2): 컬럼 1017개(1117 한도)와 키 64개(1069 한도) — PRIMARY 와 16 파트(1070 한도) 일반 키 63개. MySQL 8.4 가 만드는 모양이다.
+// 작은 ALTER 도 문장 끝에 키를 MySQL 순서로 다시 정렬하는데, 키 파트마다 컬럼 목록을 훑던 때는 문장 하나에 이름 비교가 100만 번 들어 1,000,000자 스크립트가 4분 걸렸다.
+// 키 파트 바이트 검사는 키·키에 든 컬럼의 정의·ROW_FORMAT 을 건드린 문장만 하고, 컬럼 절이 없는 문장은 컬럼 목록을 다시 훑지 않는다 (실측 1~2 초).
+// 컬럼 정의를 바꾸는 문장(MODIFY·ADD·DROP COLUMN)은 컬럼 목록을 새로 만들어 문장마다 컬럼 수에 비례한다 — 여기서 재지 않는다
+const WIDE_COLUMNS = 1016; // id 와 함께 1017개
+const WIDE_KEYS = 63; // PRIMARY 와 함께 64개
+const KEY_PARTS = 16;
+const wideKey = (k: number) => Array.from({ length: KEY_PARTS }, (_, j) => `\`c${k * KEY_PARTS + j}\``).join(',');
+const WIDE_BODY = [
+  '  `id` int NOT NULL',
+  ...Array.from({ length: WIDE_COLUMNS }, (_, i) => `  \`c${i}\` varchar(5) DEFAULT NULL`),
+  '  PRIMARY KEY (`id`)',
+  ...Array.from({ length: WIDE_KEYS }, (_, k) => `  KEY \`k${k}\` (${wideKey(k)})`),
+].join(',\n');
+const WIDE = parseSqlDump(tdExport(`CREATE TABLE \`w\` (\n${WIDE_BODY}\n) ENGINE=InnoDB DEFAULT CHARSET=latin1;`)).model;
+const WIDE_CASES: Case[] = [
+  ['작은 ALTER 문장 많이', () => lines(() => "ALTER TABLE w COMMENT 'x';"), { ok: true }],
+  ['키에 든 컬럼의 기본값 바꾸기 번갈아', () => lines((i) => `ALTER TABLE w ALTER COLUMN c1 SET DEFAULT '${i % 2}';`), { ok: true }],
+  ['RENAME INDEX 번갈아', () => lines((i) => (i % 2 ? 'ALTER TABLE w RENAME INDEX k0 TO kx;' : 'ALTER TABLE w RENAME INDEX kx TO k0;')), { ok: true }],
+];
+
+describe('applyScript — 1,000,000자 스크립트의 계산량: 키·컬럼이 한도까지 많은 테이블', () => {
+  it('기준 테이블은 컬럼 1017개, 키 64개 × 16 파트다', () => {
+    expect(WIDE.tables[0].columns).toHaveLength(WIDE_COLUMNS + 1);
+    expect(WIDE.tables[0].indexes.map((i) => i.parts.length)).toEqual([1, ...Array.from({ length: WIDE_KEYS }, () => KEY_PARTS)]);
+  });
+  it.each(WIDE_CASES)('%s', (_name, make, expected) => checkCase(make, expected, WIDE), TEST_TIMEOUT_MS);
 });
