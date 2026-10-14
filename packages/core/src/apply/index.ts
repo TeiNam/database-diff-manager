@@ -15,6 +15,7 @@ import { initialState, type State } from './state';
 import { createTable, dropTable, renameTables } from './table-stmt';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
 import { assertKnownRealType, assertModeIndependentText } from './unknown-session';
+import { assertUtf8Session } from './client-charset';
 import { assertAsciiSpaces } from './unicode-space';
 import { executedText, skippedComments } from './version-comment';
 
@@ -106,6 +107,7 @@ function applyStatement(st: State, s: ApplyStatement, script: string): boolean {
 function applyTokens(st: State, statement: string, tokens: Token[], noBackslashEscapes: boolean): boolean {
   const routine = withoutCommentEnd(statement, tokens).ddl;
   if (isCreateRoutine(routine)) {
+    assertUtf8Session(st, statement, tokens); // UTF-8 이 아닌 세션 문자셋 (리뷰 11회차 Claude F4)
     createRoutine(st, routine, noBackslashEscapes);
     return true;
   }
@@ -117,6 +119,7 @@ function applyTokens(st: State, statement: string, tokens: Token[], noBackslashE
   assertOneStatement(c.toks);
   if (!session) {
     assertBmpStrings(c.toks);
+    assertUtf8Session(st, ddl, c.toks);
     assertKnownRealType(st, c.toks);
     if (noBackslashEscapes) assertNoBackslashTypeValues(c.toks, ddl);
   }

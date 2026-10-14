@@ -1,5 +1,6 @@
-// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
-// (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(NAMES, unique_checks 등)는 스키마에 영향이 없어 값을 버린다 — 값을 모르는
+// SET 문: FOREIGN_KEY_CHECKS·SQL_MODE 를 추적하고, time_zone 은 UTC 로 정했는지만 기억한다 (assertUtcTimestampDefault). 세션 문자셋(SET NAMES·CHARACTER SET,
+// character_set_client·character_set_connection·collation_connection)도 따라간다 (client-charset.ts, 리뷰 11회차 Claude F4). 이후 테이블 정의 결과나 허용 여부를 바꾸는 세션 변수
+// (default_storage_engine 등)는 조용히 넘기면 MySQL 과 다른 모델이 나오므로 거부하고, 나머지(unique_checks·sql_notes 등)는 스키마에 영향이 없어 값을 버린다 — 값을 모르는
 // 변수에서 되돌려도 받는다 (리뷰 9회차). 값을 쓰는 대상(사용자 변수, 세션 SQL_MODE·TIME_ZONE·FOREIGN_KEY_CHECKS)도 값을 모르는 변수에서 정하면 그 SET 에서 거부하지 않고
 // 모르는 값으로 둔다 — 그 값에 기대는 뒤 문장만 거부한다 (리뷰 10회차, unknown-session.ts). 트랜잭션 특성·역할·자원 그룹의 SET(SET TRANSACTION·SET ROLE·SET DEFAULT ROLE·
 // SET RESOURCE GROUP)도 무시한다.
@@ -9,6 +10,7 @@
 import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import { splitList } from './lists';
+import { assignCharset, CHARSET_VARIABLES, currentCharset, namesWrite } from './client-charset';
 import { baseType } from './normalize-mysql';
 import { cappedReason, isUnknown, type SessionValue, type State } from './state';
 import { forgetStateChangedBy, storedFunctionCall } from './stored-call';
@@ -20,11 +22,11 @@ const SCHEMA_VARIABLES: ReadonlySet<string> = new Set([
   'restrict_fk_on_non_standard_key', 'default_collation_for_utf8mb4', 'character_set_database', 'collation_database', 'innodb_strict_mode',
 ]);
 
-// 값을 모델에 쓰는 세션 변수 (소문자, assignSession 이 따라가는 것): FOREIGN_KEY_CHECKS·SQL_MODE 는 값을, time_zone 은 UTC 로 정했는지를 쓴다. 사용자 변수도 뒤 SET 이 읽으므로
-// 값을 쓴다 — 값을 모르는 변수에서 정하면 모르는 값을 기억한다 (setUnknown). 그 밖의 세션 변수(unique_checks·sql_notes·character_set_client·collation_connection …)는 값을
+// 값을 쓰는 세션 변수 (소문자, assignValue 가 따라가는 것): FOREIGN_KEY_CHECKS·SQL_MODE 는 값을, time_zone 은 UTC 로 정했는지를, 문자셋 변수는 문자셋을 쓴다. 사용자 변수도
+// 뒤 SET 이 읽으므로 값을 쓴다 — 값을 모르는 변수에서 정하면 모르는 값을 기억한다 (setUnknown). 그 밖의 세션 변수(unique_checks·sql_notes·character_set_results …)는 값을
 // 버리므로, 값을 모르는 변수(저장하지 않았거나 저장 함수 호출 뒤 잊은 사용자 변수, @@global·@@persist 서버 변수)에서 되돌려도 받는다 — mysqldump·Workbench 꼬리의
 // 'SET UNIQUE_CHECKS = @OLD_UNIQUE_CHECKS' (리뷰 9회차 Claude 참고 1)
-const TRACKED_VARIABLES: ReadonlySet<string> = new Set(['foreign_key_checks', 'sql_mode', 'time_zone']);
+const TRACKED_VARIABLES: ReadonlySet<string> = new Set(['foreign_key_checks', 'sql_mode', 'time_zone', ...CHARSET_VARIABLES]);
 const usesValue = (target: string): boolean => target.startsWith('@') || TRACKED_VARIABLES.has(target);
 
 // MySQL 8.0/8.4 의 SQL_MODE 이름. SHOW CREATE·@@sql_mode 가 내는 순서(MySQL 내부 순서, 8.0.46 실측)대로 둔다 — resolveSqlMode 가 이 순서로 줄 세운다.
@@ -92,7 +94,7 @@ function isNonSchemaSet(c: Cursor): boolean {
 // PERSIST·PERSIST_ONLY·SESSION·LOCAL 은 수식어 없는 뒤 대입에도 이어진다 (MySQL: 가장 최근 수식어를 따른다). '@@global.x' 처럼 이름에 붙인 범위는 그 대입에만 쓴다.
 // write 는 2단계에서 반영할 대입이다 (값을 버리는 대입은 없다)
 function evaluate(st: State, a: Cursor, inherited: Scope, call: string | undefined): { scope: Scope; write?: Write } {
-  if (a.isWord('NAMES') || a.isWord('CHARACTER') || a.isWord('CHARSET')) return { scope: inherited };
+  if (a.isWord('NAMES') || a.isWord('CHARACTER') || a.isWord('CHARSET')) return { scope: inherited, write: namesWrite(st, a) };
   const scope = scopeWord(a) ?? inherited;
   const variable = target(a);
   if (!variable.name.startsWith('@') && (variable.scope ?? scope) === 'server') {
@@ -128,6 +130,7 @@ function assignValue(st: State, target: string, value: SessionValue, written: To
     st.saved.set(target, isUnknown(value) ? { unknown: cappedReason(`사용자 변수 ${target} 에 앞의 \`${assignment}\` 문장이 알 수 없는 값을 넣었습니다 — ${value.unknown}`) } : value);
     return;
   }
+  if (CHARSET_VARIABLES.has(target)) return assignCharset(st, target, value, written, assignment);
   const tracked = target === 'sql_mode' && value === 'DEFAULT' ? sqlModeDefault(st) : value;
   if (isUnknown(tracked)) setUnknown(st, target, assignment, tracked.unknown);
   else setKnown(st, target, tracked, written);
@@ -258,7 +261,7 @@ function notAssignment(a: Cursor): string {
 function current(st: State, name: string): SessionValue {
   if (name === 'foreign_key_checks') return st.fkChecksUnknown !== undefined ? { unknown: st.fkChecksUnknown } : st.fkChecks ? '1' : '0';
   if (name === 'sql_mode') return st.sqlModeUnknown !== undefined ? { unknown: st.sqlModeUnknown } : st.sqlMode;
-  return { unknown: `시스템 변수 @@${name} 의 값은 이 도구가 따라가지 않아 알 수 없습니다` };
+  return currentCharset(st, name) ?? { unknown: `시스템 변수 @@${name} 의 값은 이 도구가 따라가지 않아 알 수 없습니다` };
 }
 
 // MySQL 8.0.46 실측: 단어 ON·OFF·TRUE·FALSE(대소문자 무관)와 숫자 0·1 을 받고, 따옴표를 친 'TRUE'·'FALSE'·'0'·'1' 은 1231 로 거부한다 (받아도 해가 없어 함께 받는다).

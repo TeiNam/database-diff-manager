@@ -1,4 +1,4 @@
-// ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE·time_zone 이 UTC 인지 — 모르는 값이면 그 까닭), 기준 이름 추적
+// ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE·time_zone 이 UTC 인지·문자셋 — 모르는 값이면 그 까닭), 기준 이름 추적
 import { Cursor } from '../cursor';
 import { routineNameKey } from '../diff';
 import type { Column, ForeignKey, Routine, SchemaModel, Table } from '../model';
@@ -69,6 +69,10 @@ export interface State {
   // 스크립트가 서버(GLOBAL·PERSIST) sql_mode 를 바꿨는가 — 바꾼 뒤의 SET sql_mode = DEFAULT 는 바뀐 전역 값을 읽는데 그 값은 알 수 없어 세션 SQL_MODE 를 모르는 값으로 둔다
   // (session.ts sqlModeDefault, 리뷰 7회차 R7-1·10회차)
   serverSqlModeChanged: boolean;
+  // 세션 character_set_client·character_set_connection 의 문자셋 (소문자, 모르면 Unknown). 처음은 utf8mb4 다 — 스크립트는 UTF-8 이고 mysql 클라이언트 8.0 의 기본값이다.
+  // UTF-8 계열·binary 가 아니면 ASCII 밖 글자가 든 DDL 을 거부한다 (client-charset.ts, 리뷰 11회차 Claude F4)
+  clientCharset: SessionValue;
+  connectionCharset: SessionValue;
   timeZoneUtc: boolean; // 스크립트가 세션 time_zone 을 UTC 로 정했는가 — 아니면 서버 시간대라 TIMESTAMP 리터럴 기본값을 받지 않는다 (session.ts assertUtcTimestampDefault)
   // 세션 time_zone 을 모르는 까닭 ('…어' 로 끝나는 안내 글 — 그 뒤 time_zone 을 다시 정하면 지운다). 이때 timeZoneUtc 는 false 다: UTC 로 정한 세션 time_zone 을 바꿨을 수 있는
   // 저장 함수 호출(stored-call.ts), 값을 모르는 변수에서 정한 SET (session.ts). 없으면 서버 시간대라 모른다
@@ -105,7 +109,7 @@ export function initialState(base: SchemaModel, schemaName: string, defaults: Ap
   model.tables.forEach((t, k) => {
     if (!tableAt.has(t.name)) tableAt.set(t.name, k); // 같은 이름이 둘이면 앞의 것 (find 와 같다)
   });
-  const st: State = { model, schemaName, defaults, fkChecks: true, fkChecksUnknown: undefined, sqlMode, sqlModeUnknown: undefined, initialSqlMode: sqlMode, sqlModeLiteral: false, serverSqlModeChanged: false, timeZoneUtc: false, timeZoneUnknown: undefined, saved: new Map(), forgotten: new Set(), storedCall: undefined, origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
+  const st: State = { model, schemaName, defaults, fkChecks: true, fkChecksUnknown: undefined, sqlMode, sqlModeUnknown: undefined, initialSqlMode: sqlMode, sqlModeLiteral: false, serverSqlModeChanged: false, clientCharset: 'utf8mb4', connectionCharset: 'utf8mb4', timeZoneUtc: false, timeZoneUnknown: undefined, saved: new Map(), forgotten: new Set(), storedCall: undefined, origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
   for (const t of model.tables) countForeignKeys(st, t, 1);
   return st;
 }
