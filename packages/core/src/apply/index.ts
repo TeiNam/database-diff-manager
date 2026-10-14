@@ -18,7 +18,7 @@ import { createTable, dropTable, renameTables } from './table-stmt';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
 import { assertAsciiSpaces, assertLeadingSpaces } from './unicode-space';
 import { assertKnownRealType, assertModeIndependentText } from './unknown-session';
-import { executedText, leadingSkippedComments, lineCommentAfterLast, lineCommentReason, skippedComments } from './version-comment';
+import { executedText, hiddenAfterLast, leadingSkippedComments, skippedComments, type HiddenComment } from './version-comment';
 
 export { MYSQL_DEFAULTS, type ApplyDefaults, type ApplyError, type ApplyOptions, type ApplyResult } from './types';
 export { printSqlDump } from './print-dump';
@@ -58,14 +58,20 @@ export function applyScript(base: SchemaModel, script: string, opts: ApplyOption
       throw e;
     }
   }
-  const hidden = lineCommentAfterLast(text, split.trailing); // 마지막 문장 뒤에서 줄 주석이 DDL 을 삼킨 건너뛰는 실행 주석 (리뷰 12회차 R12-3)
-  if (hidden) return failure(0, lineOf(text, hidden.at), text.slice(hidden.at), lineCommentReason(hidden));
+  const hidden = hiddenAfterLast(text, split.trailing); // 마지막 문장 뒤에서 렉서가 뒤 DDL 을 삼켰을 수 있는 실행 주석 (리뷰 12회차 R12-3·13회차 F2)
+  if (hidden) return hiddenFailure(text, hidden, split.statements.length > 0);
   if (applied === 0) return failure(0, 1, '', '적용할 DDL 문장이 없습니다');
   return { ok: true, model: st.model, applied, renames: collectRenames(st), defaults };
 }
 
 const failure = (index: number, line: number, statement: string, reason: string): ApplyResult =>
   ({ ok: false, error: { index, line, statement: statement.slice(0, MAX_STATEMENT_TEXT), reason } });
+
+// 마지막 문장 뒤의 거부는 문장 번호가 없어(0) 서버·웹이 줄을 붙이지 않는다 — 안내 글에 그 줄을 밝힌다 (리뷰 13회차 F3). 문장이 없으면 스크립트의 줄이다
+function hiddenFailure(text: string, hidden: HiddenComment, afterStatement: boolean): ApplyResult {
+  const line = lineOf(text, hidden.at);
+  return failure(0, line, text.slice(hidden.at, hidden.at + MAX_STATEMENT_TEXT), `${afterStatement ? '마지막 문장 뒤' : '스크립트'}(줄 ${line})의 ${hidden.reason}`);
+}
 
 // 스키마 기본 문자셋·콜레이션: 이름을 MySQL 표기로 맞춘다. 안 준 값(undefined 포함)은 MySQL 기본값으로 채우되,
 // 문자셋만 주면 그 문자셋의 기본 콜레이션을, 콜레이션만 주면 그 콜레이션의 문자셋을 쓴다. 둘 다 주면 서로 맞는지 본다

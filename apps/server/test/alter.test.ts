@@ -107,6 +107,15 @@ describe('POST /versions/:id/alter', () => {
     expect((await ctx.alter(ctx.baseId, { script: '' })).statusCode).toBe(400);
   });
 
+  // 리뷰 13회차 F3: 마지막 문장 뒤의 거부는 문장 번호가 없어(index 0) 서버가 줄을 붙이지 않는다 — core 의 안내 글이 그 줄을 밝혀 웹에도 그대로 보인다
+  it('마지막 문장 뒤의 거부도 안내에 줄 번호가 있다', async () => {
+    const ctx = await setup();
+    const res = await ctx.alter(ctx.baseId, { script: 'ALTER TABLE member ADD a INT;\n\n/*!99999 -- x */ ALTER TABLE member ADD c INT;', dryRun: true });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/^마지막 문장 뒤\(줄 3\)의 건너뛰는 실행 주석 \/\*!99999 안의 줄 주석/);
+    expect(res.json().details.error).toMatchObject({ index: 0, line: 3 });
+  });
+
   it('MD 기준·stale 기준은 거부하고, 같은 결과를 다시 저장하면 duplicate', async () => {
     const ctx = await setup();
     const md = ingest(ctx.db, { databaseName: 'db-01', schemaName: 'app', filename: SAMPLE_MD, text: sampleText(SAMPLE_MD), userId: 1 });

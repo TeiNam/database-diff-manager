@@ -22,6 +22,8 @@ const ESCAPES: Record<string, string> = { '0': '\0', n: '\n', r: '\r', t: '\t', 
 export interface LexWatch {
   // '/*!' 를 실행 주석으로 열었다: at 은 '/*!' 의 원문 자리, digits 는 뒤에 붙은 버전 숫자 ('' 이면 번호 없음)
   versioned(at: number, digits: string): void;
+  // 열린 실행 주석을 닫는 '*/' 를 읽었다 (따옴표·주석 안의 것은 아니다): at 은 '*/' 의 원문 자리 (리뷰 13회차)
+  closed(at: number): void;
   // ASCII 가 아닌 공백(NBSP U+00A0·U+3000·U+FEFF … — JS 의 \s)을 토큰 사이 공백으로 건너뛰었다 (MySQL 은 이름의 글자로 읽는다). at 은 그 글자의 원문 자리
   space(at: number): void;
 }
@@ -53,7 +55,7 @@ export function* lexTokens(src: string, mode: LexMode = {}): Generator<Token> {
       versioned++;
       continue;
     }
-    if (versioned > 0 && src.startsWith('*/', i)) { i += 2; versioned--; continue; }
+    if (versioned > 0 && src.startsWith('*/', i)) { mode.watch?.closed(i); i += 2; versioned--; continue; }
     const comment = commentEnd(src, i);
     if (comment >= 0) {
       i = comment;

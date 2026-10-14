@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseSqlDump } from '../../src/parse-dump';
 import { tdExport } from '../helpers';
-import { checkCase, clauses, fill, lines, MAX_SCRIPT, TEST_TIMEOUT_MS, type Case } from './perf-cases';
+import { checkCase, clauses, fill, lines, MAX_SCRIPT, RE_EXPORT_ERRNO, TEST_TIMEOUT_MS, type Case } from './perf-cases';
 
 // 문장 수·같은 테이블의 키와 컬럼 (perf-cases.ts)
 const CASES: Case[] = [
@@ -63,4 +63,23 @@ const SKIPPED_CASES: Case[] = [
 
 describe('applyScript — 1,000,000자 스크립트의 계산량: 건너뛰는 실행 주석과 NBSP', () => {
   it.each(SKIPPED_CASES)('%s', (_name, make, expected) => checkCase(make, expected, undefined, SKIPPED_BOUND_MS), TEST_TIMEOUT_MS);
+});
+
+// 마지막 문장 뒤와 문장 없는 덩어리의 실행 주석 표지 (리뷰 13회차 F1·R13-1): 마지막 문장 뒤의 검사가 표지마다 번호를 보기 전에 첫 '*/' 를 원문 끝까지 찾고 그 글을 다시 훑어
+// 제곱 시간이라, 닫지 않은 표지가 가득한 1,000,000자 스크립트 하나가 43~50 초였다. 번호를 먼저 보고 표지마다 첫 '*/' 까지만 훑는다 — 받은 주석 안에는 '/*' 가 없어 다음
+// 표지는 그 뒤에 있다. 여기서는 3 초 안을 본다
+const AFTER_DDL = 'ALTER TABLE member ADD a INT;\n';
+const TRAILING_CASES: Case[] = [
+  ['번호 없는 표지 (Claude 재현)', () => fill(() => '/*!', '', AFTER_DDL), { ok: true }],
+  ['어느 판이든 실행하는 표지', () => fill(() => '/*!40101 ', '', AFTER_DDL), { ok: true }],
+  ['8.0·8.4 가 모두 건너뛰는 표지 (Claude 재현)', () => fill(() => '/*!99999 ', '', AFTER_DDL), { index: 0, errno: RE_EXPORT_ERRNO }],
+  ['판에 따라 건너뛰는 표지', () => fill(() => '/*!80400 ', '', AFTER_DDL), { index: 0, errno: RE_EXPORT_ERRNO }],
+  ['닫는 */ 하나 앞의 표지 (Codex 재현)', () => fill(() => '/*!99999 ', '', AFTER_DDL, '*/'), { index: 0, errno: RE_EXPORT_ERRNO }],
+  ['닫은 건너뛰는 주석', () => fill(() => '/*!99999 */', '', AFTER_DDL), { ok: true }],
+  ['줄 주석이 앞 줄에서 끝나는 판에 따라 갈리는 주석', () => fill(() => '/*!80400 -- x\n*/', '', AFTER_DDL), { ok: true }],
+  ['문장 없는 덩어리의 판에 따라 갈리는 주석', () => fill(() => '/*!80400 -- x\n*/;', '', '', `\n${AFTER_DDL}`), { ok: true }],
+];
+
+describe('applyScript — 1,000,000자 스크립트의 계산량: 마지막 문장 뒤와 문장 없는 덩어리의 실행 주석', () => {
+  it.each(TRAILING_CASES)('%s', (_name, make, expected) => checkCase(make, expected, undefined, SKIPPED_BOUND_MS), TEST_TIMEOUT_MS);
 });

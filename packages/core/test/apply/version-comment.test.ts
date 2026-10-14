@@ -55,6 +55,8 @@ describe('8.0·8.4 가 모두 건너뛰는 실행 주석 (80500 이상)', () => 
   it('구분자가 건너뛰는 주석 안에 있으면 MySQL 처럼 닫히지 않은 주석으로 거부하고, 그 안의 주석은 RE_EXPORT 로 거부한다', () => {
     expect(run('/*!99999 SET @a = 1; SET @b = 2 */;\nALTER TABLE t ADD c INT;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1064)') } });
     expectReExport(run('/*!99999 ALTER TABLE t ADD c INT /* 메모 */ */;'), 1, '/*!99999');
+    // 첫 '*/' 와 겹친 '/*/' 도 안의 주석이다: 서버는 '/*' 로 먼저 읽어 그 뒤 '*/' 까지 함께 건너뛰고 닫히지 않아 1064 다 (8.0.46·8.4.11 실측 — 13회차 전에는 a·b 를 더했다)
+    expectReExport(run('ALTER TABLE t ADD a INT /*!99999 /*/ , ADD b INT */;'), 1, '/*!99999 안의 주석');
   });
 
   // 리뷰 12회차 R12-3·Claude F3 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 건너뛰는 주석 안의 줄 주석은 mysql 클라이언트가 판과 설정에 따라 떼고 보내거나(8.0 기본) 그대로
@@ -70,11 +72,12 @@ describe('8.0·8.4 가 모두 건너뛰는 실행 주석 (80500 이상)', () => 
     expectReExport(run(script), 1, '/*!99999', '줄 주석');
   });
 
-  it('마지막 문장 뒤의 건너뛰는 주석 안에서 줄 주석이 DDL 을 삼켜도 거부한다', () => {
+  // 리뷰 13회차 F3: 문장 번호가 없는 거부라 서버·웹은 줄을 붙이지 않는다 — 안내 글에 그 줄을 밝힌다
+  it('마지막 문장 뒤의 건너뛰는 주석 안에서 줄 주석이 DDL 을 삼켜도 거부하고, 안내에 그 줄을 밝힌다', () => {
     for (const end of ['', '\n', '\n*/\n']) {
       const r = run(`ALTER TABLE t ADD a INT;\n/*!99999 -- x */ ALTER TABLE t ADD c INT;${end}`);
       expect(r).toMatchObject({ ok: false, error: { index: 0, line: 2, reason: expect.stringContaining('줄 주석') } });
-      expect(!r.ok && r.error.reason.endsWith(RE_EXPORT)).toBe(true);
+      expectReExport(r, 0, '마지막 문장 뒤(줄 2)의 건너뛰는 실행 주석 /*!99999 안의 줄 주석');
     }
     expect(columnsOf(run('ALTER TABLE t ADD a INT;\n/*!99999 */;\n/*!99999 x\n*/'))).toEqual(['id', 'a']);
   });
@@ -94,6 +97,27 @@ describe('실행하는 실행 주석 (번호 없음, 80046 이하)', () => {
   ])('%s 는 안의 글을 실행한다', (sql, columns) => {
     expect(columnsOf(run(sql))).toEqual(columns);
   });
+
+  // 리뷰 13회차 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 '/*!' 안의 구분자에서도 문장을 끊어, 닫히지 않은 채 보낸 실행하는 주석을 MySQL 은 1064 로 거부한다
+  // (13회차 전에는 그 문장과 뒤 문장을 적용했다). 서버는 안의 글을 실행하다 처음 만난 '*/' 에서 닫는다 — 따옴표·줄 주석 안의 '*/' 와 건너뛰는 주석을 닫은 '*/' 는 닫지 않는다
+  it.each([
+    ['문장을 감싼 주석', '/*!40101 ALTER TABLE t ADD c INT ;\n*/;\nALTER TABLE t ADD d INT;', 1],
+    ['문장 가운데서 연 주석', 'ALTER TABLE t ADD c INT /*!40101 , ADD d INT ;\n*/;', 1],
+    ['번호 없는 /*!', '/*! ALTER TABLE t ADD c INT ;\n*/;', 1],
+    ['따옴표 안의 */', "/*!40101 ALTER TABLE t COMMENT '*/' ;\n*/;", 1],
+    ['줄 주석 안의 */', '/*!40101 ALTER TABLE t ADD c INT -- x */\n;\n*/;', 1],
+    ['안에서 건너뛰는 주석만 닫았다', '/*!40101 ALTER TABLE t ADD c INT /*!99999 , ADD d INT */ ;\n*/;', 1],
+    ['파일 끝에서 끊긴 마지막 문장', 'ALTER TABLE t ADD a INT;\n/*!40101 ALTER TABLE t ADD c INT', 2],
+    ['문장 없는 덩어리', '/*!40101 ;\nALTER TABLE t ADD c INT */;\nALTER TABLE t ADD d INT;', 1],
+    ['문장 없는 덩어리 — 뒤 덩어리에서 닫는다', '/*!40101 ;\n*/;\nALTER TABLE t ADD c INT;', 1],
+  ])('구분자까지 닫히지 않은 실행하는 주석은 1064 로 거부한다 — %s', (_name, script, index) => {
+    expect(run(script)).toMatchObject({ ok: false, error: { index, reason: expect.stringContaining('(MySQL 1064)') } });
+  });
+
+  it('안에서 연 실행하는 주석은 처음 만난 */ 에서 함께 닫히고, 마지막 문장 뒤의 것은 앞 DDL 을 모두 적용한 뒤라 받는다', () => {
+    expect(columnsOf(run('/*!40101 ALTER TABLE t ADD a INT /*!40101 , ADD b INT */ ;'))).toEqual(['id', 'a', 'b']);
+    expect(columnsOf(run('ALTER TABLE t ADD a INT;\n/*!40101 ;\n'))).toEqual(['id', 'a']);
+  });
 });
 
 describe('서버 버전에 따라 실행 여부가 갈리는 실행 주석', () => {
@@ -107,6 +131,49 @@ describe('서버 버전에 따라 실행 여부가 갈리는 실행 주석', () 
   });
 });
 
+// 리뷰 13회차 F2·R13-2 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 마지막 문장 뒤의 줄 주석 검사가 80500 이상만 봐, 80047~80499 와 여섯 자리 번호에서는 줄 주석이 첫 '*/' 를
+// 가려 뒤 DDL 이 조용히 빠졌다. 줄 주석을 그대로 보내는 8.4 클라이언트로 그 번호를 건너뛰는 서버에 실행하면 MySQL 은 첫 '*/' 뒤의 ALTER 를 실행한다 (80047·80400 은 8.0.46 이,
+// 80499 는 둘 다, 여섯 자리 100000 은 8.4.11 이 건너뛴다). 어느 판이든 건너뛸 수 있는 번호(다섯 자리 80047 이상, 여섯 자리 이상)를 모두 보고, 거부 안내에 그 줄을 밝힌다 (F3)
+describe('마지막 문장 뒤의 실행 주석', () => {
+  it.each([
+    ['여섯 자리 번호 (Claude 재현 1)', '/*!100000 -- x */ ALTER TABLE t ADD c INT;', '/*!100000'],
+    ['여섯 자리 번호의 #', '/*!100000 # x */ ALTER TABLE t ADD c INT;', '/*!100000'],
+    ['80047~80499 (Claude 재현 2)', '/*!80400 -- x */ ALTER TABLE t ADD c INT;', '/*!80400'],
+    ['가장 낮은 80047', '/*!80047 -- x */ ALTER TABLE t ADD c INT;', '/*!80047'],
+    ['80499 (Codex 재현)', '/*!80499 -- ignored */ ALTER TABLE t ADD real_col INT;', '/*!80499'],
+    ['80499 의 # 와 CRLF', '/*!80499 # ignored */ ALTER TABLE t ADD real_col INT;\r\n', '/*!80499'],
+  ])('판에 따라 건너뛰는 번호에서 줄 주석이 첫 */ 를 가리면 RE_EXPORT 로 거부하고 그 줄을 밝힌다 — %s', (_name, tail, mark) => {
+    const r = run(`ALTER TABLE t ADD a INT;\r\n\r\n${tail}`);
+    expect(r).toMatchObject({ ok: false, error: { index: 0, line: 3 } });
+    expectReExport(r, 0, `마지막 문장 뒤(줄 3)의 서버 버전에 따라 건너뛰는 실행 주석 ${mark} 안의 줄 주석`);
+  });
+
+  // 변이 M4 (리뷰 13회차 F4 — 번호를 보지 않으면 실행하는 주석도 거부한다): 실행하는 주석 안의 줄 주석은 MySQL 도 줄 주석이라 뒤 DDL 을 실행하지 않는다. 판에 따라 갈리는 번호도
+  // 줄 주석이 첫 '*/' 앞 줄에서 끝나면 건너뛰든 실행하든 같다 (8.0.46·8.4.11 실측 — 오류가 나도 앞 DDL 을 모두 적용한 뒤다)
+  it.each([
+    '/*!40101 -- x */ ALTER TABLE t ADD c INT;', '/*!80046 -- x */ ALTER TABLE t ADD c INT;', '/*! -- x */ ALTER TABLE t ADD c INT;', '/*!1 # x */ ALTER TABLE t ADD c INT;',
+    '/*!80499 -- 메모\n*/;', '/*!100000 # 메모\r\n*/;', '/*!80400 -- 닫지 않은 주석',
+  ])('%j 는 받는다', (tail) => {
+    expect(columnsOf(run(`ALTER TABLE t ADD a INT;\n${tail}`))).toEqual(['id', 'a']);
+  });
+
+  it('8.0·8.4 가 모두 건너뛰는 번호 안의 줄 주석은 첫 */ 를 가리지 않아도 거부한다 (문장 안·문장 없는 덩어리와 같다 — 보수적)', () => {
+    expectReExport(run('ALTER TABLE t ADD a INT;\n/*!99999 -- 메모\n*/;'), 0, '마지막 문장 뒤(줄 2)의 건너뛰는 실행 주석 /*!99999 안의 줄 주석');
+  });
+
+  // 안의 주석: MySQL 은 한 겹을 주석으로 읽어 닫는 '*/' 가 뒤로 밀리는데, 그 '*/' 를 가린 줄 주석은 첫 '*/' 까지만 보면 놓친다 (8.4 클라이언트로 실행하면 c 를 더한다)
+  it('어느 판이든 건너뛸 수 있는 번호 안의 주석은 RE_EXPORT 로 거부한다', () => {
+    expectReExport(run('ALTER TABLE t ADD a INT;\n/*!99999 /* x */ -- y */ ALTER TABLE t ADD c INT;'), 0, '마지막 문장 뒤(줄 2)의 건너뛰는 실행 주석 /*!99999 안의 주석');
+    expectReExport(run('ALTER TABLE t ADD a INT;\n/*!80400 /*!99999 */ -- y */ ALTER TABLE t ADD c INT;'), 0, '서버 버전에 따라 건너뛰는 실행 주석 /*!80400 안의 주석');
+    expectReExport(run('ALTER TABLE t ADD a INT;\n/*!99999 /*/ */ -- y */ ALTER TABLE t ADD c INT;'), 0, '/*!99999 안의 주석'); // 첫 */ 와 겹친 /*/ 도 서버는 주석으로 연다
+    expect(columnsOf(run('ALTER TABLE t ADD a INT;\n/*!40101 /* x */ -- y */ ALTER TABLE t ADD c INT;'))).toEqual(['id', 'a']);
+  });
+
+  it('문장이 없는 스크립트면 스크립트의 줄을 밝힌다', () => {
+    expectReExport(run('-- 메모\n/*!80400 -- x */ ALTER TABLE t ADD c INT;'), 0, '스크립트(줄 2)의 서버 버전에 따라 건너뛰는 실행 주석 /*!80400');
+  });
+});
+
 describe('문장 나누기와 렉서 (덤프 파서와 함께 쓴다)', () => {
   it('splitForApply 는 splitDump 와 같은 문장에 원문 자리와 실행 주석 표지를 더하고, 마지막 문장 뒤의 표지는 따로 둔다', () => {
     const text = "-- 머리\n/*!40101 SET NAMES utf8 */;\n/*!99999 ALTER TABLE t ADD x INT */;\nALTER TABLE t ADD y INT /*!90000 , ADD z INT */;\n/*!99999 */;";
@@ -115,7 +182,11 @@ describe('문장 나누기와 렉서 (덤프 파서와 함께 쓴다)', () => {
     expect(statements.map((s) => [text.slice(s.offset, s.offset + 3), s.marks.map((m) => [text.slice(m.at, m.at + 3), m.digits])])).toEqual([
       ['SET', [['/*!', '40101']]], ['ALT', [['/*!', '99999']]], ['ALT', [['/*!', '90000']]],
     ]);
-    expect(trailing).toEqual({ marks: [{ at: text.lastIndexOf('/*!'), digits: '99999' }], spaces: [] });
+    expect(trailing).toEqual({ marks: [{ at: text.lastIndexOf('/*!'), digits: '99999' }], spaces: [], closes: [text.lastIndexOf('*/')] });
+    // 렉서가 실행 주석을 닫은 '*/' 와 문장 없이 끝난 덩어리의 구분자 (리뷰 13회차): 따옴표 안의 '*/' 는 닫지 않는다
+    const quoted = "/*!99999 */;\n;\n/*!40101 ALTER TABLE t COMMENT '*/' */;";
+    const [s] = splitForApply(quoted).statements;
+    expect([s.closes, s.leading.closes, s.leading.ends]).toEqual([[quoted.lastIndexOf('*/')], [quoted.indexOf('*/')], [quoted.indexOf(';'), quoted.indexOf(';', quoted.indexOf(';') + 1)]]);
   });
 
   it('렉서는 버전 번호와 상관없이 실행 주석의 내용을 토큰으로 읽는다 (덤프의 /*!80023 INVISIBLE */)', () => {
@@ -139,5 +210,23 @@ describe('문장 없이 끝난 덩어리의 실행 주석', () => {
     expectReExport(run('/*!99999 -- 메모\n*/;\nALTER TABLE t ADD c INT;'), 1, '/*!99999', '줄 주석');
     expectReExport(run('/*!99999 /* 메모 */ */;\nALTER TABLE t ADD c INT;'), 1, '/*!99999', '안의 주석');
     expectReExport(run('/*!1 */;\nALTER TABLE t ADD c INT;'), 1, '/*!1', '다섯 자리');
+  });
+
+  // 변이 M25 (리뷰 13회차 F4 — 덩어리의 건너뛰는 주석을 뒤 문장 끝까지 닫힌 것으로 본다): 구분자가 주석 안에 있어 mysql 클라이언트가 첫 덩어리('/*!99999 ')를 보내고 MySQL 은 1064 다.
+  // 뒤의 문장 없는 덩어리에서 닫혀도 같다 (8.0.46·8.4.11 실측 — 13회차 전에는 뒤 문장까지 닫힌 것으로 봐 받았다)
+  it.each([
+    '/*!99999 ;\nALTER TABLE t ADD c INT */;', '/*!99999 ;\n*/;\nALTER TABLE t ADD c INT;', '/*!80400 ;\n*/;\nALTER TABLE t ADD c INT;',
+  ])('건너뛰는 주석이 덩어리 안에서 닫히지 않으면 뒤에서 닫혀도 1064 로 거부한다 — %j', (script) => {
+    expect(run(script)).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1064)') } });
+  });
+
+  // 리뷰 13회차 F2 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 판에 따라 갈리는 번호를 받는 전제(건너뛰든 실행하든 같다)가 깨지는 것은 거부한다 — 첫 '*/' 를 가린 줄 주석은
+  // 8.4 클라이언트로 8.0.46 에 실행하면 그 '*/' 뒤의 ALTER 를 실행하고(c·d, 8.4.11 은 d), 안의 주석은 8.0 클라이언트가 1064 를 내며, 덩어리 안에서 닫히지 않으면 1064 다
+  it('판에 따라 갈리는 번호의 첫 */ 를 가린 줄 주석·안의 주석·닫히지 않은 것은 거부한다', () => {
+    expectReExport(run('/*!80400 -- x */ ALTER TABLE t ADD c INT /*\n*/;\nALTER TABLE t ADD d INT;'), 1, '서버 버전에 따라 건너뛰는 실행 주석 /*!80400 안의 줄 주석');
+    expectReExport(run('/*!80400 # x */ ALTER TABLE t ADD c INT /*\r\n*/;\r\nALTER TABLE t ADD d INT;'), 1, '/*!80400 안의 줄 주석');
+    expectReExport(run('/*!80400 /* x */ -- y */ ALTER TABLE t ADD c INT /*\n*/;\nALTER TABLE t ADD d INT;'), 1, '/*!80400 안의 주석');
+    expectReExport(run('/*!80400 /* 메모 */ */;\nALTER TABLE t ADD d INT;'), 1, '/*!80400 안의 주석');
+    expect(run('/*!80400 ;\nALTER TABLE t ADD c INT */;\nALTER TABLE t ADD d INT;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1064)') } });
   });
 });
