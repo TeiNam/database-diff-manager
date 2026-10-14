@@ -543,6 +543,25 @@ describe('applyScript — 4바이트 문자', () => {
 
 const NO_STATEMENT = { ok: false, error: { index: 0, line: 1, statement: '', reason: '적용할 DDL 문장이 없습니다' } };
 
+// 리뷰 15회차 F3 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 줄마다 끝의 '\r' 을 떼고 '\n' 으로 이어 보내, CRLF 파일의 여러 줄 문자열도 MySQL 은 '\n' 만
+// 저장한다 (컬럼 COMMENT 'a\nb', DEFAULT 'x\ny', 테이블 COMMENT, 루틴 본문). 14회차까지는 '\r\n' 을 그대로 두어 다시 뽑은 덤프와 견주면 COMMENT 변경이 거짓으로 나왔다
+describe('applyScript — CRLF 스크립트', () => {
+  it('여러 줄 문자열 리터럴은 MySQL 처럼 줄 끝의 \\r 을 뗀 값으로 둔다', () => {
+    const r = run("ALTER TABLE t MODIFY id INT COMMENT 'a\r\nb', ADD c VARCHAR(20) DEFAULT 'x\r\ny', COMMENT='t1\r\nt2';\r\n"
+      + "DELIMITER ;;\r\nCREATE PROCEDURE p() SELECT 'r1\r\nr2';;\r\nDELIMITER ;\r\n");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const [table] = r.model.tables;
+    expect(table.columns.map((c) => [c.name, c.comment, c.default])).toEqual([['id', 'a\nb', undefined], ['c', undefined, "'x\\ny'"]]);
+    expect(table.options.find((o) => o.key === 'COMMENT')?.value).toBe("'t1\\nt2'");
+    expect(r.model.routines.map((x) => x.body)).toEqual(["SELECT 'r1\nr2'"]);
+  });
+
+  it('줄 번호는 그대로다 (BOM + CRLF)', () => {
+    expect(run('\ufeffALTER TABLE t ADD a INT;\r\n\r\nALTER TABLE nope ADD b INT;\r\n')).toMatchObject({ ok: false, error: { index: 2, line: 3 } });
+  });
+});
+
 describe('resolveDefaults — 스키마 기본 문자셋·콜레이션', () => {
   it('안 준 값(undefined 포함)은 MySQL 기본값이다', () => {
     expect(resolveDefaults(undefined)).toEqual(MYSQL_DEFAULTS);

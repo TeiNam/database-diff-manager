@@ -1,6 +1,7 @@
 // td-export SQL 파일 → SchemaModel
 import { isCreateTable, SqlTrail, sqlEvidence } from './completeness';
 import { lineOf } from './cursor';
+import { DelimiterSearch } from './delimiter-search';
 import { LexError, lexTokens, tokenize, type LexMode, type LexWatch, type Token } from './lexer';
 import { UNIDENTIFIED_NAME, type Routine, type RoutineKind, type SchemaModel, type Table, type View } from './model';
 import { normalizeDdl, normalizeRoutineDdl } from './normalize';
@@ -62,20 +63,40 @@ export interface NestedComment {
   readonly mark: VersionMark;
 }
 
+// 렉서가 주석으로 건너뛴 힌트 (리뷰 15회차 F4): at 은 그 '/*+' 의 원문 자리, delimiter 는 그때의 구분자 — 힌트가 여러 줄이면 mysql 클라이언트는 둘째 줄부터 그 구분자에서 끊는다
+export interface Hint {
+  readonly at: number;
+  readonly delimiter: string;
+}
+
 // 원문의 한 구간에서 렉서가 알린 것: marks 는 렉서가 연 실행 주석 표지, spaces 는 렉서가 공백으로 건너뛴 ASCII 밖 공백(NBSP 등)의 원문 자리 (리뷰 11회차 R11-2·Claude F5),
 // closes 는 렉서가 실행 주석을 닫은 '*/' 의 원문 자리 (따옴표·주석 안의 것은 빠진다, 리뷰 13회차), nested 는 실행 주석 안에서 연 일반 주석 (리뷰 14회차 F1), hints 는 렉서가
-// 주석으로 건너뛴 힌트 '/*+' 의 원문 자리 (리뷰 14회차 — DELIMITER 줄 앞의 것을 거부한다)
+// 주석으로 건너뛴 힌트 (리뷰 15회차 F4 — 여러 줄 힌트를 본다), comments 는 실행 주석 밖의 일반 블록 주석 '/*' 의 원문 자리 (리뷰 15회차 후속 — 안의 '/*' 를 본다)
 export interface LexNotes {
   readonly marks: readonly VersionMark[];
   readonly spaces: readonly number[];
   readonly closes: readonly number[];
   readonly nested: readonly NestedComment[];
-  readonly hints: readonly number[];
+  readonly hints: readonly Hint[];
+  readonly comments: readonly number[];
 }
 
-// 문장 앞(앞 문장 뒤부터)의 것: ends 는 그 안의 문장 없이 끝난 덩어리를 끝낸 구분자의 원문 자리 — 실행 주석이 덩어리 안에서 닫혔는지 본다 (리뷰 13회차)
+// DELIMITER 줄 (리뷰 15회차 F1·F2): at 은 DELIMITER 단어의 원문 자리, from 은 그 앞 덩어리가 시작한 자리 (앞 구분자·DELIMITER 줄 바로 뒤, 스크립트 처음) — mysql 클라이언트는
+// 그 사이에서 버퍼에 남긴 것에 따라 그 줄을 명령으로 읽는다 (apply/delimiter-command.ts). 그 사이에는 토큰이 없다. end 는 그 줄의 끝(줄바꿈 자리), delimiter 는 문장 나누기가 읽은
+// 구분자, previous 는 그 앞의 구분자 — 클라이언트가 인자를 다르게 읽는지 본다
+export interface CommandLine {
+  readonly from: number;
+  readonly at: number;
+  readonly end: number;
+  readonly delimiter: string;
+  readonly previous: string;
+}
+
+// 문장 앞(앞 문장 뒤부터)의 것: ends 는 그 안의 문장 없이 끝난 덩어리를 끝낸 구분자의 원문 자리 — 실행 주석이 덩어리 안에서 닫혔는지 본다 (리뷰 13회차). commands 는 그 안의
+// DELIMITER 줄 (리뷰 15회차 F1)
 export interface LeadingNotes extends LexNotes {
   readonly ends: readonly number[];
+  readonly commands: readonly CommandLine[];
 }
 
 // ALTER 적용이 쓰는 문장 (splitForApply). offset: ddl 의 원문 자리. marks·spaces: 이 문장의 덩어리(앞 구분자·DELIMITER 줄 뒤부터 이 문장의 끝까지)에서 렉서가 알린 것 —
@@ -122,9 +143,10 @@ export function scanDump(text: string): DumpScan {
   return scan(text, true, plain);
 }
 
-// scan 이 렉서가 알린 것과 함께 문장 없이 끝난 덩어리의 구분자 자리(ended)도 알린다 (리뷰 13회차)
+// scan 이 렉서가 알린 것과 함께 문장 없이 끝난 덩어리의 구분자 자리(ended, 리뷰 13회차)와 DELIMITER 줄(commanded, 리뷰 15회차 F1)도 알린다
 interface ChunkWatch extends LexWatch {
   ended(at: number): void;
+  commanded(line: Omit<CommandLine, 'previous'>): void;
 }
 
 // 렉서가 알린 것을 모았다가 문장마다 그 덩어리의 것을 넘긴다. 그 앞의 문장이 없는 덩어리('/*!99999 */;')·DELIMITER 줄의 것은 덩어리의 것과 가르고(leading — 문장 없는
@@ -135,8 +157,11 @@ class ChunkLog implements ChunkWatch {
   private spaces: number[] = [];
   private closes: number[] = [];
   private inner: NestedComment[] = [];
-  private hints: number[] = [];
+  private hints: Hint[] = [];
+  private comments: number[] = [];
   private ends: number[] = [];
+  private commands: CommandLine[] = [];
+  private delimiter = ';'; // 지금 구분자 (힌트에 붙인다)
   // 렉서가 열려 있다고 보는 표지 (가장 안쪽이 끝). DELIMITER 줄 뒤에서 렉서를 새로 읽혀도(afterCommand) 그 앞의 것은 남지만, 렉서는 새로 연 것만 닫고 그 안에서만 nested 를
   // 알리므로 끝의 것은 늘 렉서의 가장 안쪽 것이다
   private readonly open: VersionMark[] = [];
@@ -158,7 +183,11 @@ class ChunkLog implements ChunkWatch {
   }
 
   hinted(at: number): void {
-    this.hints.push(at);
+    this.hints.push({ at, delimiter: this.delimiter });
+  }
+
+  commented(at: number): void {
+    this.comments.push(at);
   }
 
   space(at: number): void {
@@ -169,24 +198,32 @@ class ChunkLog implements ChunkWatch {
     this.ends.push(at);
   }
 
-  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'nested' | 'hints' | 'leading'> {
+  commanded(line: Omit<CommandLine, 'previous'>): void {
+    this.commands.push({ ...line, previous: this.delimiter });
+    this.delimiter = line.delimiter;
+  }
+
+  take(from: number): Pick<ApplyStatement, 'marks' | 'spaces' | 'closes' | 'nested' | 'hints' | 'comments' | 'leading'> {
     const [leadMarks, marks] = splitAt(this.marks, (m) => m.at, from);
     const [leadSpaces, spaces] = splitAt(this.spaces, (at) => at, from);
     const [leadCloses, closes] = splitAt(this.closes, (at) => at, from);
     const [leadNested, nested] = splitAt(this.inner, (n) => n.at, from);
-    const [leadHints, hints] = splitAt(this.hints, (at) => at, from);
-    const leading = { marks: leadMarks, spaces: leadSpaces, closes: leadCloses, nested: leadNested, hints: leadHints, ends: this.ends };
+    const [leadHints, hints] = splitAt(this.hints, (h) => h.at, from);
+    const [leadComments, comments] = splitAt(this.comments, (at) => at, from);
+    const leading = { marks: leadMarks, spaces: leadSpaces, closes: leadCloses, nested: leadNested, hints: leadHints, comments: leadComments, ends: this.ends, commands: this.commands };
     this.marks = [];
     this.spaces = [];
     this.closes = [];
     this.inner = [];
     this.hints = [];
+    this.comments = [];
     this.ends = [];
-    return { marks, spaces, closes, nested, hints, leading };
+    this.commands = [];
+    return { marks, spaces, closes, nested, hints, comments, leading };
   }
 
   rest(): LexNotes {
-    return { marks: this.marks, spaces: this.spaces, closes: this.closes, nested: this.inner, hints: this.hints };
+    return { marks: this.marks, spaces: this.spaces, closes: this.closes, nested: this.inner, hints: this.hints, comments: this.comments };
   }
 }
 
@@ -201,7 +238,7 @@ function scan<S extends DumpStatement>(text: string, lenient: boolean, make: Mak
   const mode: LexMode = watch ? { watch } : {};
   let start: Token | undefined;
   let from = 0; // 지금 덩어리가 시작한 자리 (앞 구분자·DELIMITER 줄 바로 뒤)
-  let delimiter = ';';
+  let find = new DelimiterSearch(text, ';', 0); // 지금 구분자 찾기 (DELIMITER 줄이 바꾼다)
   let skipUntil = 0; // DELIMITER 줄·구분자를 건너뛸 끝 오프셋
   const lineAt = lineCounter(text);
   const emit = (end: number, terminated: boolean) => {
@@ -218,19 +255,20 @@ function scan<S extends DumpStatement>(text: string, lenient: boolean, make: Mak
       if (!start) from = skipUntil;
       if (!start && isDelimiterCommand(text, t)) {
         const end = lineEnd(text, t.s);
-        delimiter = delimiterArg(text.slice(t.e, end));
+        find = new DelimiterSearch(text, delimiterArg(text.slice(t.e, end)), end);
+        watch?.commanded({ from, at: t.s, end, delimiter: find.delimiter });
         tokens = afterCommand(text, t.e, end, mode);
         skipUntil = end;
         continue;
       }
       // 구분자가 단어에 붙어 있어도(END$$) 문장 끝이다. 문자열·백틱 토큰 안은 보지 않는다
-      const at = delimiterAt(text, t, delimiter);
+      const at = delimiterAt(find, t);
       if (at >= 0) {
         if (!start && at > t.s) start = t;
         if (start) emit(at, true);
         else watch?.ended(at);
         start = undefined;
-        skipUntil = at + delimiter.length;
+        skipUntil = at + find.delimiter.length;
         continue;
       }
       start ??= t;
@@ -256,13 +294,12 @@ function lineCounter(text: string): (pos: number) => number {
   };
 }
 
-// 토큰 시작(';;' 처럼 여러 토큰에 걸칠 수 있음) 또는 단어·숫자 토큰 안의 구분자 위치. 없으면 -1
-function delimiterAt(text: string, t: Token, delimiter: string): number {
+// 토큰 시작(';;' 처럼 여러 토큰에 걸칠 수 있음) 또는 단어·숫자 토큰 안의 구분자 위치. 없으면 -1. find 는 원문의 구분자를 차례로 찾는다 — 토큰 자리마다 원문과 구분자를
+// 견주면 긴 구분자에서 원문 길이 × 구분자 길이가 든다 (delimiter-search.ts, 리뷰 15회차 R15-2)
+function delimiterAt(find: DelimiterSearch, t: Token): number {
   if (t.t === 'string' || t.t === 'ident') return -1;
-  if (text.startsWith(delimiter, t.s)) return t.s;
-  if (t.t === 'op') return -1;
-  const inside = text.slice(t.s, t.e).indexOf(delimiter);
-  return inside < 0 ? -1 : t.s + inside;
+  const reach = t.s + find.delimiter.length; // t.s 에서 시작하는 구분자가 끝나는 자리
+  return find.within(t.s, t.t === 'op' ? reach : Math.max(t.e, reach));
 }
 
 // SET 문이 바꾸는 세션 SQL_MODE: '@v = @@SQL_MODE' 는 저장, 'SQL_MODE = '…'' 는 설정, 'SQL_MODE = @v' 는 복원
@@ -305,11 +342,12 @@ function delimiterArg(line: string): string {
   return (quote ? rest.slice(1).split(quote, 1)[0] : rest.split(' ', 1)[0]) || ';';
 }
 
-// 줄 맨 앞(공백 제외)의 DELIMITER 단어
+// 줄 맨 앞(공백 제외)의 DELIMITER 단어. 앞의 공백만 거슬러 보고 공백이 아닌 글자에서 곧 멈춘다 — 줄 처음까지 되짚으면 한 줄에 되풀이한 DELIMITER 단어마다 그 줄을
+// 다시 훑어, 1,000,000자 스크립트 하나가 28 초였다 (리뷰 15회차 R15-1·Claude F5)
 function isDelimiterCommand(text: string, t: Token): boolean {
   if (t.t !== 'word' || t.v.toUpperCase() !== 'DELIMITER') return false;
-  const lineStart = text.lastIndexOf('\n', t.s - 1) + 1;
-  return text.slice(lineStart, t.s).trim() === '';
+  for (let k = t.s - 1; k >= 0 && text[k] !== '\n'; k--) if (!/\s/.test(text[k])) return false;
+  return true;
 }
 
 export function parseSqlDump(text: string): ParsedDump {

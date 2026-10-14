@@ -191,7 +191,7 @@ describe('문장 나누기와 렉서 (덤프 파서와 함께 쓴다)', () => {
     expect(statements.map((s) => [text.slice(s.offset, s.offset + 3), s.marks.map((m) => [text.slice(m.at, m.at + 3), m.digits])])).toEqual([
       ['SET', [['/*!', '40101']]], ['ALT', [['/*!', '99999']]], ['ALT', [['/*!', '90000']]],
     ]);
-    expect(trailing).toEqual({ marks: [{ at: text.lastIndexOf('/*!'), digits: '99999' }], spaces: [], closes: [text.lastIndexOf('*/')], nested: [], hints: [] });
+    expect(trailing).toEqual({ marks: [{ at: text.lastIndexOf('/*!'), digits: '99999' }], spaces: [], closes: [text.lastIndexOf('*/')], nested: [], hints: [], comments: [] });
     // 렉서가 실행 주석을 닫은 '*/' 와 문장 없이 끝난 덩어리의 구분자 (리뷰 13회차): 따옴표 안의 '*/' 는 닫지 않는다
     const quoted = "/*!99999 */;\n;\n/*!40101 ALTER TABLE t COMMENT '*/' */;";
     const [s] = splitForApply(quoted).statements;
@@ -211,7 +211,7 @@ describe('문장 나누기와 렉서 (덤프 파서와 함께 쓴다)', () => {
     const [s] = splitForApply(text).statements;
     const mark = (digits: string) => ({ at: text.indexOf(`/*!${digits}`), digits });
     expect(s.nested).toEqual([{ at: text.indexOf('/* x'), mark: mark('40101') }, { at: text.indexOf('/* w'), mark: mark('99999') }]);
-    expect(s.hints).toEqual([text.indexOf('/*+')]); // 힌트는 따로 알린다 (DELIMITER 줄 앞의 것을 거부한다)
+    expect(s.hints).toEqual([{ at: text.indexOf('/*+'), delimiter: ';' }]); // 힌트는 그때의 구분자와 함께 따로 알린다 (여러 줄 힌트를 본다, 리뷰 15회차 F4)
   });
 
   it('렉서는 버전 번호와 상관없이 실행 주석의 내용을 토큰으로 읽는다 (덤프의 /*!80023 INVISIBLE */)', () => {
@@ -294,8 +294,8 @@ describe('문장 없이 끝난 덩어리의 실행 주석', () => {
     expect(r).toMatchObject({ ok: false, error: { index: 3, line: 4 } });
   });
 
-  // 리뷰 14회차 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 버퍼가 비었을 때만 DELIMITER 줄을 명령으로 읽는다 (8.4 는 버퍼가 공백·블록 주석뿐일 때도 — 실행 주석도
-  // 블록 주석으로 보고 버린다). 구분자 없이 그 앞에 둔 실행 주석은 8.0 클라이언트가 버퍼에 남겨 DELIMITER 줄을 문장의 글로 보내 1064 이고, 8.4 클라이언트는 그 주석을 버리고 뒤
+  // 리뷰 14회차 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 버퍼가 비었을 때만 DELIMITER 줄을 명령으로 읽는다 (8.4 는 버퍼가 공백과 안에 '*'·'/' 가 없는 블록
+  // 주석뿐일 때도 — 실행 주석도 블록 주석으로 보고 버린다, delimiter-command.test.ts). 구분자 없이 그 앞에 둔 실행 주석은 8.0 클라이언트가 버퍼에 남겨 DELIMITER 줄을 문장의 글로 보내 1064 이고, 8.4 클라이언트는 그 주석을 버리고 뒤
   // 루틴·ALTER 를 실행한다 (뒤에 줄 주석을 두면 8.4 도 1064). 판에 따라 갈려 거부한다 — 13회차까지는 받았다. ';' 로 끝낸 것은 두 클라이언트 모두 받는다
   it.each([
     ['실행하는 주석', 'ALTER TABLE t ADD a INT;\n/*!40101 */\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;\nALTER TABLE t ADD b INT;', 2, 2],
@@ -316,6 +316,14 @@ describe('문장 없이 끝난 덩어리의 실행 주석', () => {
 
   it("';' 로 끝낸 실행 주석 뒤의 DELIMITER 줄은 받는다 (넷 모두 a·b 와 루틴 p)", () => {
     const r = run('ALTER TABLE t ADD a INT;\n/*!40101 */;\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;\nALTER TABLE t ADD b INT;');
+    expect(columnsOf(r)).toEqual(['id', 'a', 'b']);
+    expect(r.ok && r.model.routines.map((x) => x.name)).toEqual(['p']);
+  });
+
+  // 리뷰 15회차 F6 (변이 P1 — 앞 덩어리를 끝낸 ';' 앞의 힌트도 DELIMITER 줄 앞의 것으로 본다): ';' 로 끝낸 힌트는 두 클라이언트 모두 주석뿐인 문장으로 보내고 버퍼를 비운다
+  // (8.0.46·8.4.11 에서 mysql 클라이언트로 실측)
+  it("';' 로 끝낸 힌트 뒤의 DELIMITER 줄도 받는다 (넷 모두 a·b 와 루틴 p)", () => {
+    const r = run('ALTER TABLE t ADD a INT;\n/*+ x */;\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;\nDELIMITER ;\nALTER TABLE t ADD b INT;');
     expect(columnsOf(r)).toEqual(['id', 'a', 'b']);
     expect(r.ok && r.model.routines.map((x) => x.name)).toEqual(['p']);
   });

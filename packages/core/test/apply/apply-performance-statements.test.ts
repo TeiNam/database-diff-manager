@@ -83,3 +83,20 @@ const TRAILING_CASES: Case[] = [
 describe('applyScript — 1,000,000자 스크립트의 계산량: 마지막 문장 뒤와 문장 없는 덩어리의 실행 주석', () => {
   it.each(TRAILING_CASES)('%s', (_name, make, expected) => checkCase(make, expected, undefined, SKIPPED_BOUND_MS), TEST_TIMEOUT_MS);
 });
+
+// DELIMITER 줄 앞의 클라이언트 버퍼 (리뷰 15회차 F1·F2)와 여러 줄 힌트 (F4): 줄마다 앞 경계 뒤부터 그 줄 앞까지만, 힌트마다 그 안만 훑어 원문 길이에 비례한다. 긴 구분자도
+// 힌트보다 짧을 때만 KMP 로 찾는다. 여기서는 3 초 안을 본다
+const LONG_DELIMITER = '$'.repeat(50_000);
+const COMMAND_CASES: Case[] = [
+  ['DELIMITER 줄마다 앞에 블록 주석', () => fill(() => '/* 메모 */\nDELIMITER ;;', '\n', '', '\nALTER TABLE member ADD a INT;;'), { ok: true }],
+  ['DELIMITER 줄 하나 앞에 블록 주석이 가득', () => fill(() => '/* 메모 */', ' ', 'ALTER TABLE member ADD a INT;\n', '\nDELIMITER ;;\nALTER TABLE member ADD b INT;;'), { ok: true }],
+  ['여러 줄 힌트가 가득한 문장', () => fill(() => '/*+ x\n y */', ' ', 'ALTER TABLE member ADD a INT ', ';'), { ok: true }],
+  ['일반 주석이 가득한 문장 (주석마다 그 안만 본다)', () => fill(() => '/* x */', ' ', 'ALTER TABLE member ADD a INT ', ';'), { ok: true }],
+  ["안에 '/*' 가 가득한 일반 주석 하나", () => fill(() => '/*', ' ', 'ALTER TABLE member ADD a INT ', ' */;'), { ok: true }],
+  // 15바이트를 넘는 구분자는 mysql 클라이언트가 잘라 그 DELIMITER 줄에서 거부한다 (리뷰 15회차 후속) — 문장 나누기는 그대로 원문 길이에 비례해야 한다
+  ['긴 구분자 뒤 여러 줄 힌트가 가득한 문장', () => fill(() => '/*+ x\n y */', ' ', `DELIMITER ${LONG_DELIMITER}\nALTER TABLE member ADD a INT `, LONG_DELIMITER), { index: 1, errno: RE_EXPORT_ERRNO }],
+];
+
+describe('applyScript — 1,000,000자 스크립트의 계산량: DELIMITER 줄 앞의 클라이언트 버퍼와 여러 줄 힌트', () => {
+  it.each(COMMAND_CASES)('%s', (_name, make, expected) => checkCase(make, expected, undefined, SKIPPED_BOUND_MS), TEST_TIMEOUT_MS);
+});

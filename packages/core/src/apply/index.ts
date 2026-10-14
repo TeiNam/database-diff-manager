@@ -9,6 +9,8 @@ import { UnsafeValueError } from '../sql-safety';
 import { alterTable, createIndex, dropIndexOn } from './alter-table';
 import { assertUtf8Session } from './client-charset';
 import { LongComment, longCommentReason } from './comment-length';
+import { assertClientDelimiters, assertCommandsReadByBoth } from './delimiter-command';
+import { assertCommentsReadAsLexed, assertHintsReadAsLexed, assertNoCommandInSkipped, hintCommandAfterLast } from './client-comment';
 import { assertBmpText, canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
 import { noOpHandler } from './no-op';
 import { createRoutine, dropRoutine, dropView, isCreateRoutine } from './object-stmt';
@@ -18,7 +20,7 @@ import { createTable, dropTable, renameTables } from './table-stmt';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
 import { assertAsciiSpaces, assertLeadingSpaces } from './unicode-space';
 import { assertKnownRealType, assertModeIndependentText } from './unknown-session';
-import { assertNoStrayClose, executedText, hiddenAfterLast, leadingSkippedComments, skippedComments, type HiddenComment } from './version-comment';
+import { afterPrevious, assertNoStrayClose, executedText, hiddenAfterLast, leadingSkippedComments, skippedComments, type HiddenComment } from './version-comment';
 
 export { MYSQL_DEFAULTS, type ApplyDefaults, type ApplyError, type ApplyOptions, type ApplyResult } from './types';
 export { printSqlDump } from './print-dump';
@@ -34,8 +36,10 @@ const ACCOUNT_RE = /^(?:CREATE|ALTER)\s+USER\b/i;
 const ACCOUNT_STATEMENT = '계정 문장(CREATE USER·ALTER USER·SET PASSWORD)은 비밀번호를 담을 수 있어 받지 않습니다 — 적용한 스크립트는 버전 이력에 원문 그대로 남으므로, '
   + '비밀번호가 든 계정 문장은 지우고 다시 넣어 주세요 (계정 문장은 스키마를 바꾸지 않습니다)';
 
+// CRLF 는 '\n' 으로 읽는다 (리뷰 15회차 F3, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 줄마다 끝의 '\r' 하나를 떼고 '\n' 으로 이어 보내, 여러 줄 문자열의
+// '\r\n' 도 MySQL 은 '\n' 으로 저장한다 (COMMENT·DEFAULT·루틴 본문). 줄 번호는 그대로다. 덤프 업로드는 원문 그대로 읽는다
 export function applyScript(base: SchemaModel, script: string, opts: ApplyOptions): ApplyResult {
-  const text = script.replace(/^\uFEFF/, '');
+  const text = script.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
   let split: ApplySplit;
   let defaults: ApplyDefaults;
   let sqlMode: string;
@@ -58,7 +62,8 @@ export function applyScript(base: SchemaModel, script: string, opts: ApplyOption
       throw e;
     }
   }
-  const hidden = hiddenAfterLast(text, split.trailing); // 마지막 문장 뒤에서 렉서가 뒤 DDL 을 삼켰을 수 있는 실행 주석 (리뷰 12회차 R12-3·13회차 F2)
+  // 마지막 문장 뒤에서 렉서가 뒤 DDL 을 삼켰을 수 있는 실행 주석 (리뷰 12회차 R12-3·13회차 F2)과 클라이언트 명령이 든 힌트 (리뷰 15회차 후속 — '\.' 이 DDL 을 실행한다)
+  const hidden = hiddenAfterLast(text, split.trailing) ?? hintCommandAfterLast(text, split.trailing.hints);
   if (hidden) return hiddenFailure(text, hidden, split.statements.length > 0);
   if (applied === 0) return failure(0, 1, '', '적용할 DDL 문장이 없습니다');
   return { ok: true, model: st.model, applied, renames: collectRenames(st), defaults };
@@ -101,11 +106,20 @@ type Handler = (st: State, c: Cursor) => void;
 // 모드 검사는 쓴 글 그대로 본다 — 건너뛰는 실행 주석 안의 글도 문장 나누기는 읽었다 (보수적)
 function applyStatement(st: State, s: ApplyStatement, script: string): boolean {
   const { noBackslashEscapes } = s;
-  assertLeadingSpaces(script, s, leadingSkippedComments(script, s)); // 앞 문장 뒤의 문장 없는 덩어리·DELIMITER 줄 (리뷰 12회차 Claude F5)
+  const leading = leadingSkippedComments(script, s); // 앞 문장 뒤의 문장 없는 덩어리·DELIMITER 줄의 건너뛰는 실행 주석 (리뷰 12회차 Claude F5)
+  assertCommandsReadByBoth(script, s.leading.commands); // DELIMITER 줄 앞의 클라이언트 버퍼 (리뷰 15회차 F1·F2)
+  assertLeadingSpaces(script, s, leading);
+  assertClientDelimiters(script, s.leading.commands); // 클라이언트가 다르게 읽는 DELIMITER 인자 (리뷰 15회차 후속)
+  const before = (at: number): string => (at < s.offset ? afterPrevious(script, at) : ''); // 문장 앞의 것은 그 줄을 밝힌다
+  assertHintsReadAsLexed(script, s.leading.hints, (at) => afterPrevious(script, at)); // 여러 줄 힌트·힌트 안의 '\'·'/*!' (리뷰 15회차 F4·후속)
+  assertCommentsReadAsLexed(script, s.leading.comments, (at) => afterPrevious(script, at)); // 일반 주석 안의 '/*' (리뷰 15회차 후속)
   const skipped = skippedComments(script, s); // 실행 주석의 버전 번호 (리뷰 11회차 R11-2)
+  assertHintsReadAsLexed(script, s.hints, before);
+  assertCommentsReadAsLexed(script, s.comments, before);
   const statement = executedText(s, skipped);
   assertSameBackslashMode(st, s.ddl, noBackslashEscapes);
   const written = tokenize(s.ddl, { noBackslashEscapes });
+  assertNoCommandInSkipped(script, s, written, skipped); // 건너뛰는 실행 주석 안의 '\' (리뷰 15회차 후속)
   assertNoStrayClose(s, written); // 짝 없는 '*/' — applyTokens 는 문장 끝의 '*/' 를 감싼 주석의 닫힘으로 뗀다 (리뷰 14회차)
   assertModeIndependentText(st, s.ddl, written); // 세션 SQL_MODE 를 모르면 모드에 따라 달리 읽히는 백슬래시·큰따옴표 (리뷰 10회차)
   const tokens = statement === s.ddl ? written : tokenize(statement, { noBackslashEscapes });
