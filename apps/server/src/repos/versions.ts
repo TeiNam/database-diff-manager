@@ -107,6 +107,18 @@ export const isSameFingerprint = (a: VersionFingerprint, b: VersionFingerprint):
   a.schemaId === b.schemaId && a.versionNo === b.versionNo && a.modelHash === b.modelHash
   && a.uploadedAt === b.uploadedAt && a.databaseName === b.databaseName && a.schemaName === b.schemaName;
 
+export interface VersionRef {
+  id: number;
+  versionNo: number;
+}
+
+// 스키마의 최신 SQL 버전 (ALTER 적용의 기준이 될 수 있는 버전 중 번호가 가장 큰 것). SQL 버전이 없으면 undefined
+export function latestSqlVersion(db: Db, schemaId: number): VersionRef | undefined {
+  const r = one<{ id: number; version_no: number }>(db,
+    "SELECT id, version_no FROM schema_versions WHERE schema_id = ? AND source_format = 'sql' ORDER BY version_no DESC LIMIT 1", schemaId);
+  return r && { id: Number(r.id), versionNo: Number(r.version_no) };
+}
+
 export function listVersions(db: Db, schemaId: number): VersionSummary[] {
   getSchema(db, schemaId);
   const metas = all<MetaRecord>(db, `${META_SQL} WHERE v.schema_id = ? ORDER BY v.version_no`, schemaId).map(toMeta);

@@ -33,6 +33,18 @@ interface AwaitedBase {
   versionNo: number;
 }
 
+const isVersionNumber = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value > 0;
+
+// 409 의 details 가 알려 주는, 미리보기 뒤에 저장된 더 새 버전 ({ latestVersion: { id, versionNo } } — 서버 리뷰 5회차 M-2).
+// 그 밖의 409(기준 버전 지문 불일치)나 모양이 맞지 않는 값이면 undefined
+function newerVersionOf(details: unknown): AwaitedBase | undefined {
+  if (typeof details !== 'object' || details === null || !('latestVersion' in details)) return undefined;
+  const latest = details.latestVersion;
+  if (typeof latest !== 'object' || latest === null || !('id' in latest) || !('versionNo' in latest)) return undefined;
+  const { id, versionNo } = latest;
+  return isVersionNumber(id) && isVersionNumber(versionNo) ? { id, versionNo } : undefined;
+}
+
 const isSameInputs = (a: RequestInputs, b: RequestInputs | undefined) =>
   b !== undefined && a.baseId === b.baseId && a.script === b.script && a.charset === b.charset && a.collation === b.collation;
 
@@ -141,10 +153,14 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
     alter.mutate({ baseId: inputs.baseId, body }, {
       onSuccess: (response) => finish(response, inputs),
       onError: (error) => {
-        // 미리보기 뒤에 기준 버전이 바뀌었다. 그 미리보기는 지우고 (메시지는 아래 오류 줄에 나온다) 목록을 다시 받아 화면의 기준 버전을 서버의 것에 맞춘다
+        // 미리보기 뒤에 기준 버전이 바뀌었거나 더 새 버전이 저장됐다. 그 미리보기는 지우고 (메시지는 아래 오류 줄에 나온다) 목록을 다시 받아 화면의 기준 버전을 서버의 것에 맞춘다
         if (!(error instanceof ApiError && error.status === HTTP_CONFLICT)) return;
         setOutcome(undefined);
         refreshVersions();
+        // 더 새 버전이 저장됐으면 서버가 그 버전을 알려 준다. 다시 받은 목록에 나타나면 기준 버전을 그 버전으로 옮긴다 — 옛 기준 버전에 다시 미리보기하면 서버는
+        // 일부러 고른 옛 버전으로 보고 받아, 그 버전의 변경이 빠진 결과가 최신 버전이 된다. 목록을 다시 받기 시작한 뒤에 기다려야 '찾지 못했다' 는 안내가 잠깐도 나오지 않는다
+        const newer = newerVersionOf(error.details);
+        if (newer) setAwaitedBase(newer);
       },
     });
   };

@@ -19,13 +19,14 @@ const MAX_FINGERPRINT_TEXT_LENGTH = 256;
 const INVALID_FINGERPRINT = '기준 버전 지문(expectedBase)은 미리보기가 돌려준 base 그대로여야 합니다';
 const FingerprintNumber = z.number(INVALID_FINGERPRINT).int(INVALID_FINGERPRINT).positive(INVALID_FINGERPRINT);
 const FingerprintText = (max: number) => z.string(INVALID_FINGERPRINT).min(1, INVALID_FINGERPRINT).max(max, INVALID_FINGERPRINT);
-const VersionFingerprintBody = z.object({
+const PreviewBaseBody = z.object({
   schemaId: FingerprintNumber,
   versionNo: FingerprintNumber,
   modelHash: FingerprintText(MAX_MODEL_HASH_LENGTH),
   uploadedAt: FingerprintText(MAX_FINGERPRINT_TEXT_LENGTH),
   databaseName: FingerprintText(MAX_FINGERPRINT_TEXT_LENGTH),
   schemaName: FingerprintText(MAX_FINGERPRINT_TEXT_LENGTH),
+  latestVersionNo: FingerprintNumber, // 미리보기 때 그 스키마의 최신 SQL 버전 번호
 }, INVALID_FINGERPRINT);
 const AlterBody = z.object({
   script: z.string().min(1, '스크립트가 비어 있습니다').max(MAX_ALTER_SCRIPT, `스크립트는 ${MAX_ALTER_SCRIPT}자 이하여야 합니다`),
@@ -33,7 +34,7 @@ const AlterBody = z.object({
   note: NoteSchema.optional(),
   dryRun: z.boolean().optional(),
   defaults: z.object({ charset: CharsetName.optional(), collation: CharsetName.optional() }).optional(),
-  expectedBase: VersionFingerprintBody.optional(), // 저장(dryRun 아님)에는 꼭 있어야 한다 — 서비스(applyAlter)가 확인한다
+  expectedBase: PreviewBaseBody.optional(), // 저장(dryRun 아님)에는 꼭 있어야 한다 — 서비스(applyAlter)가 확인한다
 });
 
 export function versionRoutes(app: FastifyInstance, ctx: AppContext): void {

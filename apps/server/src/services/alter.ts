@@ -6,7 +6,7 @@ import { AppError } from '../errors';
 import { saveDerivation } from '../repos/derivations';
 import { loadEvidence } from '../repos/evidence';
 import { writeRenames } from '../repos/renames';
-import { getVersionFingerprint, isSameFingerprint, loadVersion, type VersionFingerprint } from '../repos/versions';
+import { getVersionFingerprint, isSameFingerprint, latestSqlVersion, loadVersion, type VersionFingerprint } from '../repos/versions';
 import { roundTripMismatches, type RoundTripInput } from './alter-round-trip';
 import { ingest } from './ingest';
 
@@ -17,10 +17,16 @@ export interface AlterInput {
   note?: string;
   defaults?: Partial<ApplyDefaults>;
   dryRun?: boolean;
-  expectedBase?: VersionFingerprint; // 미리보기가 돌려준 기준 버전 지문. 저장(dryRun 아님)에는 꼭 있어야 하고, 있으면 미리보기에서도 대조한다
+  expectedBase?: PreviewBase; // 미리보기가 돌려준 base. 저장(dryRun 아님)에는 꼭 있어야 하고, 있으면 미리보기에서도 대조한다
   userId: number;
   requestId?: string; // 안전망이 막을 때 메시지와 서버 로그에 남긴다
   log?: { warn(details: object, message: string): void };
+}
+
+// 미리보기가 돌려주고 저장이 expectedBase 로 되돌려 보내는 기준 버전: 지문과, 미리보기 때 그 스키마의 최신 SQL 버전 번호
+// (저장할 때 기준 버전이 그때 최신이었는지 가린다 — 리뷰 5회차 M-2)
+export interface PreviewBase extends VersionFingerprint {
+  latestVersionNo: number;
 }
 
 export interface AlterChange {
@@ -30,21 +36,21 @@ export interface AlterChange {
 }
 
 export type AlterResult =
-  | { status: 'preview'; applied: number; changes: AlterChange[]; renames: RenameMapping[]; base: VersionFingerprint }
+  | { status: 'preview'; applied: number; changes: AlterChange[]; renames: RenameMapping[]; base: PreviewBase }
   | { status: 'ok' | 'duplicate'; versionId: number; versionNo: number; applied: number; changes: AlterChange[] };
 
 const NO_EVIDENCE: SchemaEvidence = { level: 'unknown', reason: '기준 버전의 완전성 판정이 없습니다', objects: [] };
 const MAX_LISTED_OBJECTS = 5;
 const MISSING_EXPECTED_BASE = '저장하려면 미리보기가 돌려준 기준 버전 지문(expectedBase)이 필요합니다 — 먼저 미리보기를 실행하세요';
 const STALE_BASE = '기준 버전이 바뀌었습니다 — 미리보기 뒤에 다른 곳에서 지우고 다시 올렸을 수 있습니다. 미리보기를 다시 실행하세요';
+const newerVersionSaved = (versionNo: number) =>
+  `미리보기 뒤에 다른 사용자가 더 새 버전(v${versionNo})을 저장했습니다 — 이대로 저장하면 최신 버전에서 그 변경이 빠지므로, 최신 버전에서 미리보기를 다시 실행하세요`;
 
 export function applyAlter(db: Db, input: AlterInput): AlterResult {
   // 기준 버전은 행 ID 로 가리키는데, 가장 큰 ID 의 버전을 지우면 다른 업로드가 그 ID 를 다시 쓴다.
   // 지문이 없으면 미리보기 뒤에 바뀐 버전에 그대로 적용되므로 저장은 지문을 요구한다 (R4-01)
   if (!input.dryRun && !input.expectedBase) throw new AppError(400, MISSING_EXPECTED_BASE);
-  // 모델을 읽기 전에 먼저 가린다. 이 함수는 동기라 여기서 확인한 버전이 그대로 저장의 기준이 된다 (다른 요청이 끼어들지 않는다)
-  const fingerprint = getVersionFingerprint(db, input.baseId); // 없는 버전은 404
-  if (input.expectedBase && !isSameFingerprint(input.expectedBase, fingerprint)) throw new AppError(409, STALE_BASE);
+  const current = checkBase(db, input.baseId, input.expectedBase);
   const base = loadVersion(db, input.baseId);
   if (base.version.sourceFormat !== 'sql') throw new AppError(400, 'MD 로 올린 버전에는 ALTER 를 적용할 수 없습니다 — SQL 덤프 버전을 기준으로 고르세요');
   if (base.staleReason) throw new AppError(400, `기준 버전 v${base.version.versionNo} 은 예전 파서로 저장된 모델이라 ALTER 를 적용할 수 없습니다 — 같은 원문을 다시 올린 버전을 기준으로 고르세요`);
@@ -62,7 +68,7 @@ export function applyAlter(db: Db, input: AlterInput): AlterResult {
   assertRoundTrip(input, { base: base.model, baseAgain: () => parseSqlDump(printDump(base.model, base.version.schemaName)), applied: result.model, reparsed });
   const changes = changesOf(diffSchemas(base.model, reparsed.model, result.renames));
   if (!changes.length) throw new AppError(400, '변경 없음 — 스크립트를 적용해도 기준 버전과 같습니다');
-  if (input.dryRun) return { status: 'preview', applied: result.applied, changes, renames: result.renames, base: fingerprint };
+  if (input.dryRun) return { status: 'preview', applied: result.applied, changes, renames: result.renames, base: current };
   const saved = ingest(db, {
     databaseName: base.version.databaseName, schemaName: base.version.schemaName, filename, text, note: input.note, userId: input.userId,
     evidence: loadEvidence(db, input.baseId) ?? NO_EVIDENCE,
@@ -72,6 +78,22 @@ export function applyAlter(db: Db, input: AlterInput): AlterResult {
     },
   });
   return { status: saved.status, versionId: saved.versionId, versionNo: saved.versionNo, applied: result.applied, changes };
+}
+
+// 기준 버전의 지금 지문과 스키마의 최신 SQL 버전 번호 (미리보기가 돌려주는 base). expectedBase 를 보냈으면 대조한다: 지문이 다르면 미리보기 뒤에
+// 기준 버전이 바뀐 것이고 (R4-01·R5-01), 미리보기 때 최신이던 기준 버전 뒤에 더 새 SQL 버전이 생겼으면 이대로 저장한 결과가 그 버전의 변경이 빠진 채
+// 최신 버전이 된다 (M-2 — 409 와 함께 그 버전을 알려 화면이 기준 버전을 옮기게 한다). 미리보기 때 이미 더 새 버전이 있던 옛 기준 버전을 고른 것은 일부러
+// 고른 것이라 막지 않는다. 모델을 읽기 전에 가린다 — applyAlter 는 동기라 여기서 확인한 상태가 그대로 저장의 기준이 된다 (다른 요청이 끼어들지 않는다)
+function checkBase(db: Db, baseId: number, expected: PreviewBase | undefined): PreviewBase {
+  const fingerprint = getVersionFingerprint(db, baseId); // 없는 버전은 404
+  // SQL 버전이 없으면 기준 버전이 MD 다 (applyAlter 가 400 으로 거부한다) — 그 버전 자신을 최신으로 본다
+  const latest = latestSqlVersion(db, fingerprint.schemaId) ?? { id: baseId, versionNo: fingerprint.versionNo };
+  const current = { ...fingerprint, latestVersionNo: latest.versionNo };
+  if (!expected) return current;
+  if (!isSameFingerprint(expected, fingerprint)) throw new AppError(409, STALE_BASE);
+  const wasLatest = expected.latestVersionNo <= expected.versionNo;
+  if (wasLatest && latest.versionNo > expected.versionNo) throw new AppError(409, newerVersionSaved(latest.versionNo), { latestVersion: latest });
+  return current;
 }
 
 // 결과 모델을 td-export 형식 덤프로 출력한다. core 가 출력할 수 없다고 알린 경우(ApplyFailure — 스키마 이름·루틴 본문에 쓸 수 없는 문자열)만
