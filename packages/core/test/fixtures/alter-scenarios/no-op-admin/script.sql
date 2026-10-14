@@ -1,0 +1,14 @@
+-- 스키마를 바꾸지 않는 관리 문장(옵션을 쓴 현재 스키마의 CREATE SCHEMA·DATABASE IF NOT EXISTS, FLUSH PRIVILEGES·TABLES, 테이블 점검, DROP USER)은 무시한다 (리뷰 4회차 M-3).
+-- MySQL 도 SHOW CREATE 결과가 그대로다: 있는 스키마의 문자셋 옵션은 무시하므로 뒤의 CREATE TABLE 은 스키마 기본 문자셋(utf8mb4)을 쓴다
+CREATE SCHEMA IF NOT EXISTS `__DB__` DEFAULT CHARACTER SET latin1 COLLATE latin1_swedish_ci;
+CREATE DATABASE /*!32312 IF NOT EXISTS*/ `__DB__` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */ /*!80016 DEFAULT ENCRYPTION='N' */;
+CREATE TABLE note (id INT PRIMARY KEY, body VARCHAR(100));
+FLUSH PRIVILEGES;
+ALTER TABLE member ADD INDEX ix_age (age);
+ANALYZE TABLE member;
+OPTIMIZE TABLE member, orders;
+CHECK TABLE member QUICK;
+CHECKSUM TABLE orders EXTENDED;
+FLUSH TABLES;
+DROP USER IF EXISTS 'tdm_absent'@'%';
+ALTER TABLE member COMMENT '관리 문장 뒤';

@@ -43,12 +43,19 @@ describe('applyScript — 문장 처리', () => {
 
 // 이미 MySQL 에서 돈 스크립트에 흔한, 스키마(SHOW CREATE 결과)를 바꾸지 않는 문장은 무시한다: 트랜잭션 제어, LOCK·UNLOCK TABLES, 데이터 문장, 권한, 서버 변수(SET GLOBAL·PERSIST),
 // 조회(SELECT·SHOW·DESC·DESCRIBE·EXPLAIN·DO), DISABLE·ENABLE KEYS 만 쓴 ALTER TABLE (InnoDB 는 note 1031 만 남긴다), 현재 스키마의 CREATE SCHEMA·DATABASE IF NOT EXISTS
-// (리뷰 3회차 M-5, 8.0.46·8.4.11 실측: note 1007)
+// (리뷰 3회차 M-5, 8.0.46·8.4.11 실측: note 1007 — 문자셋·콜레이션·ENCRYPTION 옵션도 무시하고 스키마 기본값은 그대로다), FLUSH PRIVILEGES·TABLES, 테이블 점검(ANALYZE·OPTIMIZE·
+// CHECK·CHECKSUM TABLE — 결과 행만 낸다), DROP·RENAME USER (리뷰 4회차 M-3, 8.0.46·8.4.11 실측)
 describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
   const NO_OPS = [
     "SELECT 'done';", 'SELECT COUNT(*) FROM t WHERE id > 0;', 'SHOW TABLES;', 'SHOW CREATE TABLE t;', 'DESC t;', 'DESCRIBE `t`;', 'EXPLAIN SELECT * FROM t;', 'DO 1 + 1;',
     'ALTER TABLE t DISABLE KEYS;', 'ALTER TABLE `t` ENABLE KEYS;', 'ALTER TABLE shop.t DISABLE KEYS;', '/*!40000 ALTER TABLE `t` DISABLE KEYS */;',
     'CREATE SCHEMA IF NOT EXISTS shop;', 'CREATE DATABASE IF NOT EXISTS `shop`;',
+    'CREATE SCHEMA IF NOT EXISTS `shop` DEFAULT CHARACTER SET utf8 ;', 'CREATE DATABASE IF NOT EXISTS shop CHARACTER SET = latin1 COLLATE = latin1_swedish_ci;',
+    "CREATE DATABASE IF NOT EXISTS shop DEFAULT CHARSET 'utf8mb4' DEFAULT COLLATE utf8mb4_bin;",
+    "CREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */ /*!80016 DEFAULT ENCRYPTION='N' */;",
+    'FLUSH PRIVILEGES;', 'FLUSH TABLES;', 'ANALYZE TABLE t;', 'ANALYZE NO_WRITE_TO_BINLOG TABLE t;', 'ANALYZE LOCAL TABLES `t`;', 'OPTIMIZE TABLE shop.t;',
+    'CHECK TABLE t;', 'CHECK TABLE t, `t` QUICK;', 'CHECK TABLE t FOR UPGRADE;', 'CHECK TABLE t QUICK FAST;', 'CHECKSUM TABLE t;', 'CHECKSUM TABLE t EXTENDED;',
+    "DROP USER 'app'@'%';", "DROP USER IF EXISTS 'a'@'%', b@localhost;", "RENAME USER 'a'@'%' TO 'b'@'%';",
     'START TRANSACTION;', 'BEGIN;', 'BEGIN WORK;', 'COMMIT;', 'ROLLBACK;', 'ROLLBACK TO SAVEPOINT s1;', 'LOCK TABLES t WRITE;', 'LOCK TABLE t READ;', 'UNLOCK TABLES;',
     "INSERT INTO t VALUES (1), (2);", "INSERT INTO t (id) SELECT 3;", "UPDATE t SET id = 4 WHERE id = 1;", 'DELETE FROM t WHERE id = 2;', "REPLACE INTO t VALUES (5);",
     'TRUNCATE TABLE t;', 'TRUNCATE t;', "GRANT SELECT ON shop.* TO 'app'@'%';", "REVOKE SELECT ON shop.* FROM 'app'@'%';",
@@ -82,6 +89,8 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
     'SET FOREIGN_KEY_CHECKS = 0; ALTER TABLE t ADD COLUMN x INT;', 'USE shop; ALTER TABLE t ADD COLUMN x INT;', 'SELECT 1; ALTER TABLE t ADD COLUMN x INT;',
     'SHOW TABLES; DROP TABLE t;', 'DO 1; ALTER TABLE t ADD COLUMN x INT;', 'ALTER TABLE t DISABLE KEYS; ALTER TABLE t ADD COLUMN x INT;',
     'CREATE SCHEMA IF NOT EXISTS shop; ALTER TABLE t ADD COLUMN x INT;', 'DESC t; DROP TABLE t;',
+    'CREATE SCHEMA IF NOT EXISTS shop DEFAULT CHARACTER SET utf8mb4; ALTER TABLE t ADD COLUMN x INT;', 'FLUSH PRIVILEGES; ALTER TABLE t ADD COLUMN x INT;',
+    'ANALYZE TABLE t; DROP TABLE t;', "DROP USER 'a'@'%'; ALTER TABLE t ADD COLUMN x INT;",
   ])('구분자 안에 문장이 여럿이면 무시하지 않고 RE_EXPORT 로 거부한다: %s', (chunk) => {
     const r = run(`${NO_DELIMITER_RESET}${chunk}`);
     expect(r).toMatchObject({ ok: false, error: { index: 2 } });
@@ -102,12 +111,14 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
     expect(r).toMatchObject({ ok: true, applied: 1 });
   });
 
-  // 조회 문장의 사용자 변수 대입(:=·INTO)은 뒤 SET 이 읽는 저장 값과 어긋날 수 있다. DISABLE·ENABLE KEYS 를 다른 절과 함께 쓴 ALTER TABLE, 옵션을 쓴 CREATE SCHEMA,
-  // 다른 스키마의 CREATE SCHEMA 는 받지 않는다 (MySQL 은 받는다 — 드물어 1차에서 받지 않는다). 없는 테이블의 DISABLE KEYS 는 MySQL 처럼 1146 이다
+  // 조회 문장의 사용자 변수 대입(:=·INTO)은 뒤 SET 이 읽는 저장 값과 어긋날 수 있다. DISABLE·ENABLE KEYS 를 다른 절과 함께 쓴 ALTER TABLE, 다른 스키마나 문자셋·콜레이션·
+  // ENCRYPTION 밖의 옵션을 쓴 CREATE SCHEMA, 그 밖의 FLUSH, 히스토그램 절을 쓴 ANALYZE TABLE 은 받지 않는다 (MySQL 은 받는다 — 드물어 1차에서 받지 않는다).
+  // 없는 테이블의 DISABLE KEYS 는 MySQL 처럼 1146 이다
   it.each([
     ['SELECT @x := 1;', ':='], ['SELECT COUNT(*) INTO @n FROM t;', 'INTO'], ['DO @x := 1;', ':='],
     ['ALTER TABLE t DISABLE KEYS, ADD x INT;', 'DISABLE'], ['ALTER TABLE t ADD x INT, ENABLE KEYS;', 'ENABLE'],
-    ['CREATE SCHEMA IF NOT EXISTS shop DEFAULT CHARACTER SET latin1;', '옵션'], ['CREATE DATABASE IF NOT EXISTS other;', 'other'],
+    ['CREATE DATABASE IF NOT EXISTS other;', 'other'], ['CREATE DATABASE IF NOT EXISTS other CHARACTER SET latin1;', 'other'],
+    ['FLUSH TABLES WITH READ LOCK;', 'FLUSH'], ['FLUSH LOGS;', 'FLUSH'], ['ANALYZE TABLE t UPDATE HISTOGRAM ON id;', 'UPDATE'],
   ])('%s 는 무시하지 않고 RE_EXPORT 로 거부한다', (sql, mention) => {
     const r = run(`${sql}\nALTER TABLE t ADD COLUMN y INT;`);
     expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining(mention) } });
@@ -118,6 +129,34 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
     expect(run('ALTER TABLE nope DISABLE KEYS;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1146)') } });
     expect(run('ALTER TABLE other.t DISABLE KEYS;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('other') } });
   });
+
+  // MySQL 은 없는 테이블을 결과 행의 오류(Table '…' doesn't exist)로만 알린다 — 기준 버전과 스크립트가 맞지 않으니 DISABLE KEYS 처럼 거부한다
+  it.each(['ANALYZE TABLE nope;', 'OPTIMIZE TABLE t, nope;', 'CHECK TABLE nope QUICK;', 'CHECKSUM TABLE nope;', 'ANALYZE TABLE T;'])('테이블 점검 문장의 없는 테이블은 1146 이다: %s', (sql) => {
+    expect(run(sql)).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1146)') } });
+  });
+
+  it('테이블 점검 문장의 다른 스키마 테이블은 거부한다', () => {
+    expect(run('ANALYZE TABLE other.t;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('other') } });
+  });
+
+  // 있는 스키마여도 MySQL 은 옵션의 이름을 먼저 본다 (8.0.46·8.4.11 실측)
+  it.each([
+    ['CREATE DATABASE IF NOT EXISTS shop CHARACTER SET foo;', '1115'], ['CREATE DATABASE IF NOT EXISTS shop COLLATE foo_bin;', '1273'],
+    ['CREATE DATABASE IF NOT EXISTS shop CHARACTER SET latin1 COLLATE utf8mb4_bin;', '1253'],
+  ])('현재 스키마의 CREATE DATABASE IF NOT EXISTS 도 맞지 않는 문자셋·콜레이션은 MySQL 처럼 거부한다: %s', (sql, errno) => {
+    expect(run(sql)).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining(`(MySQL ${errno})`) } });
+  });
+
+  // 계정 문장은 스키마를 바꾸지 않지만 비밀번호를 담을 수 있다 — 적용한 스크립트는 버전 이력에 원문 그대로 남으므로 무시하지 않고 지우라고 안내한다 (리뷰 4회차 M-3)
+  it.each(["CREATE USER 'app'@'%' IDENTIFIED BY 'secret';", "ALTER USER 'app'@'%' IDENTIFIED BY 'secret';", "SET PASSWORD = 'secret';", "SET PASSWORD FOR 'app'@'%' = 'secret';"])(
+    '%s 는 비밀번호가 든 계정 문장을 지우라고 안내한다', (sql) => {
+      const r = run(`${sql}\nALTER TABLE t ADD COLUMN x INT;`);
+      expect(r).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('비밀번호') } });
+      if (!r.ok) {
+        expect(r.error.reason).toContain('지우');
+        expect(r.error.reason).not.toContain('secret');
+      }
+    });
 
   it('스키마에 영향을 주는 세션 변수와 식으로 쓴 세션 SQL_MODE 는 여전히 거부한다', () => {
     expect(run('SET default_storage_engine = MyISAM;\nALTER TABLE t ADD x INT;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining(RE_EXPORT) } });

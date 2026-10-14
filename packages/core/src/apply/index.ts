@@ -22,6 +22,11 @@ export { ApplyFailure } from './types'; // printSqlDump 가 출력할 수 없는
 const MAX_STATEMENT_TEXT = 500;
 const VIEW_RE = /^(?:CREATE\s+(?:OR\s+REPLACE\s+)?|ALTER\s+)(?:ALGORITHM\s*=\s*\w+\s+)?(?:DEFINER\s*=\s*\S+\s+)?(?:SQL\s+SECURITY\s+\w+\s+)?VIEW\b/i;
 const SCHEMA_RE = /^CREATE\s+(?:SCHEMA|DATABASE)\b/i;
+// 계정 문장 (리뷰 4회차 M-3): 스키마를 바꾸지 않지만 비밀번호를 담을 수 있다. 적용한 스크립트는 버전 이력에 원문 그대로 남으므로 무시하지 않고 지우라고 안내한다
+// (비밀번호가 없는 DROP·RENAME USER 는 무시한다 — no-op.ts). 안내에 문장 글자는 넣지 않는다
+const ACCOUNT_RE = /^(?:CREATE|ALTER)\s+USER\b/i;
+const ACCOUNT_STATEMENT = '계정 문장(CREATE USER·ALTER USER·SET PASSWORD)은 비밀번호를 담을 수 있어 받지 않습니다 — 적용한 스크립트는 버전 이력에 원문 그대로 남으므로, '
+  + '비밀번호가 든 계정 문장은 지우고 다시 넣어 주세요 (계정 문장은 스키마를 바꾸지 않습니다)';
 
 export function applyScript(base: SchemaModel, script: string, opts: ApplyOptions): ApplyResult {
   let statements;
@@ -109,6 +114,7 @@ function ddlHandler(c: Cursor): Handler | undefined {
 
 // SET·USE 와 무시하는 문장(no-op.ts)의 처리기 — 적용한 DDL 이 아니다. 아니면 undefined
 function sessionHandler(c: Cursor): Handler | undefined {
+  if (c.isWord('SET', 'PASSWORD')) return fail(ACCOUNT_STATEMENT);
   if (c.isWord('SET')) return applySet;
   return c.isWord('USE') ? useSchema : noOpHandler(c);
 }
@@ -179,10 +185,11 @@ function withoutCommentEnd(statement: string, toks: Token[]): { toks: Token[]; d
 
 function unsupported(ddl: string): string {
   if (VIEW_RE.test(ddl)) return `CREATE·ALTER VIEW 는 1차 지원 범위가 아닙니다 (MySQL 이 뷰 본문을 다시 써서 저장합니다) — ${RE_EXPORT}`;
-  if (SCHEMA_RE.test(ddl)) return `CREATE SCHEMA·DATABASE 는 옵션 없이 쓴 현재 스키마의 IF NOT EXISTS 꼴만 무시하고 그 밖에는 받지 않습니다 — ${RE_EXPORT}`;
+  if (SCHEMA_RE.test(ddl)) return `CREATE SCHEMA·DATABASE 는 현재 스키마의 IF NOT EXISTS 꼴(문자셋·콜레이션 옵션 포함)만 무시하고 그 밖에는 받지 않습니다 — ${RE_EXPORT}`;
+  if (ACCOUNT_RE.test(ddl)) return ACCOUNT_STATEMENT;
   const head = ddl.split(/\s+/).slice(0, 3).join(' ');
   return `지원하지 않는 문장입니다: ${head} — 1차 지원 범위는 ALTER·CREATE·DROP·RENAME TABLE, CREATE·DROP INDEX, CREATE·DROP FUNCTION·PROCEDURE, DROP VIEW 이고, `
-    + `스키마를 바꾸지 않는 문장(트랜잭션 제어·LOCK·데이터 문장·권한·조회)은 무시합니다 — ${RE_EXPORT}`;
+    + `스키마를 바꾸지 않는 문장(트랜잭션 제어·LOCK·데이터 문장·권한·FLUSH PRIVILEGES·TABLES·테이블 점검·조회)은 무시합니다 — ${RE_EXPORT}`;
 }
 
 // 기준 → 결과 이름 대응 (diff 의 rename 매핑 형식). 새로 만든 객체·지운 객체는 들어가지 않는다
