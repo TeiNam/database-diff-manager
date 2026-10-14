@@ -35,8 +35,10 @@ const ACCOUNT_RE = /^(?:CREATE|ALTER)\s+USER\b/i;
 const ACCOUNT_STATEMENT = '계정 문장(CREATE USER·ALTER USER·SET PASSWORD)은 비밀번호를 담을 수 있어 받지 않습니다 — 적용한 스크립트는 버전 이력에 원문 그대로 남으므로, '
   + '비밀번호가 든 계정 문장은 지우고 다시 넣어 주세요 (계정 문장은 스키마를 바꾸지 않습니다)';
 
+// CRLF 는 '\n' 으로 읽는다 (리뷰 15회차 F3, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 줄마다 끝의 '\r' 하나를 떼고 '\n' 으로 이어 보내, 여러 줄 문자열의
+// '\r\n' 도 MySQL 은 '\n' 으로 저장한다 (COMMENT·DEFAULT·루틴 본문). 줄 번호는 그대로다. 덤프 업로드는 원문 그대로 읽는다
 export function applyScript(base: SchemaModel, script: string, opts: ApplyOptions): ApplyResult {
-  const text = script.replace(/^\uFEFF/, '');
+  const text = script.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
   let split: ApplySplit;
   let defaults: ApplyDefaults;
   let sqlMode: string;
