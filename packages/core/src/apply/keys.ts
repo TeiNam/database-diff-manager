@@ -7,6 +7,7 @@ import { assertForeignKeyCount, assertKeyCount } from './limits';
 import { baseType, BLOB_TYPES, CHARSET_TYPES, columnMaxlen, effectiveCollation, INT_TYPES, tableCharset, type TableCharset } from './normalize-mysql';
 import { childTables, columnsByName, findColumn, findTable, hasOtherChild, refLists, sameName, type State } from './state';
 import { fail, RE_EXPORT, type ColumnSpec, type ConstraintItem, type FkItem, type IndexItem } from './types';
+import { failFkCheck } from './unknown-session';
 
 export interface KeyDrop {
   what: 'index' | 'primary' | 'fk' | 'check' | 'constraint';
@@ -301,7 +302,7 @@ export function addForeignKey(st: State, t: Table, item: FkItem, generatedName?:
   const name = item.named ? rest.name : generatedName ?? nextFkName(t);
   checkSetNull(t, columns, rest, name);
   const parent = rest.refTable === t.name ? t : findTable(st, rest.refTable);
-  if (!parent && st.fkChecks) fail(`참조하는 테이블 \`${rest.refTable}\` 이 없습니다 (MySQL 1824)`);
+  if (!parent) failFkCheck(st, `참조하는 테이블 \`${rest.refTable}\` 이 없는 FK 는`, `참조하는 테이블 \`${rest.refTable}\` 이 없습니다 (MySQL 1824)`);
   if (parent?.parseError) fail(`참조하는 테이블 \`${parent.name}\` 은 파싱하지 못한 정의라 FK 를 검사할 수 없습니다 — ${RE_EXPORT}`);
   const refColumns = parent ? parentColumns(st, t, columns, rest.refColumns, parent) : rest.refColumns;
   if (parent && !(deferSelfKey && parent === t)) assertParentUniqueKey(parent, refColumns);

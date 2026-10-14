@@ -1,7 +1,7 @@
 // 사람이 쓴 컬럼·인덱스·FK 정의를 읽는다 (ALTER TABLE ADD·MODIFY·CHANGE, CREATE TABLE, CREATE INDEX).
 // 백틱 없는 이름·소문자 키워드·컬럼 안 제약(PRIMARY KEY·UNIQUE·REFERENCES)을 받는다. 덤프용 parse-table 은 SHOW CREATE 형식만
 // 읽으므로 따로 두고, 키 파트·인덱스 옵션·FK 본문은 그 파서를 그대로 쓴다
-import type { Cursor } from '../cursor';
+import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import type { ColumnFormat, ColumnStorage, ForeignKey, Index, IndexKind } from '../model';
 import { indexKind, parseForeignKey, parseIndex, refAction } from '../parse-table';
@@ -181,7 +181,7 @@ export function parseConstraint(c: Cursor): ConstraintItem {
   if (c.acceptWord('FOREIGN', 'KEY')) {
     if (c.toks.slice(c.i).some((t) => t.t === 'word' && t.v.toUpperCase() === 'MATCH')) fail(`FK 의 MATCH 절은 1차 지원 범위가 아닙니다 (MySQL 은 읽고 무시합니다) — ${RE_EXPORT}`);
     const indexName = c.isOp('(') ? undefined : c.ident();
-    topLevelLists(c).slice(0, FK_LISTS.length).forEach((inner, k) => checkList(inner, FK_LISTS[k]));
+    topLevelLists(c).slice(0, FK_LISTS.length).forEach((inner, k) => checkFkList(inner, FK_LISTS[k], c.src));
     return { kind: 'fk', fk: withoutNoAction(parseForeignKey(c, symbol ?? '')), ...(indexName !== undefined ? { indexName } : {}), named: symbol !== undefined };
   }
   const kind = indexKind(c) ?? fail(`알 수 없는 정의입니다: ${c.peek()?.v ?? '(끝)'}`);
@@ -243,4 +243,10 @@ function topLevelLists(c: Cursor): Token[][] {
 // 키 파트·FK 컬럼 목록의 모양만 본다 (빈 목록·빈 항목·끝 쉼표는 MySQL 처럼 1064). 항목을 읽는 일은 parse-table 이 하므로 나눈 결과는 쓰지 않는다
 function checkList(inner: readonly Token[], what: string): void {
   splitList(inner, what);
+}
+
+// FK 컬럼 목록 (FOREIGN KEY (…)·REFERENCES t (…)): 공용 파서(parse-table identList)는 항목의 토큰 수만 보고 따옴표 없는 숫자 시작 이름(6ref — 렉서는 숫자와 단어로 나눈다)을
+// '식별자 목록 필요' 로만 거부하므로, 다른 이름 자리처럼 백틱으로 감싸라고 안내한다 (Cursor.ident, 리뷰 10회차 Claude 참고 1). 공용 파서는 바꾸지 않는다
+function checkFkList(inner: readonly Token[], what: string, src: string): void {
+  for (const item of splitList(inner, what)) if (item[0].t === 'number') new Cursor(item, src).ident();
 }

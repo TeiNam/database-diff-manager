@@ -1,4 +1,4 @@
-// ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE·time_zone 이 UTC 인지), 기준 이름 추적
+// ALTER 적용 중 상태: 작업용 모델 사본, 세션 값(FOREIGN_KEY_CHECKS·SQL_MODE·time_zone 이 UTC 인지 — 모르는 값이면 그 까닭), 기준 이름 추적
 import { Cursor } from '../cursor';
 import { routineNameKey } from '../diff';
 import type { Column, ForeignKey, Routine, SchemaModel, Table } from '../model';
@@ -27,24 +27,39 @@ export interface RefList {
   readonly children: Map<string, number>;
 }
 
+// 모르는 값 (리뷰 10회차): 값을 모르는 변수(저장하지 않았거나 저장 함수 호출 뒤 잊은 사용자 변수, @@global 서버 변수 …)에서 정한 사용자 변수.
+// unknown 은 왜 모르는지 밝힌 안내 글이다 — 그 값을 모르게 만든 앞 문장을 적는다. 그 값을 읽는 SET 도 받고, 값에 기대는 뒤 문장만 거부한다 (unknown-session.ts)
+export interface Unknown {
+  readonly unknown: string;
+}
+export type SessionValue = string | Unknown;
+export const isUnknown = (v: SessionValue): v is Unknown => typeof v !== 'string';
+
 export interface State {
   model: SchemaModel; // ponytail: 작업용 사본 하나를 고쳐 쓴다 (입력 모델은 그대로, 실패하면 통째로 버린다)
   readonly schemaName: string;
   readonly defaults: ApplyDefaults;
   fkChecks: boolean;
+  // 세션 FOREIGN_KEY_CHECKS 를 모르면 그 까닭 (안내 글, 알면 undefined) — 앞의 SET 이 값을 모르는 변수에서 정했다. 모르는 동안은 fkChecks 를 쓰지 않는다 (unknown-session.ts)
+  fkChecksUnknown: string | undefined;
   sqlMode: string;
+  // 세션 SQL_MODE 를 모르면 그 까닭 (안내 글, 알면 undefined). 모르는 동안은 sqlMode 를 쓰지 않는다 — 모드에 기대는 문장을 거부한다 (unknown-session.ts)
+  sqlModeUnknown: string | undefined;
   // 처음 세션 SQL_MODE (ApplyOptions.sqlMode, 주지 않았으면 MySQL 기본 모드) — 스크립트를 실행한 서버의 sql_mode 다. SET sql_mode = DEFAULT 가 이 값으로 되돌린다 (session.ts)
   readonly initialSqlMode: string;
-  // 스크립트가 서버(GLOBAL·PERSIST) sql_mode 를 바꿨는가 — 바꾼 뒤의 SET sql_mode = DEFAULT 는 바뀐 전역 값을 읽는데 그 값은 알 수 없어 받지 않는다 (session.ts sessionSqlMode, 리뷰 7회차 R7-1)
+  // 스크립트가 서버(GLOBAL·PERSIST) sql_mode 를 바꿨는가 — 바꾼 뒤의 SET sql_mode = DEFAULT 는 바뀐 전역 값을 읽는데 그 값은 알 수 없어 세션 SQL_MODE 를 모르는 값으로 둔다
+  // (session.ts sqlModeDefault, 리뷰 7회차 R7-1·10회차)
   serverSqlModeChanged: boolean;
   timeZoneUtc: boolean; // 스크립트가 세션 time_zone 을 UTC 로 정했는가 — 아니면 서버 시간대라 TIMESTAMP 리터럴 기본값을 받지 않는다 (session.ts assertUtcTimestampDefault)
-  // UTC 로 정한 세션 time_zone 을 바꿨을 수 있는 저장 함수 호출 (안내에 쓰는 이름 — 그 뒤 time_zone 을 다시 정하면 지운다). 이때 timeZoneUtc 는 false 다 (stored-call.ts)
-  timeZoneChangedBy: string | undefined;
-  readonly saved: Map<string, string>; // SET @v = … 로 저장한 사용자 변수 (소문자, '@' 포함). 무시한 문장이 저장 함수를 부르면 모두 잊는다 (stored-call.ts)
+  // 세션 time_zone 을 모르는 까닭 ('…어' 로 끝나는 안내 글 — 그 뒤 time_zone 을 다시 정하면 지운다). 이때 timeZoneUtc 는 false 다: UTC 로 정한 세션 time_zone 을 바꿨을 수 있는
+  // 저장 함수 호출(stored-call.ts), 값을 모르는 변수에서 정한 SET (session.ts). 없으면 서버 시간대라 모른다
+  timeZoneUnknown: string | undefined;
+  // SET @v = … 로 저장한 사용자 변수 (소문자, '@' 포함) — 모르는 값을 넣었으면 Unknown 이다. 무시한 문장이 저장 함수를 부르면 모두 잊는다 (stored-call.ts)
+  readonly saved: Map<string, SessionValue>;
   // 저장 함수 호출이 잊게 한 사용자 변수 — 호출 전에 저장한 것이다. 안내에만 쓴다: 다시 저장하면 saved 를 먼저 본다 (session.ts unknownVariable, 리뷰 9회차)
   readonly forgotten: Set<string>;
   // 무시한 문장이 부른 마지막 저장 함수 (안내에 쓰는 이름). 함수는 사용자 변수·세션 time_zone·전역 sql_mode 를 바꿀 수 있는데, 문장을 실행하지 않아 바뀐 값을 모른다 —
-  // 그 뒤 값을 다시 정하지 않은 사용자 변수를 읽거나 SET sql_mode = DEFAULT 를 쓰면 거부한다 (session.ts, 리뷰 8회차)
+  // 그 뒤 값을 다시 정하지 않은 사용자 변수와 SET sql_mode = DEFAULT 가 정한 세션 SQL_MODE 는 모르는 값이다 (session.ts, 리뷰 8회차·10회차)
   storedCall: string | undefined;
   readonly origins: Origins;
   // 테이블 이름 → st.model.tables 안의 자리. 이름 목록은 늘 정확하고 (테이블을 더하고 지우고 이름을 바꾸는 CREATE·DROP·RENAME TABLE 이 고친다),
@@ -71,7 +86,7 @@ export function initialState(base: SchemaModel, schemaName: string, defaults: Ap
   model.tables.forEach((t, k) => {
     if (!tableAt.has(t.name)) tableAt.set(t.name, k); // 같은 이름이 둘이면 앞의 것 (find 와 같다)
   });
-  const st: State = { model, schemaName, defaults, fkChecks: true, sqlMode, initialSqlMode: sqlMode, serverSqlModeChanged: false, timeZoneUtc: false, timeZoneChangedBy: undefined, saved: new Map(), forgotten: new Set(), storedCall: undefined, origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
+  const st: State = { model, schemaName, defaults, fkChecks: true, fkChecksUnknown: undefined, sqlMode, sqlModeUnknown: undefined, initialSqlMode: sqlMode, serverSqlModeChanged: false, timeZoneUtc: false, timeZoneUnknown: undefined, saved: new Map(), forgotten: new Set(), storedCall: undefined, origins, tableAt, fkNames: new Map(), refTables: new Map(), routineKeys: new Set(model.routines.map(routineKey)) };
   for (const t of model.tables) countForeignKeys(st, t, 1);
   return st;
 }

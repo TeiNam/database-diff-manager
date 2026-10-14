@@ -6,7 +6,7 @@ import { splitList } from './lists';
 import { canonicalCharset, canonicalCollation, charsetOfCollation } from './normalize-mysql';
 import { optionValue } from './options';
 import { findTable, objectName, type State } from './state';
-import { forgetStateChangedByCall } from './stored-call';
+import { forgetStateChangedBy, storedFunctionCall } from './stored-call';
 import { fail, RE_EXPORT } from './types';
 
 type NoOp = (st: State, c: Cursor) => void;
@@ -16,7 +16,7 @@ const NO_OP_WORDS: ReadonlySet<string> = new Set(['BEGIN', 'COMMIT', 'ROLLBACK',
 // 두 단어로 여는 무시 문장. 계정 삭제·이름 변경(DROP·RENAME USER, 리뷰 4회차 M-3)은 비밀번호를 담지 않는다 — CREATE·ALTER USER 는 index.ts 가 지우라고 안내한다
 const NO_OP_PAIRS: readonly (readonly string[])[] = [['START', 'TRANSACTION'], ['LOCK', 'TABLES'], ['LOCK', 'TABLE'], ['UNLOCK', 'TABLES'], ['UNLOCK', 'TABLE'], ['DROP', 'USER'], ['RENAME', 'USER']];
 // 조회 (리뷰 3회차 M-5): 함수는 DDL 을 실행할 수 없어 (암묵적으로 커밋하는 문장은 함수 안에서 MySQL 1422) 스키마가 그대로다. 다만 저장 함수는 사용자 변수 등을 바꿀 수 있어
-// 부르면 그 값을 모르는 값으로 둔다 (forgetStateChangedByCall). CALL·PREPARE·EXECUTE 는 DDL 을 실행할 수 있어 무시하지 않는다 (지원하지 않는 문장)
+// 부르면 그 값을 모르는 값으로 둔다 (forgetStateChangedBy). CALL·PREPARE·EXECUTE 는 DDL 을 실행할 수 있어 무시하지 않는다 (지원하지 않는 문장)
 const QUERY_WORDS: ReadonlySet<string> = new Set(['SELECT', 'SHOW', 'DESC', 'DESCRIBE', 'EXPLAIN', 'DO']);
 // 테이블 점검 문장 (리뷰 4회차 M-3, 8.0.46·8.4.11 실측): ANALYZE·OPTIMIZE·CHECK·CHECKSUM TABLE 은 통계를 모으거나 검사하거나 (OPTIMIZE 는 InnoDB 테이블을) 다시 만들 뿐
 // SHOW CREATE 는 그대로다. 값: 이름 목록 뒤에 쓸 수 있는 검사 방식
@@ -45,7 +45,7 @@ const isAssignmentAt = (toks: readonly Token[], k: number): boolean => isOp(toks
 function ignoreQuery(st: State, c: Cursor): void {
   const assigns = c.toks.some((t, k) => isWordToken(t, 'INTO') || isAssignmentAt(c.toks, k));
   if (assigns) fail(`사용자 변수에 대입하는 조회 문장(:=·INTO)은 뒤 SET 이 읽는 값을 바꿀 수 있어 받지 않습니다 — ${RE_EXPORT}`);
-  forgetStateChangedByCall(st, c.toks);
+  forgetStateChangedBy(st, storedFunctionCall(st, c.toks, c.src));
 }
 
 // 그 밖의 무시하는 문장도 같다 (리뷰 6회차 Codex #2): 데이터 문장은 INSERT … VALUES ((@v := 'x')) 처럼 사용자 변수에 대입할 수 있는데, 문장을 실행하지 않으니
@@ -53,7 +53,7 @@ function ignoreQuery(st: State, c: Cursor): void {
 // 저장 함수를 부르는 문장은 받고, 함수가 바꿨을 수 있는 값을 모르는 값으로 둔다 (UPDATE t SET v = fn(v) — 도우미 함수로 데이터를 고치는 마이그레이션)
 function ignoreStatement(st: State, c: Cursor): void {
   if (c.toks.some((_t, k) => isAssignmentAt(c.toks, k))) fail(`사용자 변수에 대입하는 데이터 문장(:=)은 뒤 SET 이 읽는 값을 바꿀 수 있어 받지 않습니다 — ${RE_EXPORT}`);
-  forgetStateChangedByCall(st, c.toks);
+  forgetStateChangedBy(st, storedFunctionCall(st, c.toks, c.src));
 }
 
 // FLUSH PRIVILEGES·FLUSH TABLES (리뷰 4회차 M-3): 권한 표를 다시 읽거나 열린 테이블을 닫을 뿐이다. 뒤에 더 쓴 꼴(FLUSH TABLES WITH READ LOCK, 테이블 이름)과

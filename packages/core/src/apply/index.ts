@@ -14,6 +14,7 @@ import { applySet, resolveSqlMode } from './session';
 import { initialState, type State } from './state';
 import { createTable, dropTable, renameTables } from './table-stmt';
 import { ApplyFailure, DEFAULT_SQL_MODE, fail, MYSQL_DEFAULTS, RE_EXPORT, type ApplyDefaults, type ApplyOptions, type ApplyResult } from './types';
+import { assertKnownRealType, assertModeIndependentText } from './unknown-session';
 
 export { MYSQL_DEFAULTS, type ApplyDefaults, type ApplyError, type ApplyOptions, type ApplyResult } from './types';
 export { printSqlDump } from './print-dump';
@@ -88,6 +89,7 @@ type Handler = (st: State, c: Cursor) => void;
 function applyStatement(st: State, statement: string, noBackslashEscapes: boolean): boolean {
   assertSameBackslashMode(st, statement, noBackslashEscapes);
   const tokens = tokenize(statement, { noBackslashEscapes });
+  assertModeIndependentText(st, statement, tokens); // 세션 SQL_MODE 를 모르면 모드에 따라 달리 읽히는 백슬래시·큰따옴표 (리뷰 10회차)
   const routine = withoutCommentEnd(statement, tokens).ddl;
   if (isCreateRoutine(routine)) {
     createRoutine(st, routine, noBackslashEscapes);
@@ -101,6 +103,7 @@ function applyStatement(st: State, statement: string, noBackslashEscapes: boolea
   assertOneStatement(c.toks);
   if (!session) {
     assertBmpStrings(c.toks);
+    assertKnownRealType(st, c.toks);
     if (noBackslashEscapes) assertNoBackslashTypeValues(c.toks, ddl);
   }
   handler(st, c);
@@ -158,9 +161,9 @@ function assertOneStatement(toks: readonly Token[]): void {
 
 // 문장 나누기(splitDump)는 SET SQL_MODE = '…' 꼴만 따라가 NO_BACKSLASH_ESCAPES 를 켜고 끈다 (처음에는 꺼져 있다). 세션 SQL_MODE 와 어긋나면
 // (SET 문이 @@sql_mode·:=·@변수·큰따옴표·SET GLOBAL 꼴로 바꿨거나, 처음 세션 SQL_MODE 에 있다) 이 문장의 문자열을 MySQL 과 다른 이스케이프 규칙으로 읽었으므로,
-// 백슬래시가 든 문장은 받지 않는다 (백슬래시가 없으면 두 규칙이 같다)
+// 백슬래시가 든 문장은 받지 않는다 (백슬래시가 없으면 두 규칙이 같다). 세션 SQL_MODE 를 모르면 assertModeIndependentText 가 같은 규칙으로 까닭을 밝혀 거부한다
 function assertSameBackslashMode(st: State, ddl: string, noBackslashEscapes: boolean): void {
-  if (routineLexMode(st.sqlMode).noBackslashEscapes === noBackslashEscapes || !ddl.includes('\\')) return;
+  if (st.sqlModeUnknown !== undefined || routineLexMode(st.sqlMode).noBackslashEscapes === noBackslashEscapes || !ddl.includes('\\')) return;
   fail(`앞의 SET 문이 바꾼 SQL_MODE 나 서버 SQL_MODE(SET 전의 세션 값)의 NO_BACKSLASH_ESCAPES 를 문장 나누기와 다르게 읽어 백슬래시가 든 이 문장을 MySQL 과 같게 읽을 수 없습니다 `
     + `(그 앞에서 SET SQL_MODE = '…' 꼴로 정하면 됩니다) — ${RE_EXPORT}`);
 }

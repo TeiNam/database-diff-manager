@@ -26,12 +26,15 @@ describe('SET 문', () => {
     expect(st.fkChecks).toBe(true);
   });
 
-  it('세션 변수의 식 값·저장하지 않은 변수는 거부한다', () => {
+  it('세션 변수의 식 값은 거부하고, 저장하지 않은 변수에서 정한 값은 그 까닭과 함께 모르는 값으로 둔다 (리뷰 10회차)', () => {
     const st = initialState(empty, 'shop', MYSQL_DEFAULTS, DEFAULT_SQL_MODE);
     const set = (sql: string) => () => applySet(st, new Cursor(tokenize(sql), sql));
     expect(set("SET sql_mode = CONCAT(@@sql_mode, ',X')")).toThrow(ApplyFailure);
     expect(set("SET sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_DATE', '')")).toThrow(ApplyFailure);
-    expect(set('SET FOREIGN_KEY_CHECKS = @never_saved')).toThrow(ApplyFailure);
+    expect(set('SET FOREIGN_KEY_CHECKS = @never_saved')).not.toThrow();
+    expect(st.fkChecksUnknown).toBe('앞의 `SET FOREIGN_KEY_CHECKS = @never_saved` 문장이 세션 FOREIGN_KEY_CHECKS 를 알 수 없는 값으로 정했습니다 — 값을 저장하지 않은 변수입니다: @never_saved');
+    set('SET FOREIGN_KEY_CHECKS = 0')();
+    expect(st).toMatchObject({ fkChecks: false, fkChecksUnknown: undefined });
   });
 });
 
@@ -294,7 +297,8 @@ describe('SET 범위', () => {
 });
 
 // 리뷰 7회차 R7-1: GLOBAL·PERSIST 로 서버 sql_mode 를 바꾸면 세션 값은 그대로지만, 그 뒤의 세션 sql_mode = DEFAULT 는 바뀐 서버 값을 읽는다. 이 도구가 아는 DEFAULT 값은
-// 처음 세션 SQL_MODE(짐작한 서버 값)뿐이라 바뀐 값을 알 수 없으므로 RE_EXPORT 로 거부한다. 서버 sql_mode 를 바꾸기 전의 DEFAULT 와 세션 값을 직접 정하는 대입은 그대로 받는다
+// 처음 세션 SQL_MODE(짐작한 서버 값)뿐이라 바뀐 값을 알 수 없으므로 세션 SQL_MODE 를 모르는 값으로 둔다 (리뷰 10회차 — 뒤의 루틴 등 그 값에 기대는 문장을 거부한다).
+// 서버 sql_mode 를 바꾸기 전의 DEFAULT 와 세션 값을 직접 정하는 대입은 그대로 안다
 describe('서버 sql_mode 를 바꾼 뒤의 SET sql_mode = DEFAULT', () => {
   const RELAXED = 'STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
   const SERVER_CHANGES = [
@@ -312,32 +316,34 @@ describe('서버 sql_mode 를 바꾼 뒤의 SET sql_mode = DEFAULT', () => {
     return st;
   };
 
-  it.each(SERVER_CHANGES)('%s 뒤의 세션 DEFAULT 는 전역 값을 바꿨음을 알리고 RE_EXPORT 로 거부한다 (세션 값은 그대로)', (change) => {
+  const CHANGED = 'DEFAULT 는 세션 값을 전역 sql_mode 로 되돌리는데, 이 스크립트가 그 앞에서 전역(GLOBAL·PERSIST) sql_mode 를 바꿔 그 값을 알 수 없습니다';
+
+  it.each(SERVER_CHANGES)('%s 뒤의 세션 DEFAULT 는 받고, 전역 값을 바꿨음을 밝혀 세션 SQL_MODE 를 모르는 값으로 둔다', (change) => {
     for (const sql of SESSION_DEFAULTS) {
       const st = stateWith(change);
-      const message = messageOf(() => setIn(st, sql));
-      expect(message, sql).toContain('전역');
-      expect(message, sql).toContain('바꿨');
-      expect(message.endsWith(RE_EXPORT), sql).toBe(true);
-      expect(st.sqlMode, sql).toBe(RELAXED);
+      setIn(st, sql);
+      expect(st.sqlModeUnknown, sql).toContain(CHANGED);
+      expect(st.sqlModeUnknown, sql).toContain('앞의 `SET ');
     }
   });
 
   it.each([
     ["SET GLOBAL sql_mode = 'NO_ENGINE_SUBSTITUTION', SESSION sql_mode = DEFAULT"], ["SET PERSIST sql_mode = '', @@session.sql_mode = DEFAULT"],
     ["SET @@global.sql_mode = '', SESSION sql_mode = DEFAULT"],
-  ])('한 문장 안에서도 서버 값을 바꾼 뒤(%s)의 세션 DEFAULT 는 거부한다', (sql) => {
+  ])('한 문장 안에서도 서버 값을 바꾼 뒤(%s)의 세션 DEFAULT 는 세션 SQL_MODE 를 모르는 값으로 둔다', (sql) => {
     const st = initialState(empty, 'shop', MYSQL_DEFAULTS, RELAXED);
-    expect(messageOf(() => setIn(st, sql))).toContain(RE_EXPORT);
-    expect(st.sqlMode).toBe(RELAXED);
+    setIn(st, sql);
+    expect(st.sqlModeUnknown).toContain(CHANGED);
   });
 
-  it('여러 문장에 걸쳐 간 뒤에도 거부한다 (서버 값을 바꾼 사실을 기억한다)', () => {
+  it('여러 문장에 걸쳐 간 뒤에도 같다 (서버 값을 바꾼 사실을 기억한다)', () => {
     const st = stateWith("SET GLOBAL sql_mode = 'NO_ENGINE_SUBSTITUTION'");
     setIn(st, "SET sql_mode = 'NO_ZERO_DATE'");
     setIn(st, 'SET GLOBAL max_connections = 10');
-    expect(() => setIn(st, 'SET SESSION sql_mode = DEFAULT')).toThrow(ApplyFailure);
-    expect(st.sqlMode).toBe('NO_ZERO_DATE');
+    setIn(st, 'SET SESSION sql_mode = DEFAULT');
+    expect(st.sqlModeUnknown).toContain(CHANGED);
+    setIn(st, "SET sql_mode = 'NO_ZERO_DATE'");
+    expect(st).toMatchObject({ sqlMode: 'NO_ZERO_DATE', sqlModeUnknown: undefined });
   });
 
   it('서버 sql_mode 를 바꾸기 전의 DEFAULT 는 처음 세션 SQL_MODE 로 되돌린다', () => {
@@ -431,13 +437,16 @@ describe('세션 time_zone 과 TIMESTAMP 리터럴 기본값', () => {
   });
 });
 
-// 리뷰 9회차 (Claude 참고 2): 트랜잭션 특성(SET [GLOBAL|SESSION] TRANSACTION …)·활성 역할(SET ROLE …)·계정의 기본 역할(SET DEFAULT ROLE … TO …)은 스키마와 이 도구가
-// 따라가는 세션 값을 바꾸지 않아 무시한다. 그 밖에 '변수 = 값' 꼴이 아닌 SET 은 ':' 필요 대신 알아보기 쉬운 안내로 거부한다
+// 리뷰 9회차 (Claude 참고 2)·10회차 (참고 3·4): 트랜잭션 특성(SET [GLOBAL|SESSION|LOCAL|PERSIST|PERSIST_ONLY] TRANSACTION … — PERSIST 꼴도 MySQL 이 받는다, 8.0.46·8.4.11 실측)·
+// 활성 역할(SET ROLE …)·계정의 기본 역할(SET DEFAULT ROLE … TO …)·스레드의 자원 그룹(SET RESOURCE GROUP rg [FOR id …])은 스키마와 이 도구가 따라가는 세션 값을 바꾸지 않아
+// 무시한다. 키워드 뒤에 아무것도 없으면 MySQL 처럼 1064 다. 그 밖에 '변수 = 값' 꼴이 아닌 SET 은 ':' 필요 대신 알아보기 쉬운 안내로 거부한다
 describe('스키마와 상관없는 SET', () => {
   it.each([
     'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', 'SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE', 'SET GLOBAL TRANSACTION READ ONLY',
-    'SET LOCAL TRANSACTION READ WRITE, ISOLATION LEVEL REPEATABLE READ', 'set transaction isolation level read uncommitted', 'SET ROLE ALL', 'SET ROLE NONE', 'SET ROLE DEFAULT',
+    'SET LOCAL TRANSACTION READ WRITE, ISOLATION LEVEL REPEATABLE READ', 'set transaction isolation level read uncommitted', 'SET PERSIST TRANSACTION ISOLATION LEVEL READ COMMITTED',
+    'SET PERSIST_ONLY TRANSACTION READ ONLY', 'SET ROLE ALL', 'SET ROLE NONE', 'SET ROLE DEFAULT',
     "SET ROLE 'r1', `r2`@'%'", "SET ROLE ALL EXCEPT 'r1'@'localhost'", "SET DEFAULT ROLE ALL TO 'u'@'%'", 'SET DEFAULT ROLE NONE TO u, v@localhost', 'SET DEFAULT ROLE r1, r2 TO CURRENT_USER()',
+    'SET RESOURCE GROUP rg', 'SET RESOURCE GROUP rg FOR 1, 2', 'set resource group USR_default',
   ])('%s 는 무시한다', (sql) => {
     const st = freshState();
     setIn(st, sql);
@@ -445,11 +454,21 @@ describe('스키마와 상관없는 SET', () => {
   });
 
   it('스크립트 안에서도 적용한 문장 수에 세지 않고 넘어간다', () => {
-    const r = applyScript(empty, "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;\nSET ROLE ALL;\nSET DEFAULT ROLE ALL TO 'u'@'%';\nCREATE TABLE t (id INT PRIMARY KEY);", { schemaName: 'shop' });
+    const r = applyScript(empty, "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;\nSET ROLE ALL;\nSET DEFAULT ROLE ALL TO 'u'@'%';\nSET RESOURCE GROUP rg;\nCREATE TABLE t (id INT PRIMARY KEY);", { schemaName: 'shop' });
     expect(r).toMatchObject({ ok: true, applied: 1 });
   });
 
-  it.each(['SET RESOURCE GROUP rg', 'SET RESOURCE GROUP rg FOR 1, 2', 'SET autocommit 1'])("'변수 = 값' 꼴이 아닌 %s 는 알아보기 쉬운 안내로 RE_EXPORT 와 함께 거부한다", (sql) => {
+  // PERSIST·PERSIST_ONLY 꼴도 트랜잭션 특성으로 가른다 — 서버 변수 대입(SET PERSIST x = …)으로 읽어 넘기지 않는다 (리뷰 10회차 Claude 참고 2)
+  it.each([
+    'SET TRANSACTION', 'SET GLOBAL TRANSACTION', 'SET SESSION TRANSACTION', 'set local transaction', 'SET PERSIST TRANSACTION', 'SET PERSIST_ONLY TRANSACTION',
+    'SET ROLE', 'SET DEFAULT ROLE', 'SET RESOURCE GROUP',
+  ])('키워드 뒤에 아무것도 없는 %s 는 MySQL 처럼 1064 로 거부한다 (8.0.46·8.4.11 실측)', (sql) => {
+    const message = messageOf(() => setIn(freshState(), sql));
+    expect(message).toContain('(MySQL 1064)');
+    expect(message).toContain(`${sql.toUpperCase()} 뒤에`);
+  });
+
+  it.each(['SET autocommit 1', 'SET @x 1'])("'변수 = 값' 꼴이 아닌 %s 는 알아보기 쉬운 안내로 RE_EXPORT 와 함께 거부한다", (sql) => {
     const message = messageOf(() => setIn(freshState(), sql));
     expect(message).toContain("'변수 = 값' 꼴이 아닌 SET 은 받지 않습니다");
     expect(message).not.toContain("':' 필요");

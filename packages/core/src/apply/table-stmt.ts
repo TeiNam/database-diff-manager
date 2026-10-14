@@ -11,6 +11,7 @@ import { assertUtcTimestampDefault } from './session';
 import { appendTable, childNames, forgetOrigins, moveOrigins, moveRefTable, nameTaken, needTable, objectName, objectNameList, removeTables, replaceTable, sameName, trackNew, type State } from './state';
 import { assertColumnCount, assertKeyCount } from './limits';
 import { fail, RE_EXPORT, type ConstraintItem } from './types';
+import { checksForeignKeys, failFkCheck } from './unknown-session';
 
 // 테이블(또는 뷰) 이름 변경: 다른 테이블 FK 의 참조 테이블과 자동 제약명('<옛>_ibfk_N'·'<옛>_chk_N')이 따라 바뀐다 (MySQL 8.0)
 export function renameTable(st: State, from: string, to: string): void {
@@ -131,11 +132,13 @@ export function dropTable(st: State, c: Cursor): void {
   const names = objectNameList(c, st);
   const targets = new Set(names.filter((n) => st.tableAt.has(n) || (ifExists ? false : fail(`테이블 \`${n}\` 이 없습니다 (MySQL 1051)`))));
   // 참조 색인: 지우는 테이블을 함께 지우지 않는 테이블이 참조할 때만, 알릴 FK 를 찾으려고 모든 테이블을 차례로 본다
-  if (st.fkChecks && [...targets].some((n) => [...childNames(st, n)].some((child) => !targets.has(child)))) {
+  if (checksForeignKeys(st) && [...targets].some((n) => [...childNames(st, n)].some((child) => !targets.has(child)))) {
     for (const child of st.model.tables) {
       if (targets.has(child.name)) continue;
       const fk = child.foreignKeys.find((f) => f.refSchema === undefined && targets.has(f.refTable));
-      if (fk) fail(`\`${child.name}\` 의 FK \`${fk.name}\` 가 참조하는 테이블 \`${fk.refTable}\` 은 지울 수 없습니다 (MySQL 3730)`);
+      if (!fk) continue;
+      const refused = `\`${child.name}\` 의 FK \`${fk.name}\` 가 참조하는 테이블 \`${fk.refTable}\``;
+      failFkCheck(st, `${refused} 을 지우는 문장은`, `${refused} 은 지울 수 없습니다 (MySQL 3730)`);
     }
   }
   removeTables(st, targets);

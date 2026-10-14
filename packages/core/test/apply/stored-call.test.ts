@@ -8,10 +8,10 @@ import type { Routine } from '../../src/model';
 // 무시하는 문장 속 저장 함수 호출 찾기 (리뷰 7회차 R7-2·8회차 R8-1·R8-2·9회차 R9-1·R9-2). 모델: 현재 스키마 shop 의 함수 fn_one·1set_m, 숫자처럼 보이는 이름의 함수
 // 0xface·0b101·123, 내장 함수와 이름이 같은 함수, 프로시저 proc_one
 const routine = (kind: Routine['kind'], name: string): Routine => ({ kind, name, params: '', characteristics: {}, body: 'RETURN 1' });
-const FUNCTIONS = ['fn_one', '1set_m', '0xface', '0b101', '123', 'concat', 'now', 'ifnull', 'count'].map((n) => routine('function', n));
+const FUNCTIONS = ['fn_one', '1set_m', '0xface', '0b101', '123', 'concat', 'now', 'ifnull', 'count', 'json_length', 'pow', 'char'].map((n) => routine('function', n));
 const model = { name: 'shop', tables: [], views: [], routines: [...FUNCTIONS, routine('procedure', 'proc_one')] };
 const st = initialState(model, 'shop', MYSQL_DEFAULTS, DEFAULT_SQL_MODE);
-const callIn = (sql: string) => storedFunctionCall(st, tokenize(sql));
+const callIn = (sql: string, state = st) => storedFunctionCall(state, tokenize(sql), sql);
 
 describe('storedFunctionCall — 무시하는 문장이 부르는 저장 함수', () => {
   it.each([
@@ -38,11 +38,34 @@ describe('storedFunctionCall — 무시하는 문장이 부르는 저장 함수'
     "SELECT CONCAT ('a', 'b')", "SELECT CONCAT/**/('a', 'b')", 'SELECT Ifnull\n(NULL, 1)', "SELECT concat /* 주석 */ ('a')",
     // 한정하지 않은 숫자는 MySQL 도 리터럴로 읽는다 (0xface() 는 1064)
     'SELECT 0xface()', 'SELECT 0b101(), 123()',
+    // 9회차 목록에 없던 내장 함수 (리뷰 10회차 R10-1 — MySQL 8.0/8.4 의 내장 함수 전체, native-functions.ts)
+    "SELECT JSON_LENGTH('{}'), POW(2, 3), CHAR (65)", "SELECT json_length /* x */ ('[]')",
     'SELECT fn_one FROM t', 'SELECT unknown_fn(1)', 'SELECT proc_one()', 'SELECT set_m()', "SELECT 'fn_one(1)'", 'SELECT 1 /* fn_one() */', 'SELECT 1set_m FROM t',
     'SELECT 1e5, 0x1F, 12 FROM t', 'SELECT shop.unknown_fn(1)', 'SELECT 1 set_m()',
     // INSERT·REPLACE … INTO 뒤 이름은 테이블이고 괄호는 컬럼 목록이다
     'INSERT INTO fn_one (id) VALUES (1)', 'INSERT INTO other.t (id) VALUES (1)', 'REPLACE INTO shop.fn_one (id) VALUES (1)', 'INSERT IGNORE INTO `fn_one`(id) VALUES (1)',
   ])('%s 는 저장 함수를 부르지 않는다', (sql) => {
     expect(callIn(sql)).toBeUndefined();
+  });
+});
+
+// 리뷰 10회차 R10-1: IGNORE_SPACE 세션에서는 바로 '(' 가 붙어야 하는 이름(NOW·COUNT …)도 공백(공백·탭·줄바꿈·CR·VT·FF)만 끼우면 내장 함수다 (주석을 끼우면 저장 함수 —
+// 8.0.46·8.4.11 실측). 세션 SQL_MODE 를 모르거나 처음 세션 SQL_MODE(서버가 짐작한 값)에 IGNORE_SPACE 가 있으면 공백 낀 꼴도 센다 (보수적)
+describe('storedFunctionCall — IGNORE_SPACE', () => {
+  const withMode = (mode: string, initial = DEFAULT_SQL_MODE) => ({ ...initialState(model, 'shop', MYSQL_DEFAULTS, initial), sqlMode: mode });
+
+  it.each(['SELECT NOW ()', 'SELECT now\n()', 'SELECT COUNT\t(1)', 'SELECT NOW \r\n ()'])('IGNORE_SPACE 세션의 %j 는 내장 함수다', (sql) => {
+    expect(callIn(sql, withMode('IGNORE_SPACE,STRICT_TRANS_TABLES'))).toBeUndefined();
+  });
+
+  it.each([['SELECT NOW/**/()', 'NOW'], ['SELECT NOW -- x\n()', 'NOW'], ['SELECT count # x\n(1)', 'count'], ['SELECT `now`()', 'now'], ['SELECT shop.now()', 'shop.now']])(
+    'IGNORE_SPACE 세션이어도 %j 는 저장 함수 호출이다', (sql, name) => {
+      expect(callIn(sql, withMode('IGNORE_SPACE'))).toBe(name);
+    });
+
+  it('세션 SQL_MODE 를 모르거나, 처음 세션 SQL_MODE 에 IGNORE_SPACE 가 있으면 공백 낀 꼴을 센다', () => {
+    expect(callIn('SELECT NOW ()', { ...withMode('IGNORE_SPACE'), sqlModeUnknown: '앞의 SET …' })).toBe('NOW');
+    expect(callIn('SELECT NOW ()', withMode('IGNORE_SPACE', 'IGNORE_SPACE'))).toBe('NOW');
+    expect(callIn('SELECT NOW()', { ...withMode('IGNORE_SPACE'), sqlModeUnknown: '앞의 SET …' })).toBeUndefined();
   });
 });

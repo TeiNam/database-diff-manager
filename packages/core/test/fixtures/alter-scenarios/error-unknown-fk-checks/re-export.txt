@@ -1,0 +1,1 @@
+저장 함수 호출 뒤 값을 모르는 변수에서 되돌린 FOREIGN_KEY_CHECKS 는 켜져 있었는지 알 수 없어 MySQL 1824 대신 1차 범위 밖 안내(RE_EXPORT)로 거부한다
