@@ -193,7 +193,7 @@ export function normalizeDefault(spec: DefaultSpec, col: Pick<Column, 'name' | '
   }
   if (NO_LITERAL_DEFAULT.has(base)) return fail(`${base.toUpperCase()} 컬럼에는 리터럴 기본값을 쓸 수 없습니다 (MySQL 1101)`);
   if (spec.kind === 'now') return nowText(col.type, spec, `컬럼 \`${col.name}\` 의 기본값`);
-  if (base === 'bit') return spec.kind === 'bit' ? bitText(spec.value.slice(2, -1)) : /^\d+$/.test(spec.value) ? bitText(BigInt(spec.value).toString(2)) : bad(spec.value);
+  if (base === 'bit') return bitDefault(spec, bad, reExport);
   if (spec.kind === 'bit') return bad(spec.value);
   if (TEMPORAL_TYPES.has(base)) return temporalText(spec, col, base as TemporalType, bad);
   if (base === 'year') return quoteString(yearDefault(spec.value, bad, reExport));
@@ -224,6 +224,14 @@ function numberText(value: string): string | undefined {
 
 // BIT 기본값: MySQL 은 앞쪽 0 을 떼고 찍는다 (8.0.46·8.4.11 실측: b'00000101' → b'101', b'00000000' → b'0')
 const bitText = (digits: string): string => `b'${digits.replace(/^0+/, '') || '0'}'`;
+
+// BIT 기본값은 b'…' 와 0 이상의 정수만 받는다. 문자열은 MySQL 이 수가 아니라 글자의 바이트로 저장하므로 (8.0.46·8.4.11 실측: BIT(8) DEFAULT '1' → b'110001',
+// BIT(1) DEFAULT '0' → 1067) 재현하지 않고 받지 않는다 — 수로 읽으면 다른 기본값을 저장한다 (리뷰 2회차 M-5)
+function bitDefault(spec: Extract<DefaultSpec, { value: string }>, bad: (why: string) => never, reExport: (why: string) => never): string {
+  if (spec.kind === 'bit') return bitText(spec.value.slice(2, -1));
+  if (spec.kind === 'string') return reExport(`'${spec.value}' 은(는) 문자열이라 MySQL 이 BIT 에 글자의 바이트로 저장합니다 (숫자나 b'…' 로 쓰세요)`);
+  return /^\d+$/.test(spec.value) ? bitText(BigInt(spec.value).toString(2)) : bad(spec.value);
+}
 
 // 날짜·시간 컬럼의 문자열 기본값: MySQL 이 다시 쓰는 꼴로 맞춘다 (temporal-default.ts). 숫자 리터럴(20200101)과 표준이 아닌 꼴은 1차에서 받지 않는다
 const TEMPORAL_SHAPE: Readonly<Record<TemporalType, string>> = { date: 'YYYY-MM-DD', datetime: 'YYYY-MM-DD HH:MM:SS', timestamp: 'YYYY-MM-DD HH:MM:SS', time: 'HH:MM:SS' };

@@ -437,6 +437,17 @@ describe('ALTER TABLE — 문자열 컬럼의 숫자 기본값', () => {
     }
     expect(col(ok("ALTER TABLE member ADD s ENUM('2','1') DEFAULT '1';"), 'member', 's').default).toBe("'1'"); // 따옴표로 쓴 값은 멤버 이름이다
   });
+
+  // BIT 에 쓴 문자열은 글자의 바이트다 (8.0.46·8.4.11 실측: BIT(8) DEFAULT '1' → b'110001') — 수로 읽으면 b'1' 이 되어 다른 기본값을 저장한다 (리뷰 2회차 M-5)
+  it('BIT 의 문자열 기본값은 RE_EXPORT 로 거부하고, 숫자·b 리터럴·TRUE 는 받는다 (ADD·ALTER COLUMN SET DEFAULT)', () => {
+    for (const script of ["ALTER TABLE member ADD c BIT(8) DEFAULT '1';", "ALTER TABLE member ADD c BIT(8);\nALTER TABLE member ALTER c SET DEFAULT '1';"]) {
+      const r = apply(script);
+      expect(r, script).toMatchObject({ ok: false, error: { reason: expect.stringContaining('문자열') } });
+      expect(!r.ok && r.error.reason.endsWith(RE_EXPORT), script).toBe(true);
+    }
+    const r = ok("ALTER TABLE member ADD b1 BIT(8) DEFAULT 1, ADD b2 BIT(8) DEFAULT b'00110001', ADD b3 BIT(1) DEFAULT TRUE;");
+    expect(['b1', 'b2', 'b3'].map((n) => col(r, 'member', n).default)).toEqual(["b'1'", "b'110001'", "b'1'"]);
+  });
 });
 
 // ENUM·SET 기본값의 멤버는 컬럼 콜레이션으로 찾는다 (리뷰 2회차 R2-02, 8.0.46·8.4.11 실측, 시나리오 enum-set-collation-defaults): 기준 덤프의 COLLATE utf8mb4_bin 컬럼은

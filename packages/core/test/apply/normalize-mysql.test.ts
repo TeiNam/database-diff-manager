@@ -183,6 +183,17 @@ describe('normalizeDefault', () => {
     expect(() => normalizeDefault({ kind: 'string', value }, withCollation(type, collation))).toThrow(/\(MySQL 1067\)/);
   });
 
+  // BIT 에 쓴 문자열은 수가 아니라 글자의 바이트로 저장된다 (8.0.46·8.4.11 실측: BIT(8) DEFAULT '1' → b'110001', BIT(1) DEFAULT '0' → 1067).
+  // 바이트 규칙은 재현하지 않고 받지 않는다 — 숫자와 b'…' 는 그대로 받는다 (리뷰 2회차 M-5)
+  it.each([['1', 'bit(8)'], ['0', 'bit(1)'], ['ab', 'bit(16)'], ['', 'bit(8)'], ["b'1'", 'bit(8)']])('BIT 의 문자열 기본값 %j (%s) 는 RE_EXPORT 로 거부한다', (value, type) => {
+    expect(messageOf(() => normalizeDefault({ kind: 'string', value }, col(type)))).toMatch(new RegExp(`문자열.*${RE_EXPORT}$`));
+  });
+
+  it('BIT 의 숫자·b 리터럴 기본값은 그대로 받는다', () => {
+    expect(normalizeDefault({ kind: 'number', value: '5' }, col('bit(8)'))).toBe("b'101'");
+    expect(normalizeDefault({ kind: 'bit', value: "b'110001'" }, col('bit(8)'))).toBe("b'110001'");
+  });
+
   it('DEFAULT CURRENT_TIMESTAMP 가 잘못되면 1067', () => {
     expect(() => normalizeDefault({ kind: 'now' }, col('date'))).toThrow(/1067/);
     expect(() => normalizeDefault({ kind: 'now' }, col('datetime(3)'))).toThrow(/1067/);
