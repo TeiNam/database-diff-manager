@@ -1,6 +1,7 @@
 // td-export SQL 파일 → SchemaModel
 import { isCreateTable, SqlTrail, sqlEvidence } from './completeness';
 import { lineOf } from './cursor';
+import { DelimiterSearch } from './delimiter-search';
 import { LexError, lexTokens, tokenize, type LexMode, type LexWatch, type Token } from './lexer';
 import { UNIDENTIFIED_NAME, type Routine, type RoutineKind, type SchemaModel, type Table, type View } from './model';
 import { normalizeDdl, normalizeRoutineDdl } from './normalize';
@@ -201,7 +202,7 @@ function scan<S extends DumpStatement>(text: string, lenient: boolean, make: Mak
   const mode: LexMode = watch ? { watch } : {};
   let start: Token | undefined;
   let from = 0; // 지금 덩어리가 시작한 자리 (앞 구분자·DELIMITER 줄 바로 뒤)
-  let delimiter = ';';
+  let find = new DelimiterSearch(text, ';', 0); // 지금 구분자 찾기 (DELIMITER 줄이 바꾼다)
   let skipUntil = 0; // DELIMITER 줄·구분자를 건너뛸 끝 오프셋
   const lineAt = lineCounter(text);
   const emit = (end: number, terminated: boolean) => {
@@ -218,19 +219,19 @@ function scan<S extends DumpStatement>(text: string, lenient: boolean, make: Mak
       if (!start) from = skipUntil;
       if (!start && isDelimiterCommand(text, t)) {
         const end = lineEnd(text, t.s);
-        delimiter = delimiterArg(text.slice(t.e, end));
+        find = new DelimiterSearch(text, delimiterArg(text.slice(t.e, end)), end);
         tokens = afterCommand(text, t.e, end, mode);
         skipUntil = end;
         continue;
       }
       // 구분자가 단어에 붙어 있어도(END$$) 문장 끝이다. 문자열·백틱 토큰 안은 보지 않는다
-      const at = delimiterAt(text, t, delimiter);
+      const at = delimiterAt(find, t);
       if (at >= 0) {
         if (!start && at > t.s) start = t;
         if (start) emit(at, true);
         else watch?.ended(at);
         start = undefined;
-        skipUntil = at + delimiter.length;
+        skipUntil = at + find.delimiter.length;
         continue;
       }
       start ??= t;
@@ -256,13 +257,12 @@ function lineCounter(text: string): (pos: number) => number {
   };
 }
 
-// 토큰 시작(';;' 처럼 여러 토큰에 걸칠 수 있음) 또는 단어·숫자 토큰 안의 구분자 위치. 없으면 -1
-function delimiterAt(text: string, t: Token, delimiter: string): number {
+// 토큰 시작(';;' 처럼 여러 토큰에 걸칠 수 있음) 또는 단어·숫자 토큰 안의 구분자 위치. 없으면 -1. find 는 원문의 구분자를 차례로 찾는다 — 토큰 자리마다 원문과 구분자를
+// 견주면 긴 구분자에서 원문 길이 × 구분자 길이가 든다 (delimiter-search.ts, 리뷰 15회차 R15-2)
+function delimiterAt(find: DelimiterSearch, t: Token): number {
   if (t.t === 'string' || t.t === 'ident') return -1;
-  if (text.startsWith(delimiter, t.s)) return t.s;
-  if (t.t === 'op') return -1;
-  const inside = text.slice(t.s, t.e).indexOf(delimiter);
-  return inside < 0 ? -1 : t.s + inside;
+  const reach = t.s + find.delimiter.length; // t.s 에서 시작하는 구분자가 끝나는 자리
+  return find.within(t.s, t.t === 'op' ? reach : Math.max(t.e, reach));
 }
 
 // SET 문이 바꾸는 세션 SQL_MODE: '@v = @@SQL_MODE' 는 저장, 'SQL_MODE = '…'' 는 설정, 'SQL_MODE = @v' 는 복원
@@ -305,11 +305,12 @@ function delimiterArg(line: string): string {
   return (quote ? rest.slice(1).split(quote, 1)[0] : rest.split(' ', 1)[0]) || ';';
 }
 
-// 줄 맨 앞(공백 제외)의 DELIMITER 단어
+// 줄 맨 앞(공백 제외)의 DELIMITER 단어. 앞의 공백만 거슬러 보고 공백이 아닌 글자에서 곧 멈춘다 — 줄 처음까지 되짚으면 한 줄에 되풀이한 DELIMITER 단어마다 그 줄을
+// 다시 훑어, 1,000,000자 스크립트 하나가 28 초였다 (리뷰 15회차 R15-1·Claude F5)
 function isDelimiterCommand(text: string, t: Token): boolean {
   if (t.t !== 'word' || t.v.toUpperCase() !== 'DELIMITER') return false;
-  const lineStart = text.lastIndexOf('\n', t.s - 1) + 1;
-  return text.slice(lineStart, t.s).trim() === '';
+  for (let k = t.s - 1; k >= 0 && text[k] !== '\n'; k--) if (!/\s/.test(text[k])) return false;
+  return true;
 }
 
 export function parseSqlDump(text: string): ParsedDump {
