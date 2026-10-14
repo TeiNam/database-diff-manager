@@ -153,7 +153,7 @@ describe('printSqlDump', () => {
   it('@tdm/core 공개 API: applyScript·printSqlDump·MYSQL_DEFAULTS 와 ApplyDefaults·ApplyOptions·ApplyResult·ApplyError 타입', () => {
     const defaults: ApplyDefaults = MYSQL_DEFAULTS;
     const opts: ApplyOptions = { schemaName: 'shop', defaults };
-    const result: ApplyResult = applyScript(shopModel(), 'SELECT 1;', opts);
+    const result: ApplyResult = applyScript(shopModel(), 'CALL p();', opts); // 지원하지 않는 문장 (SELECT 는 리뷰 3회차 M-5 부터 무시한다)
     const error: ApplyError | undefined = result.ok ? undefined : result.error;
     expect(defaults).toEqual({ charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' });
     expect(error?.index).toBe(1);

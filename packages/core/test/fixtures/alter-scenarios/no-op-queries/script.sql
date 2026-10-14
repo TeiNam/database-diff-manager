@@ -1,0 +1,17 @@
+-- 스키마를 바꾸지 않는 조회 문장(SELECT·SHOW·DESC·DESCRIBE·EXPLAIN·DO), DISABLE·ENABLE KEYS 만 쓴 ALTER TABLE (InnoDB 는 note 1031),
+-- 현재 스키마의 CREATE SCHEMA·DATABASE IF NOT EXISTS (note 1007) 는 무시한다 (리뷰 3회차 M-5). MySQL 도 SHOW CREATE 결과가 그대로다
+CREATE SCHEMA IF NOT EXISTS __DB__;
+CREATE DATABASE IF NOT EXISTS `__DB__`;
+USE `__DB__`;
+SELECT 'start';
+SHOW TABLES;
+SHOW CREATE TABLE member;
+DESC member;
+DESCRIBE orders;
+EXPLAIN SELECT * FROM member WHERE id = 1;
+DO 1 + 1;
+ALTER TABLE member DISABLE KEYS;
+INSERT INTO member (email, name) VALUES ('a@example.com', 'a');
+ALTER TABLE `member` ENABLE KEYS;
+ALTER TABLE member ADD COLUMN nick VARCHAR(20);
+SELECT COUNT(*) FROM member;
