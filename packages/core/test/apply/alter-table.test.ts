@@ -391,6 +391,26 @@ describe('ALTER TABLE — 부모 → 자식 참조 색인', () => {
     const r = applyRef('RENAME TABLE p TO p2;\nALTER TABLE p2 RENAME COLUMN code TO code2;');
     expect(r.ok && r.model.tables.find((t) => t.name === 'c')!.foreignKeys[0]).toMatchObject({ refTable: 'p2', refColumns: ['code2'] });
   });
+
+  // 참조되는 컬럼 둘을 맞바꾸면 참조 컬럼 목록 둘이 서로의 키로 옮겨 간다 — 자기 참조 FK 는 부모를 바꿀 때 이미 새 목록으로 셌다 (리뷰 2회차 I-2: 목록을 키째로 옮긴다).
+  // 8.0.46·8.4.11 실측: 맞바꾼 뒤 d 가 참조하는 code, 자기 참조 FK 가 참조하는 id 를 지우면 1829
+  const SWAP_BASE = parseSqlDump(tdExport([
+    'CREATE TABLE `p` (\n  `id` int NOT NULL,\n  `code` int NOT NULL,\n  `up` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `uq` (`code`),\n  KEY `up` (`up`),\n'
+      + '  CONSTRAINT `p_ibfk_1` FOREIGN KEY (`up`) REFERENCES `p` (`code`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    'CREATE TABLE `c` (\n  `id` int NOT NULL,\n  `x` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `x` (`x`),\n  CONSTRAINT `c_ibfk_1` FOREIGN KEY (`x`) REFERENCES `p` (`code`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    'CREATE TABLE `d` (\n  `id` int NOT NULL,\n  `y` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `y` (`y`),\n  CONSTRAINT `d_ibfk_1` FOREIGN KEY (`y`) REFERENCES `p` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+  ].join('\n\n'))).model;
+  const SWAP = 'ALTER TABLE p RENAME COLUMN id TO code, RENAME COLUMN code TO id;';
+  const applySwap = (script: string) => applyScript(SWAP_BASE, `${SWAP}\n${script}`, { schemaName: 'shop' });
+
+  it('참조되는 컬럼을 맞바꾸면 자식·자기 참조 FK 가 따라가고, 참조 색인도 맞는다', () => {
+    const r = applySwap('');
+    if (!r.ok) throw new Error(r.error.reason);
+    expect(r.model.tables.map((t) => t.foreignKeys[0].refColumns)).toEqual([['id'], ['id'], ['code']]);
+    expect(applySwap('ALTER TABLE p DROP COLUMN code;')).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining('`d` 의 FK `d_ibfk_1` 가 참조하는 컬럼 `code`') } });
+    expect(applySwap('ALTER TABLE c DROP FOREIGN KEY c_ibfk_1;\nALTER TABLE p DROP COLUMN id;')).toMatchObject({ ok: false, error: { index: 3, reason: expect.stringContaining('`p` 의 FK `p_ibfk_1` 가 참조하는 컬럼 `id`') } });
+    expect(applySwap('ALTER TABLE p MODIFY code BIGINT NOT NULL;')).toMatchObject({ ok: false, error: { index: 2, reason: expect.stringContaining(RE_EXPORT) } });
+  });
 });
 
 // 문자열 컬럼의 숫자 리터럴 기본값은 MySQL 이 수로 읽어 다시 쓴 글자로, ENUM·SET 의 숫자는 순번·비트로 저장된다 (8.0.46·8.4.11 실측, 시나리오 string-number-defaults).
