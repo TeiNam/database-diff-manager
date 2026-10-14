@@ -50,19 +50,29 @@ const FK_CHECKS_ON: ReadonlySet<string> = new Set(['1', 'ON', 'TRUE']);
 // 대입의 범위. server: GLOBAL·PERSIST·PERSIST_ONLY — 서버 값을 바꾸고 이 스크립트의 세션 값은 그대로라 무시한다
 type Scope = 'session' | 'server';
 
-// MySQL 은 대입의 값을 모두 먼저 계산하고(이때 저장 함수가 돈다) 차례로 대입한다. DEFAULT 는 대입할 때 전역 값을 읽으므로, 뒤 대입이 부르는 저장 함수가 바꾼 전역 sql_mode 를
-// 읽는다 (8.0.46·8.4.11 실측) — 그래서 문장 안의 저장 함수 호출을 대입보다 먼저 기억한다. 사용자 변수는 값을 계산할 때 읽으므로 대입마다 차례로 본다.
-// 저장 함수 호출은 문장을 읽을 때의 세션 SQL_MODE(IGNORE_SPACE)로 대입보다 먼저 가린다 — 앞 대입이 바꾼 sql_mode 로 뒤 대입을 읽지 않는다 (리뷰 10회차 R10-1)
+// 2단계에서 차례로 반영할 대입 하나 (applySet)
+type Write = () => void;
+
+// MySQL 은 대입의 값을 모두 먼저 계산하고(이때 저장 함수가 돈다) 그 뒤에 차례로 대입한다 (set_var.cc sql_set_variables — 리뷰 11회차 Claude F2, 8.0.46·8.4.11 실측).
+// 1단계는 값을 차례로 계산한다: 사용자 변수·@@변수는 대입하기 전의 값을 읽으므로 'SET SQL_MODE = …, @OLD_SQL_MODE = @@SQL_MODE' 의 @OLD_SQL_MODE 는 문장 전의 값이고,
+// 값을 계산하다 부른 저장 함수가 바꿨을 수 있는 값은 그 뒤에 계산하는 값부터 모른다 (forgetStateChangedBy). 2단계는 대입을 차례로 반영한다 — 호출 앞에서 계산한 대입도
+// 호출 뒤에 반영하므로 그 값을 안다. DEFAULT 는 대입할 때 전역 값을 읽어 앞 대입의 GLOBAL·뒤 대입이 부르는 저장 함수가 바꾼 전역 sql_mode 를 읽는다 — 그래서 문장 안의
+// 저장 함수 호출을 먼저 기억한다. 저장 함수 호출은 문장을 읽을 때의 세션 SQL_MODE(IGNORE_SPACE)로 먼저 가린다 — 앞 대입이 바꾼 sql_mode 로 뒤 대입을 읽지 않는다
+// (리뷰 10회차 R10-1)
 export function applySet(st: State, c: Cursor): void {
   c.expectWord('SET');
   if (isNonSchemaSet(c)) return;
   const items = splitList(c.toks.slice(c.i), 'SET');
   const calls = items.map((toks) => storedFunctionCall(st, toks, c.src));
   st.storedCall = calls.find((call) => call !== undefined) ?? st.storedCall;
+  const writes: Write[] = [];
   let scope: Scope = 'session';
   items.forEach((toks, k) => {
-    scope = assign(st, new Cursor(toks, c.src), scope, calls[k]);
+    const item = evaluate(st, new Cursor(toks, c.src), scope, calls[k]);
+    scope = item.scope;
+    if (item.write) writes.push(item.write);
   });
+  for (const write of writes) write();
 }
 
 // 스키마와 이 도구가 따라가는 세션 값에 상관없어 통째로 무시하는 SET (리뷰 9회차 Claude 참고 2·10회차 참고 3·4): 트랜잭션 특성(SET [GLOBAL|SESSION|LOCAL|PERSIST|PERSIST_ONLY]
@@ -78,22 +88,21 @@ function isNonSchemaSet(c: Cursor): boolean {
   return true;
 }
 
-// 대입 하나. call: 이 대입의 값이 부르는 저장 함수 (applySet 이 문장을 읽을 때 가렸다). 돌려주는 값은 다음 대입이 물려받는 범위다: 앞에 쓴 GLOBAL·PERSIST·PERSIST_ONLY·
-// SESSION·LOCAL 은 수식어 없는 뒤 대입에도 이어진다 (MySQL: 가장 최근 수식어를 따른다). '@@global.x' 처럼 이름에 붙인 범위는 그 대입에만 쓴다
-function assign(st: State, a: Cursor, inherited: Scope, call: string | undefined): Scope {
-  if (a.isWord('NAMES') || a.isWord('CHARACTER') || a.isWord('CHARSET')) return inherited;
+// 대입 하나의 값을 계산한다 (1단계). call: 이 대입의 값이 부르는 저장 함수 (applySet 이 문장을 읽을 때 가렸다). scope 는 다음 대입이 물려받는 범위다: 앞에 쓴 GLOBAL·
+// PERSIST·PERSIST_ONLY·SESSION·LOCAL 은 수식어 없는 뒤 대입에도 이어진다 (MySQL: 가장 최근 수식어를 따른다). '@@global.x' 처럼 이름에 붙인 범위는 그 대입에만 쓴다.
+// write 는 2단계에서 반영할 대입이다 (값을 버리는 대입은 없다)
+function evaluate(st: State, a: Cursor, inherited: Scope, call: string | undefined): { scope: Scope; write?: Write } {
+  if (a.isWord('NAMES') || a.isWord('CHARACTER') || a.isWord('CHARSET')) return { scope: inherited };
   const scope = scopeWord(a) ?? inherited;
   const variable = target(a);
   if (!variable.name.startsWith('@') && (variable.scope ?? scope) === 'server') {
-    // 서버 변수: 값이 식이어도, 스키마에 영향을 주는 변수여도 이 세션과 상관없다. 다만 서버 sql_mode 를 바꾼 사실은 기억한다 (sqlModeDefault).
+    // 서버 변수: 값이 식이어도, 스키마에 영향을 주는 변수여도 이 세션과 상관없다. 다만 서버 sql_mode 를 바꾼 사실은 대입할 때 기억한다 (sqlModeDefault).
     // PERSIST_ONLY 는 실행 중인 값을 바꾸지 않지만 범위를 가르지 않고 함께 본다 (드물어 보수적으로 거부).
-    // 값을 읽지 않고 버려도 그 안의 저장 함수 호출은 실행되어 사용자 변수 등을 바꿀 수 있으므로 다른 무시하는 문장과 같이 그 값을 모르는 값으로 둔다 (리뷰 8회차)
-    if (variable.name === 'sql_mode') st.serverSqlModeChanged = true;
+    // 값을 읽지 않고 버려도 그 안의 저장 함수 호출은 값을 계산할 때 실행되어 사용자 변수 등을 바꿀 수 있으므로 다른 무시하는 문장과 같이 그 값을 모르는 값으로 둔다 (리뷰 8회차)
     forgetStateChangedBy(st, call);
-    return scope;
+    return { scope, write: variable.name === 'sql_mode' ? () => { st.serverSqlModeChanged = true; } : undefined };
   }
-  assignSession(st, a, variable.name);
-  return scope;
+  return { scope, write: sessionWrite(st, a, variable.name) };
 }
 
 function scopeWord(a: Cursor): Scope | undefined {
@@ -101,14 +110,20 @@ function scopeWord(a: Cursor): Scope | undefined {
   return a.acceptWord('SESSION') || a.acceptWord('LOCAL') ? 'session' : undefined;
 }
 
-function assignSession(st: State, a: Cursor, target: string): void {
+// 세션 변수·사용자 변수 대입의 값을 계산하고(1단계) 반영할 대입을 돌려준다. 값을 버리는 변수면 undefined — 모르는 값이어도 받는다
+function sessionWrite(st: State, a: Cursor, target: string): Write | undefined {
   if (SCHEMA_VARIABLES.has(target)) fail(`이후 테이블 정의 결과를 바꾸는 세션 변수는 받을 수 없습니다: ${target} — ${RE_EXPORT}`);
   if (!a.acceptOp('=') && !(a.acceptOp(':') && a.acceptOp('='))) fail(notAssignment(a));
   const written = a.peek(); // 쓴 값의 첫 토큰 (time_zone 은 리터럴만 UTC 로 본다)
   const value = valueOf(st, a);
   if (!a.done) fail(`SET 값은 리터럴·@변수·@@변수만 받습니다: ${a.src.slice(a.peek()!.s).trim()}`);
-  if (!usesValue(target)) return; // 값을 버리는 변수 — 모르는 값이어도 받는다
+  if (!usesValue(target)) return undefined;
   const assignment = `SET ${a.src.slice(a.toks[0].s, a.toks[a.toks.length - 1].e)}`; // 안내에 쓰는 이 대입 ('SET SQL_MODE=@OLD_SQL_MODE')
+  return () => assignValue(st, target, value, written, assignment);
+}
+
+// 계산해 둔 값을 대입한다 (2단계). 세션 sql_mode 의 DEFAULT 는 이때 전역 값을 읽는다 (sqlModeDefault)
+function assignValue(st: State, target: string, value: SessionValue, written: Token | undefined, assignment: string): void {
   if (target.startsWith('@')) {
     st.saved.set(target, isUnknown(value) ? { unknown: `사용자 변수 ${target} 에 앞의 \`${assignment}\` 문장이 알 수 없는 값을 넣었습니다 — ${value.unknown}` } : value);
     return;

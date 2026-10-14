@@ -104,8 +104,13 @@ describe('SET FOREIGN_KEY_CHECKS 값', () => {
     expect(st.fkChecks).toBe(false);
     setIn(st, 'SET @@session.foreign_key_checks = TRUE');
     expect(st.fkChecks).toBe(true);
-    setIn(st, 'SET @fk = FALSE, FOREIGN_KEY_CHECKS = @fk');
+    setIn(st, 'SET @fk = FALSE');
+    setIn(st, 'SET FOREIGN_KEY_CHECKS = @fk');
     expect(st.fkChecks).toBe(false);
+    // 한 문장 안의 앞 대입은 뒤 대입이 읽는 값을 바꾸지 않는다 (리뷰 11회차 Claude F2 — 8.0.46·8.4.11 실측: 문장 전 @fk 가 1 이면 1 이다)
+    setIn(st, 'SET @fk = 1');
+    setIn(st, 'SET @fk = FALSE, FOREIGN_KEY_CHECKS = @fk');
+    expect([st.fkChecks, st.saved.get('@fk')]).toEqual([true, 'FALSE']);
   });
 
   it.each([['2'], ['NULL'], ["'x'"], ["''"], ['maybe']])('= %s 는 거부하고 값을 바꾸지 않는다 (MySQL 1231)', (value) => {
@@ -484,5 +489,40 @@ describe('스키마와 상관없는 SET', () => {
     expect(message).toContain("'변수 = 값' 꼴이 아닌 SET 은 받지 않습니다");
     expect(message).not.toContain("':' 필요");
     expect(message.endsWith(RE_EXPORT), message).toBe(true);
+  });
+});
+
+// 리뷰 11회차 Claude F2 (MySQL set_var.cc sql_set_variables — 값 검사·계산(check)을 모두 마친 뒤 대입(update)한다, 8.0.46·8.4.11 실측): 한 SET 문의 대입은 값을 모두 먼저
+// 계산한 뒤 차례로 대입한다. 뒤 대입이 앞 대입이 바꾼 변수를 읽어도 문장 전의 값이다. 값 계산 중에 부른 저장 함수는 그 뒤에 계산하는 값만 바꿀 수 있고, 대입은 그 뒤에 한다
+describe('한 SET 문은 값을 모두 계산한 뒤 차례로 대입한다', () => {
+  const T = 'CREATE TABLE t (id INT PRIMARY KEY);';
+  const modesOf = (r: ApplyResult) => (r.ok ? r.model.routines.filter((x) => x.kind === 'procedure').map((x) => `${x.name}:${x.sqlMode}`) : r.error.reason);
+
+  it("설정을 앞에 쓴 'SET SQL_MODE = …, @OLD_SQL_MODE = @@SQL_MODE' 의 @OLD_SQL_MODE 는 문장 전의 SQL_MODE 다 (리뷰 재현)", () => {
+    const r = applyScript(empty, `${T}\nSET SQL_MODE='NO_AUTO_VALUE_ON_ZERO', @OLD_SQL_MODE=@@SQL_MODE;\nALTER TABLE t ADD c INT;\nSET SQL_MODE=@OLD_SQL_MODE;\nCREATE PROCEDURE p() SELECT 1;`, { schemaName: 'shop' });
+    expect(modesOf(r)).toEqual([`p:${DEFAULT_SQL_MODE}`]);
+  });
+
+  it('앞 대입이 바꾼 사용자 변수를 뒤 대입이 읽어도 문장 전의 값이다 (리뷰 재현)', () => {
+    const r = applyScript(empty, `${T}\nSET @m = 'STRICT_TRANS_TABLES';\nSET @m = 'NO_ENGINE_SUBSTITUTION', sql_mode = @m;\nCREATE PROCEDURE p() SELECT 1;`, { schemaName: 'shop' });
+    expect(modesOf(r)).toEqual(['p:STRICT_TRANS_TABLES']);
+  });
+
+  it('@@ 읽기와 사용자 변수 맞바꾸기도 문장 전의 값을 읽는다', () => {
+    const st = freshState();
+    setIn(st, 'SET FOREIGN_KEY_CHECKS = 0, @fk = @@FOREIGN_KEY_CHECKS');
+    expect([st.fkChecks, st.saved.get('@fk')]).toEqual([false, '1']);
+    setIn(st, "SET @a = 'x', @b = 'y'");
+    setIn(st, 'SET @a = @b, @b = @a');
+    expect([st.saved.get('@a'), st.saved.get('@b')]).toEqual(['y', 'x']);
+  });
+
+  it('값 계산 중 저장 함수 호출: 앞에서 계산한 대입은 호출 뒤에 반영하고, 뒤에서 읽는 사용자 변수는 모른다 (8.0.46·8.4.11 실측)', () => {
+    const FN = 'CREATE FUNCTION fn_one() RETURNS INT DETERMINISTIC NO SQL RETURN 1;';
+    const after = applyScript(empty, `${T}\n${FN}\nSET @a = 'NO_ENGINE_SUBSTITUTION', time_zone = '+00:00', GLOBAL max_connections = fn_one();\nSET sql_mode = @a;\nCREATE PROCEDURE p() SELECT 1;\nALTER TABLE t ADD ts TIMESTAMP NULL DEFAULT '2020-01-01 00:00:00';`, { schemaName: 'shop' });
+    expect(after).toMatchObject({ ok: true, applied: 4 });
+    expect(modesOf(after)).toEqual(['p:NO_ENGINE_SUBSTITUTION']);
+    const before = applyScript(empty, `${T}\n${FN}\nSET @a = 'NO_ENGINE_SUBSTITUTION';\nSET GLOBAL max_connections = fn_one(), @c = @a;\nSET sql_mode = @c;\nCREATE PROCEDURE p() SELECT 1;`, { schemaName: 'shop' });
+    expect(before).toMatchObject({ ok: false, error: { index: 6, reason: expect.stringContaining('사용자 변수 @a 의 값을 알 수 없습니다') } });
   });
 });
