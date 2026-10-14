@@ -313,6 +313,31 @@ describe('문장 없이 끝난 덩어리의 실행 주석', () => {
   });
 });
 
+// 리뷰 14회차 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측 — 모두 1064): MySQL 은 열린 실행 주석이 없으면 '*/' 를 '*' '/' 로 읽는다. 문장 끝의 것은 문장을 감싼 실행 주석의 닫힘처럼
+// 떼고 받았고(13회차까지 — ALTER 는 c 를, 루틴은 p 를 더했다), 실행 주석 안에서 연 실행하는 주석과 함께 처음 '*/' 에서 닫힌 뒤의 '*/' 는 렉서가 바깥 주석의 닫힘으로 읽어 받았다
+describe('짝 없는 */', () => {
+  it.each([
+    ['ALTER 끝', 'ALTER TABLE t ADD c INT */;', 1],
+    ['루틴 끝', 'CREATE PROCEDURE p() SELECT 1 */;', 1],
+    ['바꾼 구분자 앞의 */;', 'DELIMITER $$\nALTER TABLE t ADD c INT */;$$\nDELIMITER ;', 1],
+    ['문장을 감싼 주석 뒤에 하나 더', '/*!40101 ALTER TABLE t ADD c INT */ */;', 1],
+    ['안에서 연 실행하는 주석과 함께 닫힌 뒤', '/*!40101 ALTER TABLE t ADD a INT /*!40101 , ADD b INT */ */;', 1],
+    ['함께 닫힌 뒤 문장 가운데', '/*!40101 ALTER TABLE t ADD a INT /*!40101 , ADD b INT */ , ADD c INT */;', 1],
+    ['*/ 만 있는 문장', 'ALTER TABLE t ADD a INT;\n*/;', 2],
+    ['문장 없는 덩어리', '/*!40101 /*!40101 */ */;\nALTER TABLE t ADD c INT;', 1],
+  ])('MySQL 처럼 1064 로 거부한다 — %s', (_name, script, index) => {
+    const r = run(script);
+    expect(r).toMatchObject({ ok: false, error: { index } });
+    expect(!r.ok && r.error.reason).toContain("짝 없는 '*/'");
+    expect(!r.ok && r.error.reason.endsWith('(MySQL 1064)')).toBe(true);
+  });
+
+  it('문장을 감싼 실행 주석의 닫힘·건너뛰는 주석의 닫힘·일반 주석의 끝은 받는다', () => {
+    expect(columnsOf(run('DELIMITER $$\n/*!40101 ALTER TABLE t ADD c INT */;$$\nDELIMITER ;'))).toEqual(['id', 'c']);
+    expect(columnsOf(run('/*!40101 ALTER TABLE t ADD a INT /*!99999 , ADD b INT */ */;'))).toEqual(['id', 'a']);
+    expect(columnsOf(run('ALTER TABLE t ADD c INT /* x */;'))).toEqual(['id', 'c']);
+  });
+});
 
 // 리뷰 14회차 F1 (8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 '/*!' 를 연 줄에서 그 뒤에 연 일반 주석을 둘째 '*/' 까지 주석으로 보고, 8.0 기본(--skip-comments)은
 // 그 글을 지우고 보낸다 (8.4 기본은 그대로 보낸다). 서버와 렉서는 첫 '*/' 에서 닫아 같은 스크립트가 클라이언트에 따라 다른 DDL 을 실행한다 — 문장 안의 첫째는 8.0 이 a·b·d·e,

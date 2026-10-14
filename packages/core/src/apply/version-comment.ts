@@ -9,6 +9,7 @@
 // 덤프 파서와 함께 쓰므로 그대로 두고, 문장 나누기가 알려 준 표지(ApplyStatement.marks)로 이 문장에서 MySQL 이 실행하는 글을 만든다. 문장 앞의 문장 없는 덩어리
 // (ApplyStatement.leading)와 마지막 문장 뒤(ApplySplit.trailing)의 표지도 본다 (리뷰 12·13회차). DELIMITER 줄의 인자 뒤는 mysql 클라이언트처럼 읽지 않는다 (리뷰 14회차 F3)
 import { lineOf } from '../cursor';
+import type { Token } from '../lexer';
 import type { ApplyStatement, LexNotes, NestedComment, VersionMark } from '../parse-dump';
 import { isCreateRoutine } from './object-stmt';
 import { fail, RE_EXPORT } from './types';
@@ -92,8 +93,9 @@ function byChunk<T>(items: readonly T[], at: (item: T) => number, ends: readonly
 
 // 실행하는 실행 주석(번호 없음, 80046 이하)이 덩어리 끝까지 닫혔는가 (리뷰 13회차, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): mysql 클라이언트는 '/*!' 안의 구분자에서도 문장을
 // 끊어, 닫히지 않은 채 보낸 주석을 MySQL 은 1064 로 거부한다 ('/*!40101 ALTER … ;' 줄바꿈 '*/;' — 13회차 전에는 그 문장과 뒤 문장을 적용했다). 서버는 안의 글을 실행하다 처음
-// 만난 '*/' 에서 주석을 닫고(안에서 연 실행하는 주석도 함께 닫힌다), 건너뛰는 주석의 '*/' 는 그 주석만 닫는다 — 건너뛰는 주석 안에는 표지가 없다 (opensComment).
-// marks·closes: 한 덩어리의 표지와 렉서가 실행 주석을 닫은 '*/' 의 자리 (자리 순서 — 따옴표·주석 안의 '*/' 는 빠진다)
+// 만난 '*/' 에서 주석을 닫고(안에서 연 실행하는 주석도 함께 닫힌다), 건너뛰는 주석의 '*/' 는 그 주석만 닫는다 — 건너뛰는 주석 안에는 표지가 없다 (opensComment). 렉서는 표지마다
+// 하나씩 닫아, 함께 닫힌 뒤의 '*/' 도 닫힘으로 읽는다 — 서버는 닫을 주석이 없어 '*' '/' 로 읽고 1064 다 (리뷰 14회차, 8.0.46·8.4.11 실측: '/*!40101 ALTER … /*!40101 , ADD b */ */;'
+// — 13회차까지는 a·b 를 더했다). marks·closes: 한 덩어리의 표지와 렉서가 실행 주석을 닫은 '*/' 의 자리 (자리 순서 — 따옴표·주석 안의 '*/' 는 빠진다)
 function assertRunsClosed(marks: readonly VersionMark[], closes: readonly number[], place: Place): void {
   let open: VersionMark | undefined; // 서버가 안의 글을 실행하는 주석을 연 표지 (닫혔으면 undefined)
   let skipping = false; // 건너뛰는 주석을 열고 아직 닫지 않았다 — 다음 '*/' 는 그 주석만 닫는다
@@ -101,7 +103,8 @@ function assertRunsClosed(marks: readonly VersionMark[], closes: readonly number
   const closeBefore = (at: number): void => {
     for (; k < closes.length && closes[k] < at; k++) {
       if (skipping) skipping = false;
-      else open = undefined;
+      else if (open) open = undefined;
+      else fail(`${place.where(closes[k])}${STRAY_CLOSE} — 실행 주석은 처음 만난 '*/' 에서 안에서 연 실행 주석과 함께 닫힙니다 (MySQL 1064)`);
     }
   };
   for (const m of marks) {
@@ -112,6 +115,21 @@ function assertRunsClosed(marks: readonly VersionMark[], closes: readonly number
   closeBefore(Infinity);
   if (open) fail(`${place.where(open.at)}실행 주석 /*!${open.digits} 가 ${place.until} 닫히지 않았습니다 (MySQL 1064)`);
 }
+
+// 짝 없는 '*/' 의 안내 앞부분: MySQL 은 닫을 실행 주석이 없는 '*/' 를 '*' '/' 로 읽는다
+const STRAY_CLOSE = "짝 없는 '*/' 가 있습니다 — MySQL 은 닫을 실행 주석이 없는 '*/' 를 '*' '/' 로 읽습니다";
+
+// 렉서가 실행 주석의 닫힘으로 읽지 않은 '*/' (리뷰 14회차, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측 — 'ALTER TABLE t ADD c INT */;' 는 1064): written(ddl 을 따로 나눈 토큰)의 붙은
+// '*' '/' 는 문장 앞에서 연 실행 주석의 닫힘이거나('/*!40101 ALTER … */;' — 렉서가 그 자리를 알렸다, s.closes) 짝이 없는 것이다. 짝 없는 것은 MySQL 도 '*' '/' 로 읽어 1064 다 —
+// 13회차까지는 문장 끝의 것을 문장을 감싼 주석의 닫힘처럼 떼고(applyTokens 의 withoutCommentEnd) 받았다 (ALTER 는 c 를, 루틴은 p 를 더했다)
+export function assertNoStrayClose(s: ApplyStatement, written: readonly Token[]): void {
+  const pairs = written.filter((t, k) => isOp(t, '*') && isOp(written[k + 1], '/') && t.e === written[k + 1].s);
+  if (!pairs.length) return;
+  const closes = new Set(s.closes);
+  if (pairs.some((t) => !closes.has(s.offset + t.s))) fail(`${STRAY_CLOSE} (MySQL 1064)`);
+}
+
+const isOp = (t: Token | undefined, v: string): boolean => t?.t === 'op' && t.v === v;
 
 // MySQL 이 이 문장에서 실행하는 글: 건너뛰는 실행 주석(skipped)을 공백으로 지운 ddl (없으면 ddl 그대로, 주석뿐이면 ''). 루틴 정의 안의 것은 지우지 않는다 —
 // createRoutine 이 루틴 정의 안의 실행 주석을 받지 않는다 (MySQL 은 본문에서 그 글을 지워 저장한다)
