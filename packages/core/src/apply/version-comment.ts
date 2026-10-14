@@ -8,6 +8,7 @@
 // 오면 여섯 자리를 번호로 읽는다(/*!100000 … 은 8.0 1064, 8.4 는 건너뛴다). 렉서는 '/*!' 뒤의 숫자를 모두 표지로 떼고 내용은 번호와 상관없이 토큰으로 읽는다 —
 // 덤프 파서와 함께 쓰므로 그대로 두고, 문장 나누기가 알려 준 표지(ApplyStatement.marks)로 이 문장에서 MySQL 이 실행하는 글을 만든다. 문장 앞의 문장 없는 덩어리·DELIMITER 줄
 // (ApplyStatement.leading)과 마지막 문장 뒤(ApplySplit.trailing)의 표지도 본다 (리뷰 12·13회차)
+import { lineOf } from '../cursor';
 import type { ApplyStatement, LexNotes, VersionMark } from '../parse-dump';
 import { isCreateRoutine } from './object-stmt';
 import { fail, RE_EXPORT } from './types';
@@ -22,29 +23,42 @@ export interface Region {
   readonly end: number;
 }
 
+// 거부 안내가 가리키는 자리 (리뷰 14회차 F2): 문장 안의 것은 서버·웹이 문장 번호와 그 줄을 붙여 앞말이 없고, 문장 앞 덩어리의 것은 뒤 문장의 번호로 안내되므로 표지가 있는
+// 줄을 앞말로 밝힌다 (unicode-space.ts 의 assertLeadingSpaces 와 같다 — 13회차까지는 뒤 문장의 줄만 보였다). until: 표지가 닫혀야 하는 곳 (안내 글)
+interface Place {
+  readonly where: (at: number) => string;
+  readonly until: string;
+}
+
+const IN_STATEMENT: Place = { where: () => '', until: '문장 안에서' };
+const beforeStatement = (script: string, until: string): Place => ({ where: (at) => `앞 문장 뒤(줄 ${lineOf(script, at)})의 `, until });
+
 // 이 문장의 덩어리에서 MySQL 이 건너뛰는 실행 주석의 자리. 실행 여부가 버전에 따라 갈리면 거부하고, 실행하는 주석이 문장 끝까지 닫히지 않았으면 1064 다 (assertRunsClosed).
 // script: 문장을 나눈 원문
 export function skippedComments(script: string, s: ApplyStatement): Region[] {
-  const regions = s.marks.filter((m) => !runs(m)).map((m) => skippedRegion(script, m, s.offset + s.ddl.length));
-  assertRunsClosed(s.marks, s.closes);
+  const regions = s.marks.filter((m) => !runs(m)).map((m) => skippedRegion(script, m, s.offset + s.ddl.length, IN_STATEMENT));
+  assertRunsClosed(s.marks, s.closes, IN_STATEMENT);
   return regions;
 }
 
 // 문장 앞 덩어리(s.leading — 앞 문장 뒤의 문장 없이 끝난 덩어리·DELIMITER 줄)의 건너뛰는 실행 주석 자리 (리뷰 12회차 Claude F5). 그 덩어리에는 토큰이 없어 판에 따라 갈리는
 // 번호도 8.0·8.4 가 실행하든 건너뛰든 같아 받는다 ('/*!80400 */;' 뒤의 문장도 받는다 — 그 전제가 깨지는 것은 assertSameEitherWay 가 거부한다). 번호를 다르게 읽는 것과,
 // 건너뛰는 것 안의 주석·줄 주석은 문장 안의 것처럼 거부한다. 표지마다 그 덩어리를 끝낸 구분자 안에서 닫혀야 한다 — mysql 클라이언트는 그 구분자에서 끊어 보낸다 (리뷰 13회차:
-// 뒤 덩어리에서 닫힌 '/*!99999 ;' 줄바꿈 '*/;' 도 받았다). 마지막 덩어리(DELIMITER 줄)는 이 문장 앞까지 본다
+// 뒤 덩어리에서 닫힌 '/*!99999 ;' 줄바꿈 '*/;' 도 받았다). 마지막 덩어리(DELIMITER 줄과 그 앞)는 이 문장 앞까지 본다. 거부 안내는 표지가 있는 줄을 밝힌다 (Place)
 export function leadingSkippedComments(script: string, s: ApplyStatement): Region[] {
   const { marks, closes, ends } = s.leading;
   const closesOf = byChunk(closes, (at) => at, ends);
+  const delimited = beforeStatement(script, '구분자까지');
+  const beforeCommand = beforeStatement(script, 'DELIMITER 줄 앞에서');
   return byChunk(marks, (m) => m.at, ends).flatMap((chunk, i) => {
     const bound = ends[i] ?? s.offset;
+    const place = i < ends.length ? delimited : beforeCommand;
     const regions = chunk.flatMap((m) => {
-      const gate = gateOf(m);
-      if (gate === 'either') assertSameEitherWay(script, m, bound);
-      return gate === 'skip' ? [skippedRegion(script, m, bound)] : [];
+      const gate = gateOf(m, place);
+      if (gate === 'either') assertSameEitherWay(script, m, bound, place);
+      return gate === 'skip' ? [skippedRegion(script, m, bound, place)] : [];
     });
-    assertRunsClosed(chunk, closesOf[i]);
+    assertRunsClosed(chunk, closesOf[i], place);
     return regions;
   });
 }
@@ -64,7 +78,7 @@ function byChunk<T>(items: readonly T[], at: (item: T) => number, ends: readonly
 // 끊어, 닫히지 않은 채 보낸 주석을 MySQL 은 1064 로 거부한다 ('/*!40101 ALTER … ;' 줄바꿈 '*/;' — 13회차 전에는 그 문장과 뒤 문장을 적용했다). 서버는 안의 글을 실행하다 처음
 // 만난 '*/' 에서 주석을 닫고(안에서 연 실행하는 주석도 함께 닫힌다), 건너뛰는 주석의 '*/' 는 그 주석만 닫는다 — 건너뛰는 주석 안에는 표지가 없다 (opensComment).
 // marks·closes: 한 덩어리의 표지와 렉서가 실행 주석을 닫은 '*/' 의 자리 (자리 순서 — 따옴표·주석 안의 '*/' 는 빠진다)
-function assertRunsClosed(marks: readonly VersionMark[], closes: readonly number[]): void {
+function assertRunsClosed(marks: readonly VersionMark[], closes: readonly number[], place: Place): void {
   let open: VersionMark | undefined; // 서버가 안의 글을 실행하는 주석을 연 표지 (닫혔으면 undefined)
   let skipping = false; // 건너뛰는 주석을 열고 아직 닫지 않았다 — 다음 '*/' 는 그 주석만 닫는다
   let k = 0;
@@ -80,7 +94,7 @@ function assertRunsClosed(marks: readonly VersionMark[], closes: readonly number
     else skipping = true;
   }
   closeBefore(Infinity);
-  if (open) fail(`실행 주석 /*!${open.digits} 가 문장 안에서 닫히지 않았습니다 (MySQL 1064)`);
+  if (open) fail(`${place.where(open.at)}실행 주석 /*!${open.digits} 가 ${place.until} 닫히지 않았습니다 (MySQL 1064)`);
 }
 
 // MySQL 이 이 문장에서 실행하는 글: 건너뛰는 실행 주석(skipped)을 공백으로 지운 ddl (없으면 ddl 그대로, 주석뿐이면 ''). 루틴 정의 안의 것은 지우지 않는다 —
@@ -94,10 +108,11 @@ export function executedText(s: ApplyStatement, skipped: readonly Region[]): str
 // 표지의 번호를 8.0·8.4 가 어떻게 읽는가: run 은 모두 실행, skip 은 모두 건너뜀, either 는 판에 따라 갈림 (80047~80499). 번호를 다르게 읽으면 거부한다
 type Gate = 'run' | 'skip' | 'either';
 
-function gateOf(m: VersionMark): Gate {
+function gateOf(m: VersionMark, place = IN_STATEMENT): Gate {
   if (m.digits === '') return 'run';
   if (m.digits.length !== VERSION_DIGITS) {
-    fail(`실행 주석 /*!${m.digits} 의 버전 번호가 다섯 자리가 아닙니다 — MySQL 은 다섯 자리보다 짧은 숫자를 실행할 글로 읽고, 여섯 자리는 8.0 과 8.4 가 다르게 읽습니다 — ${RE_EXPORT}`);
+    fail(`${place.where(m.at)}실행 주석 /*!${m.digits} 의 버전 번호가 다섯 자리가 아닙니다 — MySQL 은 다섯 자리보다 짧은 숫자를 실행할 글로 읽고, 여섯 자리는 8.0 과 8.4 가 `
+      + `다르게 읽습니다 — ${RE_EXPORT}`);
   }
   const version = Number(m.digits);
   if (version <= LAST_RUN_BY_BOTH) return 'run';
@@ -125,28 +140,28 @@ const contentStart = (m: VersionMark): number => m.at + '/*!'.length + m.digits.
 // 안내에 쓰는 실행 주석의 이름: 8.0·8.4 가 모두 건너뛰는 것과, 서버 버전에 따라 건너뛰는 것(80047~80499, 여섯 자리 이상)
 const commentName = (m: VersionMark): string => `${skippedByBoth(m) ? '' : '서버 버전에 따라 '}건너뛰는 실행 주석 /*!${m.digits}`;
 
-// 표지가 연 실행 주석 안의 글: 내용부터 첫 '*/' 앞까지 (MySQL 은 건너뛸 때 그 안의 따옴표를 보지 않는다). bound(문장의 끝) 안에서 닫히지 않으면 — 구분자가 주석 안에 있어
-// mysql 클라이언트가 주석 가운데서 문장을 끊었다 — MySQL 은 닫히지 않은 주석으로 1064 다. 그 안의 주석은 받지 않는다 (opensComment)
-function skippedText(script: string, m: VersionMark, bound: number): string {
+// 표지가 연 실행 주석 안의 글: 내용부터 첫 '*/' 앞까지 (MySQL 은 건너뛸 때 그 안의 따옴표를 보지 않는다). bound(문장·덩어리의 끝) 안에서 닫히지 않으면 — 구분자가 주석 안에
+// 있어 mysql 클라이언트가 주석 가운데서 문장을 끊었다 — MySQL 은 닫히지 않은 주석으로 1064 다. 그 안의 주석은 받지 않는다 (opensComment). place: 거부 안내의 자리
+function skippedText(script: string, m: VersionMark, bound: number, place: Place): string {
   const content = contentStart(m);
   const close = script.indexOf('*/', content);
-  if (close < 0 || close + '*/'.length > bound) fail(`${commentName(m)} 가 문장 안에서 닫히지 않았습니다 (MySQL 1064)`);
-  if (opensComment(script, content, close)) fail(innerCommentReason(m));
+  if (close < 0 || close + '*/'.length > bound) fail(`${place.where(m.at)}${commentName(m)} 가 ${place.until} 닫히지 않았습니다 (MySQL 1064)`);
+  if (opensComment(script, content, close)) fail(place.where(m.at) + innerCommentReason(m));
   return script.slice(content, close);
 }
 
 // 건너뛰는 실행 주석의 자리: 표지부터 첫 '*/' 까지. 그 안의 줄 주석은 mysql 클라이언트가 떼고 보내는지에 따라 건너뛰는 글이 갈려 받지 않는다 (lineCommentReason)
-function skippedRegion(script: string, m: VersionMark, bound: number): Region {
-  const inner = skippedText(script, m, bound);
-  if (LINE_COMMENT.test(inner)) fail(lineCommentReason(m));
+function skippedRegion(script: string, m: VersionMark, bound: number, place: Place): Region {
+  const inner = skippedText(script, m, bound, place);
+  if (LINE_COMMENT.test(inner)) fail(place.where(m.at) + lineCommentReason(m));
   return { start: m.at, end: contentStart(m) + inner.length + '*/'.length };
 }
 
 // 판에 따라 갈리는 번호(80047~80499)의 문장 없는 덩어리 (리뷰 13회차 F2·R13-2, 8.0.46·8.4.11 에서 mysql 클라이언트로 실측): 받는 전제(8.0.46 이 건너뛰든 8.4 가 실행하든 같다)가
 // 깨지는 것은 거부한다 — 덩어리 안에서 닫히지 않은 것(1064), 안의 주석(8.0 클라이언트는 1064 이고 8.4 클라이언트는 받는다), 첫 '*/' 를 가린 줄 주석(8.4 클라이언트로 8.0.46 에
 // 실행하면 그 '*/' 뒤의 글을 실행하는데, 8.4.11 과 렉서는 줄 주석으로 읽는다). 줄 주석이 '*/' 앞 줄에서 끝나면 받는다 ('/*!80499 -- 메모\n*/;')
-function assertSameEitherWay(script: string, m: VersionMark, bound: number): void {
-  if (hidesClose(skippedText(script, m, bound))) fail(lineCommentReason(m));
+function assertSameEitherWay(script: string, m: VersionMark, bound: number, place: Place): void {
+  if (hidesClose(skippedText(script, m, bound, place))) fail(place.where(m.at) + lineCommentReason(m));
 }
 
 // 줄 주석의 시작: '#', 또는 공백·제어 문자가 뒤따르는 '--' (렉서·mysql 클라이언트와 같다). 건너뛰는 주석 안에서는 따옴표 안의 것도 함께 본다 (보수적)

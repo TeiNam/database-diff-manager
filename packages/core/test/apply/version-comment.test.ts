@@ -229,4 +229,19 @@ describe('문장 없이 끝난 덩어리의 실행 주석', () => {
     expectReExport(run('/*!80400 /* 메모 */ */;\nALTER TABLE t ADD d INT;'), 1, '/*!80400 안의 주석');
     expect(run('/*!80400 ;\nALTER TABLE t ADD c INT */;\nALTER TABLE t ADD d INT;')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('(MySQL 1064)') } });
   });
+
+  // 리뷰 14회차 F2: 문장 앞 덩어리의 거부는 뒤 문장의 번호로 안내해 서버·웹이 그 문장의 줄을 붙인다 — 표지가 있는 줄을 앞말로 밝히고(unicode-space.ts 의 앞 문장 뒤 NBSP 와 같다),
+  // 덩어리의 것은 '문장 안에서' 대신 '구분자까지' 로 적는다 (mysql 클라이언트는 첫째와 마지막을 'ERROR 1064 … at line 2' 로 알린다)
+  it.each([
+    ['닫히지 않은 실행하는 주석 (Claude 재현)', 'ALTER TABLE t ADD a INT;\n/*!40101 ;\n\n\nALTER TABLE t ADD b INT;', 5, '앞 문장 뒤(줄 2)의 실행 주석 /*!40101 가 구분자까지 닫히지 않았습니다 (MySQL 1064)'],
+    ['판에 따라 갈리는 번호의 줄 주석', 'ALTER TABLE t ADD a INT;\n/*!80400 -- x */ ALTER TABLE t ADD c INT /*\n*/;\n\nALTER TABLE t ADD d INT;', 5, '앞 문장 뒤(줄 2)의 서버 버전에 따라 건너뛰는 실행 주석 /*!80400 안의 줄 주석'],
+    ['판에 따라 갈리는 번호 안의 주석', 'ALTER TABLE t ADD a INT;\n/*!80400 /* x */ */;\n\nALTER TABLE t ADD d INT;', 4, '앞 문장 뒤(줄 2)의 서버 버전에 따라 건너뛰는 실행 주석 /*!80400 안의 주석'],
+    ['뒤 덩어리에서 닫힌 건너뛰는 주석', 'ALTER TABLE t ADD a INT;\n/*!99999 ;\n*/;\n\nALTER TABLE t ADD d INT;', 5, '앞 문장 뒤(줄 2)의 건너뛰는 실행 주석 /*!99999 가 구분자까지 닫히지 않았습니다 (MySQL 1064)'],
+    ['다섯 자리가 아닌 번호', 'ALTER TABLE t ADD a INT;\n\n/*!1 */;\nALTER TABLE t ADD d INT;', 4, '앞 문장 뒤(줄 3)의 실행 주석 /*!1 의 버전 번호가 다섯 자리가 아닙니다'],
+    ['DELIMITER 줄 앞에서 닫히지 않은 주석', 'ALTER TABLE t ADD a INT;\n/*!40101\nDELIMITER ;;\nCREATE PROCEDURE p() SELECT 1;;', 4, '앞 문장 뒤(줄 2)의 실행 주석 /*!40101 가 DELIMITER 줄 앞에서 닫히지 않았습니다 (MySQL 1064)'],
+  ])('문장 앞 덩어리의 거부는 표지가 있는 줄을 밝힌다 — %s', (_name, script, line, reason) => {
+    const r = run(script);
+    expect(r).toMatchObject({ ok: false, error: { index: 2, line } });
+    expect(!r.ok && r.error.reason).toContain(reason);
+  });
 });
