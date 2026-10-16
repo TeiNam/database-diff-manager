@@ -4,14 +4,13 @@ import { Banner } from '../components/Banner';
 import { Tabs } from '../components/Tabs';
 import { DdlTab } from '../features/diff/DdlTab';
 import { DiffTab } from '../features/diff/DiffTab';
+import { PARTIAL_MESSAGE } from '../features/diff/messages';
 import { RenameBanner } from '../features/diff/RenameBanner';
 import { SummaryTab } from '../features/diff/SummaryTab';
 import { MigrationTab } from '../features/migration/MigrationTab';
 import { useSchemaContext, type Tab } from '../hooks/useSchemaContext';
 import { changeCount } from '../lib/object-diff';
 import s from './SchemaPage.module.css';
-
-const PARTIAL_MESSAGE = 'MD 정의서가 포함된 비교입니다. 일부 속성(인덱스 종류·순서, 파티션, CHECK, 문자셋 등)은 비교되지 않았습니다.';
 
 export function SchemaPage() {
   const ctx = useSchemaContext();
