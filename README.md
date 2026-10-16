@@ -20,6 +20,7 @@ A team web tool for managing MySQL schema definitions exported with [td-export](
 - **Versioning**: upload definitions per Database (a physical engine instance) → Schema. An upload identical to the latest version does not create a new version.
 - **Apply ALTER scripts**: paste or upload an ALTER script against a stored SQL version to create the next version without re-exporting (columns, indexes, foreign keys, table options, CREATE/DROP/RENAME TABLE, routines; results are verified against real MySQL 8.0/8.4 in CI). Scope and limits: [Apply ALTER scripts](#apply-alter-scripts).
 - **Comparison**: summary, per-object diff (SQL split/unified and a spreadsheet-like grid), and a tree that can filter to changed objects only.
+- **HTML report**: export the current comparison (summary and object diff, in the selected view) as one self-contained HTML file. It opens without access to this tool and can be shared, archived, or printed (print to PDF from the browser).
 - **DDL generation**: ALTER/CREATE/DROP for tables, columns, indexes, foreign keys, views, partitions, and stored functions/procedures, plus the reverse (rollback) direction. Renames are mapped in the UI; swaps and chains (a↔b, a→b→c, replacing a table with another) become one `RENAME TABLE` statement or `RENAME COLUMN` clauses in one ALTER, and manual renames saved for one direction are inverted for the reverse diff.
 - **DB migration mapping**: upload an AWS DMS table-mapping JSON for an As-Is → To-Be Schema pair. The Migration (전환) tab shows table and column correspondence with a status for each, and the same mapping is applied as renames to the object diff and DDL. Manual rename mappings still win for the same object.
 - **History**: version history, per-object change history, original file download.
@@ -99,7 +100,7 @@ The command refuses to overwrite an existing file. To restore, stop the server, 
 
 | Action | admin | dba | viewer |
 |---|---|---|---|
-| Browse, compare, copy/download DDL | ✓ | ✓ | ✓ |
+| Browse, compare, copy/download DDL, export HTML report | ✓ | ✓ | ✓ |
 | Save rename mappings (affects everyone's diff results) | ✓ | ✓ | — |
 | Upload; apply ALTER scripts; create, edit, delete Databases; delete versions and Schemas | ✓ | ✓ | — |
 | Upload or delete DMS migration mappings | ✓ | ✓ | — |

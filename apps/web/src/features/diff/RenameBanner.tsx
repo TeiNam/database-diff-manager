@@ -1,18 +1,10 @@
 import type { RenameMapping } from '@tdm/core';
 import { useMe, useSaveRenames } from '../../api/hooks';
-import type { DiffResponse, SourcedRename } from '../../api/types';
+import type { DiffResponse } from '../../api/types';
 import { Banner } from '../../components/Banner';
 import { canEdit } from '../../lib/roles';
+import { AppliedRenames, describeRename, manualRenames, sameRename } from './AppliedRenames';
 import s from './diff.module.css';
-
-const describe = (r: RenameMapping) => (r.kind === 'table' ? `${r.from} → ${r.to}` : `${r.table}.${r.from} → ${r.to}`);
-const same = (a: RenameMapping, b: RenameMapping) => a.kind === b.kind && a.table === b.table && a.from === b.from && a.to === b.to;
-const isDms = (r: SourcedRename) => r.source === 'dms';
-
-// 저장은 수동 매핑만 한다. DMS 에서 온 rename 은 전환 매핑을 바꿔야 달라지고, 함께 저장하면 수동 한도(500)를 넘는다
-// 역쌍에서 뒤집어 온 매핑도 함께 저장한다 (이 쌍에 매핑이 생기면 역쌍 매핑은 더 쓰지 않으므로 빠뜨리면 사라진다)
-const manualOnly = (renames: SourcedRename[]): RenameMapping[] =>
-  renames.filter((r) => !isDms(r)).map(({ source: _source, reversed: _reversed, ...r }) => r);
 
 // rename 후보를 보여 주고, 사용자가 확정하면 (base, target) 쌍에 수동 매핑을 저장한다. 적용된 rename 은 출처(수동/DMS)를 함께 보여 준다
 // 저장·해제는 admin·dba 만 한다. viewer 에게는 읽기 전용으로 보여 준다
@@ -20,17 +12,18 @@ export function RenameBanner({ data }: { data: DiffResponse }) {
   const me = useMe();
   const isEditor = canEdit(me.data);
   const save = useSaveRenames();
-  const manual = manualOnly(data.renames);
-  const reversed = new Set(data.renames.filter((r) => r.reversed).map(describe));
-  const dms = data.renames.filter(isDms);
+  const manual = manualRenames(data.renames);
   const apply = (renames: RenameMapping[]) => save.mutate({ base: data.base.id, target: data.target.id, renames });
-  const candidates = data.diff.renameCandidates.filter((c) => !data.renames.some((r) => same(r, c)));
+  const candidates = data.diff.renameCandidates.filter((c) => !data.renames.some((r) => sameRename(r, c)));
+  const release = (r: RenameMapping) => (
+    <button type="button" className={s.linkBtn} disabled={save.isPending} onClick={() => apply(manual.filter((x) => !sameRename(x, r)))}>해제</button>
+  );
   return (
     <>
       {candidates.length > 0 && (
         <Banner tone="info" label="이름 변경 후보">
           {candidates.map((c) => (
-            <div key={describe(c)} className={s.renameRow}>
+            <div key={describeRename(c)} className={s.renameRow}>
               <span><code>{c.kind === 'table' ? c.from : `${c.table}.${c.from}`}</code> 삭제 + <code>{c.to}</code> 추가 → 이름 변경일 수 있습니다</span>
               {isEditor && <button type="button" className={s.linkBtn} disabled={save.isPending} onClick={() => apply([...manual, c])}>이름 변경으로 처리</button>}
             </div>
@@ -38,32 +31,7 @@ export function RenameBanner({ data }: { data: DiffResponse }) {
           {!isEditor && <div className={s.renameRow}>읽기 전용: 이름 변경은 DBA·관리자가 처리할 수 있습니다</div>}
         </Banner>
       )}
-      {manual.length > 0 && (
-        <Banner tone="info" label="적용된 이름 변경">
-          {manual.map((r) => (
-            <div key={describe(r)} className={s.renameRow}>
-              <span className={s.source}>{reversed.has(describe(r)) ? '수동 · 역방향' : '수동'}</span>
-              <span>{describe(r)}</span>
-              {/* 역방향 매핑은 역쌍(target → base) 비교에 저장되어 있어 거기서 해제한다 */}
-              {reversed.has(describe(r)) && <span>(반대 방향 비교에 저장된 매핑을 뒤집어 적용 — 해제는 그 비교에서)</span>}
-              {isEditor && !reversed.has(describe(r)) && <button type="button" className={s.linkBtn} disabled={save.isPending} onClick={() => apply(manual.filter((x) => !same(x, r)))}>해제</button>}
-            </div>
-          ))}
-        </Banner>
-      )}
-      {dms.length > 0 && (
-        <Banner tone="info" label="DMS 매핑에서 적용된 이름 변경">
-          <details>
-            <summary><span className={s.source}>DMS</span> 전환 매핑에서 이름 변경 {dms.length}건을 적용했습니다 (전환 탭에서 확인, 같은 대상에 수동 매핑을 넣으면 수동이 우선)</summary>
-            {dms.map((r) => <div key={describe(r)} className={s.renameRow}><span>{describe(r)}</span></div>)}
-          </details>
-        </Banner>
-      )}
-      {data.diff.ignoredRenames.length > 0 && (
-        <Banner tone="warn" label="적용하지 못한 이름 변경">
-          {data.diff.ignoredRenames.map((i) => <div key={describe(i.mapping)}>{describe(i.mapping)}: {i.reason}</div>)}
-        </Banner>
-      )}
+      <AppliedRenames data={data} renderRelease={isEditor ? release : undefined} />
       {save.error && <Banner tone="warn" role="alert">{save.error.message}</Banner>}
     </>
   );

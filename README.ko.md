@@ -20,6 +20,7 @@
 - **버전 관리**: Database(물리 엔진 인스턴스) → Schema 단위로 정의서를 업로드해 버전을 쌓습니다. 내용이 직전 버전과 같으면 새 버전을 만들지 않습니다.
 - **ALTER 적용**: 저장된 SQL 버전에 ALTER 스크립트를 붙여 넣거나 올려, td-export를 다시 뽑지 않고 다음 버전을 만듭니다 (컬럼·인덱스·FK·테이블 옵션·CREATE/DROP/RENAME TABLE·루틴. 결과는 CI에서 실제 MySQL 8.0/8.4와 비교해 검증합니다). 범위와 한계는 [ALTER 적용](#alter-적용)을 참고하세요.
 - **비교**: 요약, 객체별 diff(SQL Split/Unified, Excel 같은 표 보기), 변경 객체만 거르는 트리.
+- **HTML 리포트**: 지금 보는 비교(요약과 객체 diff, 고른 보기 방식)를 HTML 파일 하나로 내려받습니다. 이 도구에 접속하지 않고 열 수 있고, 공유·보관·인쇄(브라우저 인쇄로 PDF)할 수 있습니다.
 - **DDL 생성**: 테이블·컬럼·인덱스·FK·뷰·파티션·저장 함수/프로시저 변경을 ALTER/CREATE/DROP으로 만들고, 반대 방향(되돌리기) DDL도 함께 제공합니다. rename은 화면에서 매핑합니다. 맞바꾸기·연쇄(a↔b, a→b→c, 테이블 교체)는 한 `RENAME TABLE` 문장이나 한 ALTER 의 `RENAME COLUMN` 절로 만들고, 한 방향에 저장한 수동 rename 은 반대 방향 비교에 뒤집어 반영합니다.
 - **DB 전환 매핑**: As-Is → To-Be Schema 쌍에 AWS DMS table-mapping JSON 을 올리면, 전환 탭에 테이블·컬럼 대응과 상태를 보여 주고 같은 매핑을 rename 으로 객체 diff·DDL 에 반영합니다. 같은 대상에 대한 수동 rename 매핑이 우선합니다.
 - **이력**: 버전 이력, 객체별 변경 이력, 원본 파일 다운로드.
@@ -99,7 +100,7 @@ npm run backup -w @tdm/server -- ./backup-$(date +%Y%m%d).db
 
 | 작업 | admin | dba | viewer |
 |---|---|---|---|
-| 조회·비교·DDL 복사/다운로드 | O | O | O |
+| 조회·비교·DDL 복사/다운로드·HTML 리포트 내보내기 | O | O | O |
 | rename 매핑 저장 (모든 사용자의 diff 결과에 반영) | O | O | — |
 | 업로드, ALTER 적용, Database 생성·수정·삭제, 버전·Schema 삭제 | O | O | — |
 | DMS 전환 매핑 올리기·삭제 | O | O | — |

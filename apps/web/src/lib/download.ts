@@ -1,5 +1,6 @@
-export function downloadText(filename: string, text: string): void {
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+// 텍스트를 파일로 내려받는다. type: Blob MIME (기본은 일반 텍스트)
+export function downloadText(filename: string, text: string, type = 'text/plain;charset=utf-8'): void {
+  const url = URL.createObjectURL(new Blob([text], { type }));
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
