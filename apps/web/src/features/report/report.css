@@ -33,4 +33,7 @@ a.report-link:hover { background: var(--muted); }
   /* 객체 머리가 페이지 끝에 홀로 남지 않게 한다 */
   .report-object > summary { break-after: avoid; }
   tr { break-inside: avoid; }
+  /* 화면의 가로 스크롤·잘림은 종이에서 내용을 잃으므로, 셀을 줄바꿈해 용지 폭에 맞춘다 */
+  .report-object, .report-object * { overflow: visible !important; }
+  .report-object th, .report-object td { white-space: pre-wrap !important; overflow-wrap: anywhere; min-width: 0 !important; }
 }

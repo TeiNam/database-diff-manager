@@ -9,8 +9,8 @@ export type ReportModule = typeof import('./build-report');
 
 // 리포트 모듈(react-dom/server 포함)은 누를 때 불러 첫 화면 번들을 늘리지 않는다 (설계 §4)
 const loadReportModule = (): Promise<ReportModule> => import('./build-report');
-// 객체가 수천 개면 만드는 데 몇 초 걸린다 — 진행 표시가 먼저 그려지도록 한 번 양보한다
-const yieldToPaint = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+// 객체가 수천 개면 만드는 데 몇 초 걸린다 — 진행 표시가 먼저 그려지도록 다음 프레임이 그려진 뒤까지 양보한다
+const yieldToPaint = () => new Promise<void>((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
 const HTML_TYPE = 'text/html;charset=utf-8';
 const UNKNOWN_USER = '알 수 없음';
 
