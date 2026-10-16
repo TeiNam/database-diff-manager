@@ -2,7 +2,7 @@ import { parseDmsMapping, type DmsMapping, type DmsWarning } from '@tdm/core';
 import { useRef, useState } from 'react';
 import { useUploadMigration } from '../../api/hooks';
 import { Icon } from '../../components/Icon';
-import { trapTab, useDialogFocus } from '../../hooks/useDialog';
+import { trapTab, useBackdropClose, useDialogFocus } from '../../hooks/useDialog';
 import u from '../upload/UploadDialog.module.css';
 import s from './migration.module.css';
 
@@ -93,6 +93,7 @@ export function MigrationUploadDialog({ from, to, onClose }: { from: SchemaRef; 
   const dialogRef = useRef<HTMLDivElement>(null);
   const pickSeq = useRef(0); // 연속 선택 시 마지막에 고른 파일만 반영한다 (먼저 고른 파일이 늦게 읽혀도 무시)
   useDialogFocus(dialogRef, onClose);
+  const backdrop = useBackdropClose(onClose);
 
   const pick = async (file: File | undefined) => {
     if (!file) return;
@@ -113,7 +114,7 @@ export function MigrationUploadDialog({ from, to, onClose }: { from: SchemaRef; 
   };
 
   return (
-    <div className={u.backdrop} role="presentation" onClick={onClose}>
+    <div className={u.backdrop} role="presentation" {...backdrop}>
       <div ref={dialogRef} className={u.dialog} role="dialog" aria-modal="true" aria-labelledby="migration-upload-title" onClick={(e) => e.stopPropagation()} onKeyDown={trapTab}>
         <header className={u.head}>
           <h2 id="migration-upload-title">전환 매핑 올리기</h2>
