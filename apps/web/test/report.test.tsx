@@ -175,6 +175,16 @@ describe('리포트 추가·삭제 객체 빼기와 좌우 출처', () => {
     expect(html).not.toContain('두 버전 사이에 변경 사항이 없습니다');
   });
 
+  it('빼려 한 종류가 비교에 없으면 뺀 객체 줄과 뺀 뒤 문구를 적지 않는다', () => {
+    const same = response(base, base);
+    const html = render(same, { excludeAdded: true, excludeDropped: true });
+    expect(html).not.toContain('뺀 객체');
+    expect(html).toContain('두 버전 사이에 변경 사항이 없습니다');
+    expect(render(cross, { excludeAdded: true })).toContain('<dt>뺀 객체</dt><dd>추가된 객체</dd>');
+    const modifyOnly = response(parseSqlDump('CREATE TABLE `a` (\n  `x` int\n);\n').model, parseSqlDump('CREATE TABLE `a` (\n  `x` bigint\n);\n').model);
+    expect(render(modifyOnly, { excludeDropped: true })).not.toContain('뺀 객체');
+  });
+
   it('표 보기 + Unified 에서 SQL 로 그리는 뷰가 있으면 범례에 SQL −/+ 를 함께 적는다', () => {
     const vb = parseSqlDump('CREATE VIEW `v` AS select 1 AS `id`;\n').model;
     const vt = parseSqlDump('CREATE VIEW `v` AS select 2 AS `id`;\n').model;
