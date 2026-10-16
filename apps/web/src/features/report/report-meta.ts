@@ -31,6 +31,12 @@ export function filterReportData(data: DiffResponse, opts: Pick<ReportOptions, '
   };
 }
 
+// 실제로 뺀 객체가 있는 종류만 남긴다 — 빼려 한 종류가 비교에 없으면 머리말·빈 목록 문구에 적지 않는다
+export function effectiveExclusions(data: DiffResponse, opts: ReportOptions): ReportOptions {
+  const ops = new Set(changedObjects(data.diff).map((e) => e.op));
+  return { ...opts, excludeAdded: opts.excludeAdded === true && ops.has('add'), excludeDropped: opts.excludeDropped === true && ops.has('drop') };
+}
+
 // 거른 뒤 남은 변경이 없을 때 요약 목록 문구 — 원래 변경이 없던 비교와 구분한다
 export const filteredEmptyMessage = (opts: Pick<ReportOptions, 'excludeAdded' | 'excludeDropped'>): string | undefined =>
   excludedLabel(opts) ? `${excludedLabel(opts)}를 뺀 뒤 남은 변경 객체가 없습니다` : undefined;
