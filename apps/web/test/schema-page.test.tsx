@@ -29,6 +29,14 @@ describe('SchemaPage', () => {
     expect(await screen.findByText('아직 업로드된 버전이 없습니다')).toBeInTheDocument();
   });
 
+  it('탭 줄 오른쪽(tablist 밖)에 리포트 내보내기 버튼이 있다', async () => {
+    mockApi({ '/api/schemas/7/versions': [V(12, 2), V(11, 1)], '/api/diff?base=11&target=12': response() });
+    renderWithProviders(<SchemaPage />, { route: `${ROUTE}?base=11&target=12&tab=summary`, path: '/db/:dbId/schema/:schemaId' });
+    const button = await screen.findByRole('button', { name: '리포트 내보내기' });
+    expect(button).toBeEnabled();
+    expect(screen.getByRole('tablist')).not.toContainElement(button);
+  });
+
   it('요약 탭: 통계와 변경 객체 표, 행을 누르면 객체 diff 탭으로', async () => {
     mockApi({ '/api/schemas/7/versions': [V(12, 2), V(11, 1)], '/api/diff?base=11&target=12': response() });
     renderWithProviders(<SchemaPage />, { route: `${ROUTE}?base=11&target=12&tab=summary`, path: '/db/:dbId/schema/:schemaId' });
