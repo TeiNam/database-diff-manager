@@ -3,7 +3,7 @@ import { ApiError } from '../../api/client';
 import { useApplyAlter, useIsVersionMissing, useRefreshVersions } from '../../api/hooks';
 import type { AlterChange, AlterRequest, AlterResponse, PreviewBase, VersionFingerprint, VersionSummary } from '../../api/types';
 import { Icon } from '../../components/Icon';
-import { trapTab, useDialogFocus } from '../../hooks/useDialog';
+import { trapTab, useBackdropClose, useDialogFocus } from '../../hooks/useDialog';
 import s from '../upload/UploadDialog.module.css';
 import { readScriptFile } from './script-file';
 import { rebaseNotice, useRebase, type StalePreview } from './useRebase';
@@ -63,6 +63,7 @@ const staleOf = (previewBase: PreviewBase | undefined): StalePreview | undefined
 export function AlterDialog({ versions, onClose }: { versions: VersionSummary[]; onClose: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogFocus(dialogRef, onClose);
+  const backdrop = useBackdropClose(onClose);
   const candidates = versions.filter((v) => v.sourceFormat === 'sql');
   const [baseId, setBaseId] = useState(candidates[0]?.id);
   // 저장하고 나면 이어 쓰는 스크립트는 그때 만든(내용이 같은 버전이 이미 있었다면 그) 버전 위에 적용돼야 한다. 그 버전이 목록에 나타나는 대로 기준 버전을 옮긴다.
@@ -205,7 +206,7 @@ export function AlterDialog({ versions, onClose }: { versions: VersionSummary[];
   const saved = outcome && outcome.response.status !== 'preview' ? outcome.response : undefined;
   const notice = rebaseNotice(rebase.state);
   return (
-    <div className={s.backdrop} role="presentation" onClick={onClose}>
+    <div className={s.backdrop} role="presentation" {...backdrop}>
       <div ref={dialogRef} className={s.dialog} role="dialog" aria-modal="true" aria-labelledby="alter-title" onClick={(e) => e.stopPropagation()} onKeyDown={trapTab}>
         <header className={s.head}>
           <h2 id="alter-title">ALTER 적용</h2>

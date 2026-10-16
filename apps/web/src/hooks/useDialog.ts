@@ -1,4 +1,4 @@
-import { useEffect, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react';
+import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from 'react';
 
 const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
@@ -31,4 +31,18 @@ export function trapTab(e: ReactKeyboardEvent<HTMLElement>): void {
     e.preventDefault();
     first.focus();
   }
+}
+
+// 배경을 눌렀다 뗐을 때만 닫는다. 대화상자 안(입력칸 글자 고르기 등)에서 누른 채 밖으로 끌고 나가 떼면 click 대상이 배경이 되는데, 그때는 닫지 않는다
+export function useBackdropClose(onClose: () => void) {
+  const pressedOnBackdrop = useRef(false);
+  return {
+    onMouseDown: (e: ReactMouseEvent<HTMLElement>) => {
+      pressedOnBackdrop.current = e.target === e.currentTarget;
+    },
+    onClick: (e: ReactMouseEvent<HTMLElement>) => {
+      if (pressedOnBackdrop.current && e.target === e.currentTarget) onClose();
+      pressedOnBackdrop.current = false;
+    },
+  };
 }

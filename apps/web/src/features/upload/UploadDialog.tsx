@@ -3,7 +3,7 @@ import { useRef, useState, type DragEvent } from 'react';
 import { useSchemaInfo, useTree, useUpload } from '../../api/hooks';
 import type { UploadResult } from '../../api/types';
 import { Icon } from '../../components/Icon';
-import { trapTab, useDialogFocus } from '../../hooks/useDialog';
+import { trapTab, useBackdropClose, useDialogFocus } from '../../hooks/useDialog';
 import { useSchemaContext } from '../../hooks/useSchemaContext';
 import s from './UploadDialog.module.css';
 
@@ -56,6 +56,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null);
 
   useDialogFocus(dialogRef, onClose);
+  const backdrop = useBackdropClose(onClose);
 
   const addFiles = async (files: FileList | File[]) => {
     // 이미 담긴 파일·같은 묶음 안의 파일과 이름이 겹치면 제외한다 (서버는 meta 파일명이 유일해야 한다)
@@ -90,7 +91,7 @@ export function UploadDialog({ onClose }: { onClose: () => void }) {
   });
 
   return (
-    <div className={s.backdrop} role="presentation" onClick={onClose}>
+    <div className={s.backdrop} role="presentation" {...backdrop}>
       <div ref={dialogRef} className={s.dialog} role="dialog" aria-modal="true" aria-labelledby="upload-title" onClick={(e) => e.stopPropagation()} onKeyDown={trapTab}>
         <header className={s.head}>
           <h2 id="upload-title">정의서 업로드</h2>
