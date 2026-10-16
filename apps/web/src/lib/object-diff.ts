@@ -67,6 +67,19 @@ export function objectsOf(model: SchemaModel, kind: ObjectKind): DiffObject[] {
   return (model.routines ?? []).filter((r) => r.kind === kind);
 }
 
+// 변경 없는 객체 (TARGET 에 있고 변경 목록에 없는 것, 테이블 → 뷰 → 루틴). 리포트의 "전체" 범위가 쓴다
+export function unchangedObjects(base: SchemaModel, target: SchemaModel, diff: SchemaDiff): ObjectEntry[] {
+  const keyOf = (kind: ObjectKind, name: string) => `${kind}:${isRoutineKind(kind) ? routineNameKey(name) : name}`;
+  const changed = new Set(changedObjects(diff).map((e) => keyOf(e.kind, e.name)));
+  const baseByKey = new Map<string, DiffObject>([...base.tables, ...base.views, ...(base.routines ?? [])].map((o) => [keyOf(o.kind, o.name), o]));
+  return [...target.tables, ...target.views, ...(target.routines ?? [])]
+    .filter((o) => !changed.has(keyOf(o.kind, o.name)))
+    .map((to) => {
+      const from = baseByKey.get(keyOf(to.kind, to.name)) ?? to;
+      return { key: `${to.kind}:${to.name}`, kind: to.kind, name: to.name, op: 'same', baseText: print(from), targetText: print(to), from, to };
+    });
+}
+
 // 변경 여부와 관계없이 한 객체를 보여 줄 때 (트리에서 변경 없는 객체를 선택한 경우)
 export function objectEntry(kind: ObjectKind, name: string, base: SchemaModel, target: SchemaModel, diff: SchemaDiff): ObjectEntry | undefined {
   const matches = (n: string) => (isRoutineKind(kind) ? sameRoutineName(n, name) : n === name);

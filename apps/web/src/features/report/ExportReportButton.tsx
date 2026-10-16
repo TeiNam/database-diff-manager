@@ -21,6 +21,7 @@ export function ExportReportButton({ data, mode, layout, generatedBy, load = loa
   data?: DiffResponse; mode: 'sql' | 'grid'; layout: 'split' | 'unified'; generatedBy?: string; load?: () => Promise<ReportModule>;
 }) {
   const [state, setState] = useState<ExportState>({ status: 'idle' });
+  const [scope, setScope] = useState<'changes' | 'all'>('changes');
   const [includeAdded, setIncludeAdded] = useState(true);
   const [includeDropped, setIncludeDropped] = useState(true);
   const pending = state.status === 'pending';
@@ -30,7 +31,7 @@ export function ExportReportButton({ data, mode, layout, generatedBy, load = loa
       const report = await load();
       await yieldToPaint();
       const generatedAt = new Date();
-      const html = report.buildReportHtml(diff, { mode, layout, generatedAt, generatedBy: generatedBy ?? UNKNOWN_USER, appVersion: APP_VERSION, excludeAdded: !includeAdded, excludeDropped: !includeDropped });
+      const html = report.buildReportHtml(diff, { mode, layout, generatedAt, generatedBy: generatedBy ?? UNKNOWN_USER, appVersion: APP_VERSION, scope, excludeAdded: !includeAdded, excludeDropped: !includeDropped });
       downloadText(report.reportFileName(diff, generatedAt), html, HTML_TYPE);
       setState({ status: 'idle' });
     } catch (e) {
@@ -41,6 +42,11 @@ export function ExportReportButton({ data, mode, layout, generatedBy, load = loa
     <div className={s.wrap}>
       {/* 화면이 아니라 내보낼 리포트에만 적용된다 */}
       <div className={s.wrap} role="group" aria-label="리포트에 포함할 객체" title="리포트에만 적용됩니다">
+        {/* 1단계 범위(변경분·전체) 안에서 2단계 추가·삭제 포함이 걸러진다 */}
+        <select className={s.scope} aria-label="리포트 범위" value={scope} disabled={pending} onChange={(e) => setScope(e.target.value === 'all' ? 'all' : 'changes')}>
+          <option value="changes">변경분만</option>
+          <option value="all">전체 객체</option>
+        </select>
         <label className={s.option}><input type="checkbox" checked={includeAdded} disabled={pending} onChange={(e) => setIncludeAdded(e.target.checked)} />추가 포함</label>
         <label className={s.option}><input type="checkbox" checked={includeDropped} disabled={pending} onChange={(e) => setIncludeDropped(e.target.checked)} />삭제 포함</label>
       </div>

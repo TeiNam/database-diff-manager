@@ -4,3 +4,4 @@
 .btn:disabled { opacity: 0.6; cursor: default; }
 .error { max-width: 420px; color: var(--del); font-size: var(--text-xs); }
 .option { display: inline-flex; align-items: center; gap: 4px; color: var(--fg-muted); font-size: var(--text-xs); }
+.scope { height: 26px; padding: 0 6px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--card); color: var(--fg); font-size: var(--text-xs); }

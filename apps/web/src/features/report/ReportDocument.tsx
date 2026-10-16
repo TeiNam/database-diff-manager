@@ -1,7 +1,7 @@
 import type { DiffResponse, VersionMeta } from '../../api/types';
 import { Banner } from '../../components/Banner';
 import { formatDateTime } from '../../lib/format';
-import { changedObjects, objectAnchor, type ObjectEntry } from '../../lib/object-diff';
+import { changedObjects, objectAnchor, unchangedObjects, type ObjectEntry } from '../../lib/object-diff';
 import { APP_NAME } from '../../meta';
 import { AppliedRenames } from '../diff/AppliedRenames';
 import { PARTIAL_MESSAGE } from '../diff/messages';
@@ -39,6 +39,7 @@ function ReportHeader({ data, options }: { data: DiffResponse; options: ReportOp
     ['BASE', versionLine(data.base)],
     ['TARGET', versionLine(data.target)],
     ['보기 방식', viewLabel(options.mode, options.layout)],
+    ['범위', options.scope === 'all' ? '전체 (변경 없는 객체 포함)' : '변경분'],
     ...(excludedLabel(options) ? [['뺀 객체', excludedLabel(options)] as [string, string]] : []),
     ['만든 시각', formatGeneratedAt(options.generatedAt)],
     ['만든 사람', options.generatedBy],
@@ -56,9 +57,10 @@ function ReportHeader({ data, options }: { data: DiffResponse; options: ReportOp
   );
 }
 
-// 리포트 본문: 머리말 → 화면 안내 → 요약 → 객체 diff (설계 §3). 화면 조작 요소(탭·복사·이력 링크)는 넣지 않는다
+// 리포트 본문: 머리말 → 화면 안내 → 요약 → 객체 diff → (전체 범위면) 변경 없는 객체 (설계 §3). 화면 조작 요소(탭·복사·이력 링크)는 넣지 않는다
 export function ReportDocument({ data, options }: { data: DiffResponse; options: ReportOptions }) {
   const entries = changedObjects(data.diff);
+  const same = options.scope === 'all' ? unchangedObjects(data.baseModel, data.targetModel, data.diff) : [];
   return (
     <main className="report">
       <ReportHeader data={data} options={options} />
@@ -71,6 +73,12 @@ export function ReportDocument({ data, options }: { data: DiffResponse; options:
           <h2 className="report-section-title">객체 diff</h2>
           <SidesLegend data={data} tags={sideTags(options, entries)} />
           {entries.map((e) => <ReportObject key={e.key} entry={e} mode={options.mode} layout={options.layout} />)}
+        </section>
+      )}
+      {same.length > 0 && (
+        <section aria-label="변경 없는 객체">
+          <h2 className="report-section-title">변경 없는 객체 ({same.length})</h2>
+          {same.map((e) => <ReportObject key={e.key} entry={e} mode={options.mode} layout={options.layout} />)}
         </section>
       )}
     </main>

@@ -185,6 +185,20 @@ describe('리포트 추가·삭제 객체 빼기와 좌우 출처', () => {
     expect(render(modifyOnly, { excludeDropped: true })).not.toContain('뺀 객체');
   });
 
+  it('전체 범위는 변경 없는 객체를 따로 넣고, 추가·삭제 빼기는 그 안에서도 걸린다', () => {
+    const b = parseSqlDump('CREATE TABLE `orders` (\n  `x` int\n);\nCREATE TABLE `keep_t` (\n  `k` int\n);\nCREATE TABLE `gone_t` (\n  `y` int\n);\n').model;
+    const t = parseSqlDump('CREATE TABLE `orders` (\n  `x` bigint\n);\nCREATE TABLE `keep_t` (\n  `k` int\n);\nCREATE TABLE `new_t` (\n  `z` int\n);\n').model;
+    const d = response(b, t);
+    expect(render(d)).not.toContain('keep_t');
+    expect(render(d)).toContain('<dt>범위</dt><dd>변경분</dd>');
+    const all = render(d, { scope: 'all', excludeDropped: true });
+    expect(all).toContain('<dt>범위</dt><dd>전체 (변경 없는 객체 포함)</dd>');
+    expect(all).toContain('변경 없는 객체 (1)');
+    expect(all).toContain('id="obj-table-keep_t"');
+    expect(all).toContain('new_t');
+    expect(all).not.toContain('gone_t');
+  });
+
   it('표 보기 + Unified 에서 SQL 로 그리는 뷰가 있으면 범례에 SQL −/+ 를 함께 적는다', () => {
     const vb = parseSqlDump('CREATE VIEW `v` AS select 1 AS `id`;\n').model;
     const vt = parseSqlDump('CREATE VIEW `v` AS select 2 AS `id`;\n').model;
