@@ -25,6 +25,9 @@ a.report-link:hover { background: var(--muted); }
 .report-object > summary::before { content: '▾'; color: var(--fg-dim); }
 .report-object:not([open]) > summary::before { content: '▸'; }
 .report-object:not([open]) > summary { border-bottom: 0; }
+/* 객체 diff 위 좌우 출처: SQL Split·표의 두 열과 같은 반반 */
+.report-sides { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: 0 var(--space-4) var(--space-2); font: var(--text-sm) var(--mono); color: var(--fg-muted); break-after: avoid; }
+.report-side-tag { margin-right: var(--space-2); font: 600 var(--text-xs) var(--sans); letter-spacing: 0.06em; color: var(--fg); }
 .report-kind { color: var(--fg-muted); font-size: var(--text-xs); }
 
 @media print {

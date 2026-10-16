@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { DiffResponse } from '../../api/types';
 import { ReportDocument } from './ReportDocument';
-import { reportTitle, type ReportOptions } from './report-meta';
+import { filterReportData, reportTitle, type ReportOptions } from './report-meta';
 import { REPORT_CSS } from './styles';
 
 export { reportFileName } from './report-meta';
@@ -14,6 +14,6 @@ const HEAD_META = `<meta charset="utf-8"><meta name="viewport" content="width=de
 // 순수 함수: 불러온 비교 결과로 스크립트 없는 HTML 문서 하나를 만든다
 export function buildReportHtml(data: DiffResponse, opts: ReportOptions): string {
   const title = renderToStaticMarkup(<title>{reportTitle(data)}</title>);
-  const body = renderToStaticMarkup(<ReportDocument data={data} options={opts} />);
+  const body = renderToStaticMarkup(<ReportDocument data={filterReportData(data, opts)} options={opts} />);
   return `<!doctype html>\n<html lang="ko" data-theme="light">\n<head>${HEAD_META}${title}<style>${REPORT_CSS}</style></head>\n<body>${body}</body>\n</html>\n`;
 }

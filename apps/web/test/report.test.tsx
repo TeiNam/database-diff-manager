@@ -35,7 +35,8 @@ const colCount = (el: Element | undefined) => el?.querySelectorAll('table[aria-l
 
 describe('리포트 메타', () => {
   it('파일 이름: {DB}_{스키마}_v{BASE}-v{TARGET}_{YYYYMMDD-HHmm}.html, 쓸 수 없는 글자는 _', () => {
-    const data = { ...DATA, target: { ...DATA.target, databaseName: 'db/1:2', schemaName: 'a*b?"<>|\\c\u0001d', versionNo: 10 }, base: { ...DATA.base, versionNo: 3 } };
+    const names = { databaseName: 'db/1:2', schemaName: 'a*b?"<>|\\c\u0001d' };
+    const data = { ...DATA, target: { ...DATA.target, ...names, versionNo: 10 }, base: { ...DATA.base, ...names, versionNo: 3 } };
     expect(reportFileName(data, new Date(2026, 0, 5, 9, 7))).toBe('db_1_2_a_b______c_d_v3-v10_20260105-0907.html');
     expect(reportFileName(DATA, OPTIONS.generatedAt)).toBe('prod-db_shop_v1-v2_20261016-1405.html');
   });
@@ -123,5 +124,35 @@ describe('buildReportHtml', () => {
     expect(doc.querySelector('section[aria-label="적용된 이름 변경"]')?.textContent).toMatch(/수동\s*orders\.x → y/);
     expect(doc.querySelector('section[aria-label="DMS 매핑에서 적용된 이름 변경"] details')?.hasAttribute('open')).toBe(true);
     expect(doc.querySelector('button')).toBeNull();
+  });
+});
+
+describe('리포트 추가·삭제 객체 빼기와 좌우 출처', () => {
+  const b = parseSqlDump('CREATE TABLE `orders` (\n  `x` int\n);\nCREATE TABLE `gone_t` (\n  `y` int\n);\n').model;
+  const t = parseSqlDump('CREATE TABLE `orders` (\n  `x` bigint\n);\nCREATE TABLE `new_t` (\n  `z` int\n);\n').model;
+  const cross = response(b, t, { target: { ...meta(50, 3), databaseName: 'stage-db' } });
+
+  it('삭제를 빼면 요약 목록·통계·객체 diff 모두에서 빠지고 머리말에 뺀 종류를 적는다', () => {
+    const html = render(cross, { excludeDropped: true });
+    expect(html).not.toContain('gone_t');
+    expect(html).toContain('new_t');
+    expect(html).toContain('<dt>뺀 객체</dt><dd>삭제된 객체</dd>');
+  });
+
+  it('추가를 빼면 추가 객체만 빠지고, 아무것도 빼지 않으면 뺀 객체 줄이 없다', () => {
+    const html = render(cross, { excludeAdded: true });
+    expect(html).not.toContain('new_t');
+    expect(html).toContain('gone_t');
+    expect(render(cross)).not.toContain('뺀 객체');
+  });
+
+  it('다른 DB 끼리면 제목과 파일 이름에 양쪽 이름을 모두 쓴다', () => {
+    expect(reportTitle(cross)).toBe('prod-db › shop ↔ stage-db › shop 비교 리포트');
+    expect(reportFileName(cross, new Date(2026, 9, 16, 14, 5))).toBe('prod-db_shop_v1-stage-db_shop_v3_20261016-1405.html');
+  });
+
+  it('객체 diff 위에 왼쪽 BASE·오른쪽 TARGET 의 DB › 스키마 버전을 적는다 (Unified 는 −/+)', () => {
+    expect(render(cross)).toContain('<div class="report-sides"><div><span class="report-side-tag">BASE</span>prod-db › shop v1</div><div><span class="report-side-tag">TARGET</span>stage-db › shop v3</div></div>');
+    expect(render(cross, { layout: 'unified' })).toContain('− BASE</span>prod-db › shop v1');
   });
 });

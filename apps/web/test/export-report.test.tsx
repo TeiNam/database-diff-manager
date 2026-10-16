@@ -72,6 +72,22 @@ describe('ExportReportButton', () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
+  it('추가·삭제 포함을 끄면 그 객체를 빼고 만든다', async () => {
+    const { blobs, click } = captureDownloads();
+    const b = parseSqlDump('CREATE TABLE `orders` (\n  `x` int\n);\nCREATE TABLE `gone_t` (\n  `y` int\n);').model;
+    const t = parseSqlDump('CREATE TABLE `orders` (\n  `x` bigint\n);\nCREATE TABLE `new_t` (\n  `z` int\n);').model;
+    render(<ExportReportButton data={{ ...DATA, baseModel: b, targetModel: t, diff: diffSchemas(b, t) }} mode="sql" layout="split" generatedBy="park" />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('checkbox', { name: '삭제 포함' }));
+    await user.click(screen.getByRole('button', { name: '리포트 내보내기' }));
+    await vi.waitFor(() => expect(click).toHaveBeenCalledTimes(1));
+    const html = await blobs[0].text();
+    expect(html).toContain('new_t');
+    expect(html).not.toContain('gone_t');
+    expect(html).toContain('삭제된 객체');
+    expect(screen.getByRole('checkbox', { name: '추가 포함' })).toBeChecked();
+  });
+
   it('비교 결과가 없으면 꺼져 있다', () => {
     render(<ExportReportButton mode="sql" layout="split" />);
     expect(screen.getByRole('button', { name: '리포트 내보내기' })).toBeDisabled();
