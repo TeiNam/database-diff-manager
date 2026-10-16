@@ -167,11 +167,43 @@ describe('VersionPicker 보강', () => {
     const user = userEvent.setup();
     const base = await screen.findByLabelText('BASE 버전');
     await user.selectOptions(base, 'other');
-    const dialog = await screen.findByRole('dialog', { name: '다른 스키마의 버전 선택' });
+    const dialog = await screen.findByRole('dialog', { name: 'BASE — 다른 스키마의 버전 선택' });
     expect(within(dialog).getByLabelText('Schema')).toHaveFocus();
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getByLabelText('BASE 버전')).toHaveFocus();
+  });
+
+  it('TARGET 도 다른 스키마 비교 대화상자를 열고, 고른 버전을 target 으로 둔다', async () => {
+    mockApi({
+      ...API,
+      '/api/tree': [{ id: 3, name: 'prod-db-01', schemas: [{ id: 7, name: 'shop' }] }, { id: 4, name: 'stage-db', schemas: [{ id: 9, name: 'shop' }] }],
+      '/api/schemas/9/versions': [{ ...VERSIONS[0], id: 50, versionNo: 3 }],
+    });
+    renderApp('/db/3/schema/7?base=11&target=12');
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByLabelText('TARGET 버전'), 'other');
+    const dialog = await screen.findByRole('dialog', { name: 'TARGET — 다른 스키마의 버전 선택' });
+    await user.selectOptions(within(dialog).getByLabelText('Schema'), '9');
+    const version = within(dialog).getByLabelText('버전');
+    await waitFor(() => expect(version).toBeEnabled());
+    await user.selectOptions(version, '50');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('TARGET 버전')).toHaveValue('50');
+    expect(screen.getByLabelText('TARGET 버전')).toHaveFocus();
+    expect(screen.getByLabelText('BASE 버전')).toHaveValue('11');
+  });
+
+  it('TARGET 쪽 대화상자를 Esc 로 닫으면 TARGET 으로 포커스가 돌아간다', async () => {
+    mockApi(API);
+    renderApp('/db/3/schema/7?base=11&target=12');
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByLabelText('TARGET 버전'), 'other');
+    await screen.findByRole('dialog', { name: 'TARGET — 다른 스키마의 버전 선택' });
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('TARGET 버전')).toHaveFocus();
+    expect(screen.getByLabelText('TARGET 버전')).toHaveValue('12');
   });
 
   it('TARGET 이 목록에 없는 id 면 다른 스키마의 버전으로 표시한다', async () => {
@@ -182,7 +214,7 @@ describe('VersionPicker 보강', () => {
     expect(target).toHaveValue('99');
   });
 
-  it('목록에 없는 BASE 는 diff 응답의 메타로 "Schema 이름 v버전 · 날짜" 를 보여 준다', async () => {
+  it('목록에 없는 BASE 는 diff 응답의 메타로 "DB › Schema 이름 v버전 · 날짜" 를 보여 준다', async () => {
     const meta = (id: number, schemaId: number, schemaName: string, versionNo: number, uploadedAt: string) => ({
       id, schemaId, schemaName, versionNo, uploadedAt, databaseId: 3, databaseName: 'prod-db-01', sourceFormat: 'sql', sourceFilename: 'x.sql', note: null, uploadedBy: 'admin',
     });
@@ -196,7 +228,7 @@ describe('VersionPicker 보강', () => {
     });
     renderApp('/db/3/schema/7?base=50&target=12');
     const base = await screen.findByLabelText('BASE 버전');
-    expect(await within(base).findByRole('option', { name: 'legacy v3 · 2026-09-30' })).toBeInTheDocument();
+    expect(await within(base).findByRole('option', { name: 'prod-db-01 › legacy v3 · 2026-09-30' })).toBeInTheDocument();
     expect(base).toHaveValue('50');
   });
 

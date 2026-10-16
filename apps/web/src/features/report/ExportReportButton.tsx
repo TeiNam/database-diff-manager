@@ -21,6 +21,8 @@ export function ExportReportButton({ data, mode, layout, generatedBy, load = loa
   data?: DiffResponse; mode: 'sql' | 'grid'; layout: 'split' | 'unified'; generatedBy?: string; load?: () => Promise<ReportModule>;
 }) {
   const [state, setState] = useState<ExportState>({ status: 'idle' });
+  const [includeAdded, setIncludeAdded] = useState(true);
+  const [includeDropped, setIncludeDropped] = useState(true);
   const pending = state.status === 'pending';
   const run = async (diff: DiffResponse) => {
     setState({ status: 'pending' });
@@ -28,7 +30,7 @@ export function ExportReportButton({ data, mode, layout, generatedBy, load = loa
       const report = await load();
       await yieldToPaint();
       const generatedAt = new Date();
-      const html = report.buildReportHtml(diff, { mode, layout, generatedAt, generatedBy: generatedBy ?? UNKNOWN_USER, appVersion: APP_VERSION });
+      const html = report.buildReportHtml(diff, { mode, layout, generatedAt, generatedBy: generatedBy ?? UNKNOWN_USER, appVersion: APP_VERSION, excludeAdded: !includeAdded, excludeDropped: !includeDropped });
       downloadText(report.reportFileName(diff, generatedAt), html, HTML_TYPE);
       setState({ status: 'idle' });
     } catch (e) {
@@ -37,6 +39,11 @@ export function ExportReportButton({ data, mode, layout, generatedBy, load = loa
   };
   return (
     <div className={s.wrap}>
+      {/* 화면이 아니라 내보낼 리포트에만 적용된다 */}
+      <div className={s.wrap} role="group" aria-label="리포트에 포함할 객체" title="리포트에만 적용됩니다">
+        <label className={s.option}><input type="checkbox" checked={includeAdded} disabled={pending} onChange={(e) => setIncludeAdded(e.target.checked)} />추가 포함</label>
+        <label className={s.option}><input type="checkbox" checked={includeDropped} disabled={pending} onChange={(e) => setIncludeDropped(e.target.checked)} />삭제 포함</label>
+      </div>
       <button type="button" className={s.btn} disabled={!data || pending} onClick={() => data && void run(data)}>
         <Icon name="download" />
         {pending ? '리포트 만드는 중…' : '리포트 내보내기'}
