@@ -123,8 +123,8 @@ function SummaryCells({ entry }: { entry: ObjectEntry }) {
   );
 }
 
-function SummaryList({ entries, renderItem }: { entries: ObjectEntry[]; renderItem: SummaryItemRenderer }) {
-  if (entries.length === 0) return <p className={s.empty}>두 버전 사이에 변경 사항이 없습니다</p>;
+function SummaryList({ entries, renderItem, emptyMessage }: { entries: ObjectEntry[]; renderItem: SummaryItemRenderer; emptyMessage: string }) {
+  if (entries.length === 0) return <p className={s.empty}>{emptyMessage}</p>;
   return (
     <div className={s.summary} role="group" aria-label="변경 객체">
       <div className={`${s.summaryRow} ${s.summaryHead}`} aria-hidden="true"><span /><span>객체</span><span>종류</span><span>세부 변경</span></div>
@@ -136,7 +136,10 @@ function SummaryList({ entries, renderItem }: { entries: ObjectEntry[]; renderIt
 }
 
 // 요약: 통계·안내·변경 객체 목록. 화면 요약 탭과 HTML 리포트가 같은 계산과 문구를 쓴다
-export function SummaryView({ data, renderItem }: { data: DiffResponse; renderItem: SummaryItemRenderer }) {
+// emptyMessage: 변경 객체가 없을 때 문구. 리포트에서 추가·삭제를 뺐으면 "변경 없음" 과 구분되는 문구를 넘긴다
+export function SummaryView({ data, renderItem, emptyMessage = '두 버전 사이에 변경 사항이 없습니다' }: {
+  data: DiffResponse; renderItem: SummaryItemRenderer; emptyMessage?: string;
+}) {
   return (
     <>
       <ul className={s.stats} aria-label="변경 통계">
@@ -148,7 +151,7 @@ export function SummaryView({ data, renderItem }: { data: DiffResponse; renderIt
         ))}
       </ul>
       <SummaryNotices data={data} />
-      <SummaryList entries={changedObjects(data.diff)} renderItem={renderItem} />
+      <SummaryList entries={changedObjects(data.diff)} renderItem={renderItem} emptyMessage={emptyMessage} />
     </>
   );
 }

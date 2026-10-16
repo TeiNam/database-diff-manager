@@ -56,19 +56,19 @@ export function VersionPicker({ schemaId }: { schemaId: number }) {
           <option value={OTHER}>다른 Database/Schema와 비교…</option>
         </select>
       </label>
-      {otherSide && <OtherVersionDialog onPick={(id) => { ctx.set({ [otherSide]: id }); closeOther(); }} onClose={closeOther} />}
+      {otherSide && <OtherVersionDialog side={otherSide} onPick={(id) => { ctx.set({ [otherSide]: id }); closeOther(); }} onClose={closeOther} />}
     </div>
   );
 }
 
-function OtherVersionDialog({ onPick, onClose }: { onPick: (versionId: number) => void; onClose: () => void }) {
+function OtherVersionDialog({ side, onPick, onClose }: { side: Side; onPick: (versionId: number) => void; onClose: () => void }) {
   const tree = useTree();
   const [schemaId, setSchemaId] = useState<number>();
   const versions = useVersions(schemaId);
   const firstRef = useRef<HTMLSelectElement>(null);
   useEffect(() => firstRef.current?.focus(), []);
   return (
-    <dialog open className={s.dialog} aria-label="다른 스키마의 버전 선택" onKeyDown={(e) => e.key === 'Escape' && onClose()}>
+    <dialog open className={s.dialog} aria-label={`${side === 'base' ? 'BASE' : 'TARGET'} — 다른 스키마의 버전 선택`} onKeyDown={(e) => e.key === 'Escape' && onClose()}>
       <label>Schema
         <select ref={firstRef} className={s.select} value={schemaId ?? ''} onChange={(e) => setSchemaId(Number(e.target.value) || undefined)}>
           <option value="">선택…</option>

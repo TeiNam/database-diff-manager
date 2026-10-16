@@ -167,7 +167,7 @@ describe('VersionPicker 보강', () => {
     const user = userEvent.setup();
     const base = await screen.findByLabelText('BASE 버전');
     await user.selectOptions(base, 'other');
-    const dialog = await screen.findByRole('dialog', { name: '다른 스키마의 버전 선택' });
+    const dialog = await screen.findByRole('dialog', { name: 'BASE — 다른 스키마의 버전 선택' });
     expect(within(dialog).getByLabelText('Schema')).toHaveFocus();
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -183,7 +183,7 @@ describe('VersionPicker 보강', () => {
     renderApp('/db/3/schema/7?base=11&target=12');
     const user = userEvent.setup();
     await user.selectOptions(await screen.findByLabelText('TARGET 버전'), 'other');
-    const dialog = await screen.findByRole('dialog', { name: '다른 스키마의 버전 선택' });
+    const dialog = await screen.findByRole('dialog', { name: 'TARGET — 다른 스키마의 버전 선택' });
     await user.selectOptions(within(dialog).getByLabelText('Schema'), '9');
     const version = within(dialog).getByLabelText('버전');
     await waitFor(() => expect(version).toBeEnabled());
@@ -192,6 +192,18 @@ describe('VersionPicker 보강', () => {
     expect(screen.getByLabelText('TARGET 버전')).toHaveValue('50');
     expect(screen.getByLabelText('TARGET 버전')).toHaveFocus();
     expect(screen.getByLabelText('BASE 버전')).toHaveValue('11');
+  });
+
+  it('TARGET 쪽 대화상자를 Esc 로 닫으면 TARGET 으로 포커스가 돌아간다', async () => {
+    mockApi(API);
+    renderApp('/db/3/schema/7?base=11&target=12');
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByLabelText('TARGET 버전'), 'other');
+    await screen.findByRole('dialog', { name: 'TARGET — 다른 스키마의 버전 선택' });
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('TARGET 버전')).toHaveFocus();
+    expect(screen.getByLabelText('TARGET 버전')).toHaveValue('12');
   });
 
   it('TARGET 이 목록에 없는 id 면 다른 스키마의 버전으로 표시한다', async () => {

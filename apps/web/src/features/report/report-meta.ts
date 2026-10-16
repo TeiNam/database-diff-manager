@@ -1,4 +1,5 @@
 import type { DiffResponse } from '../../api/types';
+import { changedObjects } from '../../lib/object-diff';
 
 // 리포트를 만드는 데 쓰는 화면 밖 정보 (설계 §4)
 export interface ReportOptions {
@@ -16,13 +17,23 @@ export function excludedLabel(opts: Pick<ReportOptions, 'excludeAdded' | 'exclud
   return [opts.excludeAdded && '추가된 객체', opts.excludeDropped && '삭제된 객체'].filter(Boolean).join(', ');
 }
 
-// 추가·삭제 객체를 뺀 비교 결과. 요약 통계·목록·객체 diff 가 모두 같은 목록을 쓰도록 diff 자체를 거른다
+// 추가·삭제 객체를 뺀 비교 결과. 요약 통계·목록·객체 diff·안내의 문장 수가 모두 같은 목록을 쓰도록 diff 와 그 객체의 문장을 거른다
 export function filterReportData(data: DiffResponse, opts: Pick<ReportOptions, 'excludeAdded' | 'excludeDropped'>): DiffResponse {
   if (!opts.excludeAdded && !opts.excludeDropped) return data;
-  const keep = ({ op }: { op: string }) => !(opts.excludeAdded && op === 'add') && !(opts.excludeDropped && op === 'drop');
+  const isExcluded = ({ op }: { op: string }) => (opts.excludeAdded === true && op === 'add') || (opts.excludeDropped === true && op === 'drop');
+  const keep = (d: { op: string }) => !isExcluded(d);
   const { diff } = data;
-  return { ...data, diff: { ...diff, tables: diff.tables.filter(keep), views: diff.views.filter(keep), routines: (diff.routines ?? []).filter(keep) } };
+  const excluded = new Set(changedObjects(diff).filter(isExcluded).map((e) => `${e.kind}:${e.name}`));
+  return {
+    ...data,
+    diff: { ...diff, tables: diff.tables.filter(keep), views: diff.views.filter(keep), routines: (diff.routines ?? []).filter(keep) },
+    statements: data.statements.filter((st) => !excluded.has(`${st.kind}:${st.object}`)),
+  };
 }
+
+// 거른 뒤 남은 변경이 없을 때 요약 목록 문구 — 원래 변경이 없던 비교와 구분한다
+export const filteredEmptyMessage = (opts: Pick<ReportOptions, 'excludeAdded' | 'excludeDropped'>): string | undefined =>
+  excludedLabel(opts) ? `${excludedLabel(opts)}를 뺀 뒤 남은 변경 객체가 없습니다` : undefined;
 
 const pad = (n: number) => String(n).padStart(2, '0');
 // 파일 이름에 쓸 수 없는 글자: / \ : * ? " < > | 와 제어 문자 (설계 §5)

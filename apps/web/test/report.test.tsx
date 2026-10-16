@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { DiffResponse, VersionMeta } from '../src/api/types';
 import { PARTIAL_MESSAGE } from '../src/features/diff/messages';
 import { buildReportHtml, REPORT_CSP } from '../src/features/report/build-report';
-import { formatGeneratedAt, reportFileName, reportTitle, viewLabel, type ReportOptions } from '../src/features/report/report-meta';
+import { filterReportData, formatGeneratedAt, reportFileName, reportTitle, viewLabel, type ReportOptions } from '../src/features/report/report-meta';
 
 // td-export 0.1.52 형식의 루틴 구간
 const routine = (ddl: string) =>
@@ -149,6 +149,37 @@ describe('리포트 추가·삭제 객체 빼기와 좌우 출처', () => {
   it('다른 DB 끼리면 제목과 파일 이름에 양쪽 이름을 모두 쓴다', () => {
     expect(reportTitle(cross)).toBe('prod-db › shop ↔ stage-db › shop 비교 리포트');
     expect(reportFileName(cross, new Date(2026, 9, 16, 14, 5))).toBe('prod-db_shop_v1-stage-db_shop_v3_20261016-1405.html');
+  });
+
+  it('뷰·루틴의 추가·삭제도 빼고, 뺀 객체의 문장은 안내의 문장 수에서 빠진다', () => {
+    const vb = parseSqlDump('CREATE TABLE `orders` (\n  `x` int\n);\nCREATE VIEW `old_v` AS select 1 AS `a`;\n' + TAX('1')).model;
+    const vt = parseSqlDump('CREATE TABLE `orders` (\n  `x` bigint\n);\nCREATE VIEW `new_v` AS select 1 AS `a`;\n').model;
+    const d = response(vb, vt);
+    const statements = [
+      { object: 'old_v', kind: 'view', op: 'drop', sql: 'DROP VIEW `old_v`', evidenceHold: true },
+      { object: 'orders', kind: 'table', op: 'modify', sql: 'ALTER TABLE `orders` DROP COLUMN `y`', evidenceHold: true },
+    ] as DiffResponse['statements'];
+    const filtered = filterReportData({ ...d, statements }, { excludeAdded: true, excludeDropped: true });
+    expect(filtered.diff.views).toEqual([]);
+    expect(filtered.diff.routines).toEqual([]);
+    expect(filtered.diff.tables.map((t) => t.name)).toEqual(['orders']);
+    expect(filtered.statements.map((st) => st.object)).toEqual(['orders']);
+    expect(d.diff.views).toHaveLength(2); // 원본은 그대로
+  });
+
+  it('추가·삭제를 모두 빼서 남은 변경이 없으면 "변경 없음" 이 아니라 뺀 뒤 남은 것이 없다고 적는다', () => {
+    const only = response(parseSqlDump('CREATE TABLE `a` (\n  `x` int\n);\n').model, parseSqlDump('CREATE TABLE `b` (\n  `x` int\n);\n').model);
+    const html = render(only, { excludeAdded: true, excludeDropped: true });
+    expect(html).toContain('<dt>뺀 객체</dt><dd>추가된 객체, 삭제된 객체</dd>');
+    expect(html).toContain('추가된 객체, 삭제된 객체를 뺀 뒤 남은 변경 객체가 없습니다');
+    expect(html).not.toContain('두 버전 사이에 변경 사항이 없습니다');
+  });
+
+  it('표 보기 + Unified 에서 SQL 로 그리는 뷰가 있으면 범례에 SQL −/+ 를 함께 적는다', () => {
+    const vb = parseSqlDump('CREATE VIEW `v` AS select 1 AS `id`;\n').model;
+    const vt = parseSqlDump('CREATE VIEW `v` AS select 2 AS `id`;\n').model;
+    expect(render(response(vb, vt), { mode: 'grid', layout: 'unified' })).toContain('BASE (SQL −)</span>');
+    expect(render(cross, { mode: 'grid', layout: 'unified' })).toContain('<span class="report-side-tag">BASE</span>');
   });
 
   it('객체 diff 위에 왼쪽 BASE·오른쪽 TARGET 의 DB › 스키마 버전을 적는다 (Unified 는 −/+)', () => {
