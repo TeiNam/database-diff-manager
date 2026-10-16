@@ -65,13 +65,30 @@ describe('SQL 증거', () => {
   const base = parseSqlDump(full).model;
   const withoutBigPaid = full.replace(/\/\* Table : big_paid \*\/\n[^\n]+\n/, '');
 
-  it('스키마 정의가 아닌 문장(ALTER·INSERT·SHOW 등)이 하나라도 있으면 비스키마 (Codex 1: SHOW CREATE TABLE 만 든 파일)', () => {
+  it('정의를 바꾸거나 정의가 아닌 문장(ALTER·SHOW·만든 뒤의 DROP 등)이 하나라도 있으면 비스키마 (Codex 1: SHOW CREATE TABLE 만 든 파일)', () => {
     for (const text of ['ALTER TABLE `orders` ADD COLUMN `x` int;\n', 'SHOW CREATE TABLE a;\n', 'SHOW CREATE TABLE `a`;\n',
-      'CREATE TABLE `a` (\n  `x` int\n);\nINSERT INTO `a` VALUES (1);\n', tdExport('SELECT 1;\nCREATE TABLE `a` (\n  `x` int\n);')]) {
+      'CREATE TABLE `a` (\n  `x` int\n);\nDROP TABLE `a`;\n', tdExport('SELECT 1;\nCREATE TABLE `a` (\n  `x` int\n);')]) {
       const r = parseSqlDump(text);
       expect(codes(r), text).toContain('non-schema');
       expect(r.model.evidence?.level, text).toBe('incomplete');
       expect(destructive(base, r.model), text).toEqual([]);
+    }
+  });
+
+  it('mysqldump 의 머리·데이터 문장(CREATE DATABASE·USE·만들기 전 DROP·LOCK·INSERT·DISABLE KEYS)은 건너뛰고, 실행 주석으로 감싼 트레일러도 트레일러로 본다', () => {
+    const dump = [
+      '-- MySQL dump 10.13', '/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;', '/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;',
+      'CREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop` /*!40100 DEFAULT CHARACTER SET utf8mb4 */;', 'USE `shop`;',
+      'DROP TABLE IF EXISTS `a`;', 'CREATE TABLE `a` (\n  `x` int\n);', 'LOCK TABLES `a` WRITE;', '/*!40000 ALTER TABLE `a` DISABLE KEYS */;',
+      'INSERT INTO `a` VALUES (1),(2);', '/*!40000 ALTER TABLE `a` ENABLE KEYS */;', 'UNLOCK TABLES;',
+      '/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;', '/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;', '-- Dump completed', '',
+    ].join('\n');
+    const r = parseSqlDump(dump);
+    expect(r.warnings).toEqual([]);
+    expect(r.model.tables.map((t) => t.name)).toEqual(['a']);
+    expect(r.model.evidence?.level).toBe('unknown'); // td-export 출력이 아니라 삭제는 수동 확인이다 (잘렸다고 보지 않는다)
+    for (const extra of ['USE `other`;', 'DROP TABLE IF EXISTS `a`;', 'ALTER TABLE `a` ADD COLUMN `y` int;']) {
+      expect(codes(parseSqlDump(dump.replace('UNLOCK TABLES;', `UNLOCK TABLES;\n${extra}`))), extra).toContain('non-schema');
     }
   });
 

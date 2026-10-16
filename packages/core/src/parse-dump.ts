@@ -37,6 +37,13 @@ const DATABASE_RE = /\/\*\s*Database\s*:\s*(.+?)\s*\*\//;
 const SET_RE = /^SET\s/i;
 // td-export 가 내는 스키마 문장의 첫 단어 (SET·CREATE). DELIMITER 는 splitDump 가, 주석은 토큰화가 이미 뺀다
 const FIRST_WORD_RE = /^(\w+)/;
+// 덤프에 흔하지만 스키마 정의(만든 객체)를 바꾸지 않아 건너뛰는 문장: mysqldump --databases·--add-drop-database 머리, 데이터 덤프(LOCK·INSERT·DISABLE KEYS), 트랜잭션.
+// 실행 주석으로 감싼 문장은 닫는 '*/' 가 끝에 남는다
+const IGNORED_RE = /^(?:(?:CREATE|DROP)\s+(?:DATABASE|SCHEMA)\b|(?:UN)?LOCK\s+TABLES?\b|INSERT\b|REPLACE\b|START\s+TRANSACTION\b|BEGIN\s*$|COMMIT\s*$|ALTER\s+TABLE\s+\S+\s+(?:DISABLE|ENABLE)\s+KEYS\s*(?:\*\/)?\s*$)/i;
+const USE_RE = /^USE\s+(?:`((?:[^`]|``)+)`|(\w+))\s*$/i;
+// mysqldump --add-drop-table·-R 가 CREATE 앞에 쓰는 DROP … IF EXISTS. 이름 목록의 마지막 부분(스키마 한정 이름이면 객체 이름)
+const DROP_OBJECT_RE = /^DROP\s+(TABLE|VIEW|FUNCTION|PROCEDURE)\s+(?:IF\s+EXISTS\s+)?([\s\S]+)$/i;
+const NAME_PART_RE = /(?:`((?:[^`]|``)+)`|(\w+))\s*(?:,|$)/g;
 
 export interface DumpStatement {
   ddl: string;
@@ -358,6 +365,7 @@ export function parseSqlDump(text: string): ParsedDump {
   const nonSchemaLines: number[] = [];
   let cut: { line: number; object?: string } | undefined;
   let sqlMode: string | undefined; // 다음 루틴에 붙일 SQL_MODE
+  let useDb: string | undefined; // 처음 USE 한 DB — 다른 DB 로 USE 하면 여러 DB 를 담은 덤프라 받지 않는다
   const { statements, truncated } = scanDump(clean);
   for (const { ddl, line, noBackslashEscapes, terminated } of statements) {
     if (!terminated) cut = { line, object: objectNameOf(ddl) };
@@ -367,7 +375,11 @@ export function parseSqlDump(text: string): ParsedDump {
       if (mode) sqlMode = mode[1];
       continue;
     }
-    // 허용 목록 밖 문장(ALTER·INSERT·SHOW·SELECT·DROP·CREATE INDEX 등)은 스키마 정의가 아니다. 'SHOW CREATE TABLE a' 처럼
+    if (isIgnored(ddl, model, useDb)) {
+      useDb = USE_RE.exec(ddl) ? useName(ddl) : useDb;
+      continue;
+    }
+    // 허용 목록 밖 문장(ALTER·SHOW·SELECT·만든 뒤의 DROP·CREATE INDEX 등)은 스키마 정의가 아니다. 'SHOW CREATE TABLE a' 처럼
     // CREATE 토큰이 있어도 첫 단어로 판정한다. ';' 가 빠져 SET 뒤에 붙은 CREATE 는 parse-error 로만 남긴다 (아래 파싱)
     if (!isSchemaStatement(ddl)) {
       nonSchemaLines.push(line);
@@ -411,6 +423,30 @@ function isSchemaStatement(ddl: string): boolean {
   const first = FIRST_WORD_RE.exec(ddl)?.[1].toUpperCase();
   if (first === 'SET') return true;
   return first === 'CREATE' && (isCreateTable(ddl) || VIEW_RE.test(ddl) || ROUTINE_RE.test(ddl));
+}
+
+const useName = (ddl: string): string => {
+  const m = USE_RE.exec(ddl)!;
+  return m[1]?.replace(/``/g, '`') ?? m[2];
+};
+
+// 건너뛰는 문장인가: IGNORED_RE, 처음 DB(또는 덤프 머리의 DB)와 같은 DB 의 USE, 아직 만들지 않은 객체의 DROP. 만든 뒤에 지우는 DROP 은 정의를 바꾼다
+function isIgnored(ddl: string, model: SchemaModel, useDb: string | undefined): boolean {
+  if (IGNORED_RE.test(ddl)) return true;
+  if (USE_RE.test(ddl)) {
+    const db = useName(ddl);
+    return (useDb ?? (model.name || db)) === db;
+  }
+  const drop = DROP_OBJECT_RE.exec(ddl);
+  if (!drop) return false;
+  const kind = drop[1].toUpperCase();
+  const names = [...drop[2].split(',')].map((part) => [...part.matchAll(NAME_PART_RE)].map((m) => m[1]?.replace(/``/g, '`') ?? m[2]).pop() ?? '');
+  const created = (name: string) => {
+    if (kind === 'TABLE') return model.tables.some((t) => t.name === name);
+    if (kind === 'VIEW') return model.views.some((v) => v.name === name);
+    return model.routines.some((r) => r.kind === kind.toLowerCase() && r.name.toLowerCase() === name.toLowerCase());
+  };
+  return names.every((n) => n !== '' && !created(n));
 }
 
 // 끊긴 문장의 객체 이름 (테이블·뷰·루틴). 알 수 없으면 undefined

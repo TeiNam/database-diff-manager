@@ -5,7 +5,8 @@ import { isUnidentified, type SchemaEvidence, type SchemaModel } from './model';
 
 const CREATE_TABLE_RE = /^CREATE\s+TABLE\s/i;
 const SAVE_RE = /(@OLD_\w+)\s*=\s*@@\w+/gi; // SET @OLD_X = @@X: 헤더(또는 루틴 앞)가 세션 값을 저장한다
-const RESTORE_RE = /=\s*(@OLD_\w+)\s*(?:,|$)/gi; // SET X = @OLD_X: 트레일러(또는 루틴 뒤)가 되돌린다
+// SET X = @OLD_X: 트레일러(또는 루틴 뒤)가 되돌린다. mysqldump 는 실행 주석으로 감싸 문장 끝에 닫는 '*/' 가 남는다 (/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */)
+const RESTORE_RE = /=\s*(@OLD_\w+)\s*(?:,|(?:\*\/\s*)?$)/gi;
 // 루틴 하나를 감싸는 저장 변수 (td-export 0.1.52+). 루틴 바로 뒤에서 복원하므로 파일 헤더가 아니다
 const ROUTINE_SAVE = '@old_routine_sql_mode';
 

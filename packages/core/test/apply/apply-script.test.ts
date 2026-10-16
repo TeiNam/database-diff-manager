@@ -23,8 +23,8 @@ describe('applyScript — 문장 처리', () => {
   });
 
   it('지원하지 않는 문장의 거부 안내는 모두 RE_EXPORT 로 끝난다', () => {
-    for (const sql of ['CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET @x = 1;', 'CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1;', 'ALTER DATABASE other CHARACTER SET utf8mb4;', 'ALTER DATABASE shop READ ONLY = 1;', 'CALL p();',
-      "PREPARE s FROM 'ALTER TABLE t ADD x INT';", 'EXECUTE s;', 'CREATE VIEW v AS SELECT 1;', 'CREATE SCHEMA shop;']) {
+    for (const sql of ['CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET @x = 1;', 'CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1;', 'DROP DATABASE shop;', 'CALL p();',
+      "PREPARE s FROM 'ALTER TABLE t ADD x INT';", 'EXECUTE s;', 'CREATE VIEW v AS SELECT 1;']) {
       const r = run(sql);
       expect(r, sql).toMatchObject({ ok: false, error: { index: 1 } });
       expect(!r.ok && r.error.reason.endsWith(RE_EXPORT), sql).toBe(true);
@@ -160,12 +160,11 @@ describe('applyScript — 스키마를 바꾸지 않는 문장', () => {
   });
 
   // 조회 문장의 사용자 변수 대입(:=·INTO)은 뒤 SET 이 읽는 저장 값과 어긋날 수 있다. DISABLE·ENABLE KEYS 를 다른 절과 함께 쓴 ALTER TABLE, 다른 스키마나 문자셋·콜레이션·
-  // ENCRYPTION 밖의 옵션을 쓴 CREATE SCHEMA, 그 밖의 FLUSH, 히스토그램 절을 쓴 ANALYZE TABLE 은 받지 않는다 (MySQL 은 받는다 — 드물어 1차에서 받지 않는다).
+  // ENCRYPTION 밖의 옵션을 쓴 현재 스키마의 CREATE SCHEMA, 그 밖의 FLUSH, 히스토그램 절을 쓴 ANALYZE TABLE 은 받지 않는다 (MySQL 은 받는다 — 드물어 1차에서 받지 않는다).
   // 없는 테이블의 DISABLE KEYS 는 MySQL 처럼 1146 이다
   it.each([
     ['SELECT @x := 1;', ':='], ['SELECT COUNT(*) INTO @n FROM t;', 'INTO'], ['DO @x := 1;', ':='],
     ['ALTER TABLE t DISABLE KEYS, ADD x INT;', 'DISABLE'], ['ALTER TABLE t ADD x INT, ENABLE KEYS;', 'ENABLE'],
-    ['CREATE DATABASE IF NOT EXISTS other;', 'other'], ['CREATE DATABASE IF NOT EXISTS other CHARACTER SET latin1;', 'other'],
     ['FLUSH TABLES WITH READ LOCK;', 'FLUSH'], ['FLUSH LOGS;', 'FLUSH'], ['ANALYZE TABLE t UPDATE HISTOGRAM ON id;', 'UPDATE'],
   ])('%s 는 무시하지 않고 RE_EXPORT 로 거부한다', (sql, mention) => {
     const r = run(`${sql}\nALTER TABLE t ADD COLUMN y INT;`);
@@ -616,10 +615,24 @@ describe('applyScript — ALTER DATABASE·SCHEMA (스키마 기본값)', () => {
     expect(created('ALTER DATABASE shop COLLATE utf8mb4_unicode_ci;\nCREATE TABLE n (c varchar(5));')).toContain('COLLATE=utf8mb4_unicode_ci');
   });
 
-  it('다른 스키마·옵션 없음·맞지 않는 짝·ENCRYPTION 은 거부한다', () => {
-    expect(run('ALTER DATABASE other CHARACTER SET utf8mb4;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('다른 스키마') } });
+  it('옵션 없음·맞지 않는 짝·ENCRYPTION 은 거부한다', () => {
     expect(run('ALTER DATABASE shop;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1064') } });
     expect(run('ALTER DATABASE CHARACTER SET latin1 COLLATE utf8mb4_bin;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1253') } });
     expect(run("ALTER DATABASE shop ENCRYPTION = 'Y';")).toMatchObject({ ok: false, error: { reason: expect.stringContaining(RE_EXPORT) } });
+  });
+});
+
+describe('applyScript — 정의와 상관없는 DB 단위 문장', () => {
+  it('다른 스키마의 CREATE·ALTER·DROP DATABASE·SCHEMA, 현재 스키마의 IF NOT EXISTS 없는 CREATE·READ ONLY 는 무시하고 뒤 문장을 적용한다', () => {
+    const r = run([
+      'DROP DATABASE IF EXISTS other;', 'CREATE DATABASE other DEFAULT CHARACTER SET latin1;', 'ALTER DATABASE other COLLATE latin1_bin;', 'DROP SCHEMA `other`;',
+      'CREATE DATABASE shop;', 'ALTER DATABASE shop READ ONLY = 0;', 'ALTER TABLE t ADD COLUMN y INT;',
+    ].join('\n'));
+    expect(r).toMatchObject({ ok: true, applied: 1 });
+    if (r.ok) expect(printTable(r.model.tables[0])).toContain('`y` int');
+  });
+
+  it('현재 스키마를 지우는 DROP DATABASE 는 모든 객체를 지우므로 거부한다', () => {
+    expect(run('DROP DATABASE IF EXISTS `shop`;\nCREATE DATABASE shop;\nCREATE TABLE t (id int);')).toMatchObject({ ok: false, error: { index: 1, reason: expect.stringContaining('현재 스키마') } });
   });
 });
