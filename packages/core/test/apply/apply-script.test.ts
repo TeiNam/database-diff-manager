@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { applyScript, MYSQL_DEFAULTS, resolveDefaults } from '../../src/apply';
 import { ApplyFailure, DEFAULT_SQL_MODE, RE_EXPORT } from '../../src/apply/types';
 import { parseSqlDump } from '../../src/parse-dump';
+import { printTable } from '../../src/print';
 import { fixture, tdExport } from '../helpers';
 
 const base = parseSqlDump(tdExport('CREATE TABLE `t` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\n')).model;
@@ -22,7 +23,7 @@ describe('applyScript — 문장 처리', () => {
   });
 
   it('지원하지 않는 문장의 거부 안내는 모두 RE_EXPORT 로 끝난다', () => {
-    for (const sql of ['CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET @x = 1;', 'CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1;', 'ALTER DATABASE shop CHARACTER SET utf8mb4;', 'CALL p();',
+    for (const sql of ['CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET @x = 1;', 'CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1;', 'ALTER DATABASE other CHARACTER SET utf8mb4;', 'ALTER DATABASE shop READ ONLY = 1;', 'CALL p();',
       "PREPARE s FROM 'ALTER TABLE t ADD x INT';", 'EXECUTE s;', 'CREATE VIEW v AS SELECT 1;', 'CREATE SCHEMA shop;']) {
       const r = run(sql);
       expect(r, sql).toMatchObject({ ok: false, error: { index: 1 } });
@@ -590,5 +591,35 @@ describe('resolveDefaults — 스키마 기본 문자셋·콜레이션', () => {
     expect(applyScript(base, 'SET NAMES utf8mb4;', { schemaName: 'shop', defaults: { charset: undefined } })).toEqual(NO_STATEMENT);
     expect(applyScript(base, 'SET NAMES utf8mb4;', { schemaName: 'shop', defaults: { charset: 'latin1' } })).toEqual(NO_STATEMENT);
     expect(applyScript(base, 'SET NAMES utf8mb4;', { schemaName: 'shop', defaults: { collation: 'latin1_bin' } })).toEqual(NO_STATEMENT);
+  });
+});
+
+describe('applyScript — ALTER DATABASE·SCHEMA (스키마 기본값)', () => {
+  const created = (script: string) => {
+    const r = run(script);
+    if (!r.ok) throw new Error(r.error.reason);
+    return printTable(r.model.tables.find((t) => t.name === 'n')!);
+  };
+
+  it('현재 스키마의 문자셋·콜레이션을 바꾸면 뒤에 문자셋 없이 만든 테이블이 새 기본값을 쓰고, 있는 테이블은 그대로다', () => {
+    const r = run('ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\nCREATE TABLE n (id int);');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(printTable(r.model.tables.find((t) => t.name === 'n')!)).toContain('DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin');
+    expect(printTable(r.model.tables.find((t) => t.name === 't')!)).toBe(printTable(base.tables[0]));
+    expect(r.applied).toBe(1); // ALTER DATABASE 는 SHOW CREATE 를 바꾸지 않아 적용 문장 수에 세지 않는다
+    expect(r.defaults).toEqual(MYSQL_DEFAULTS); // 기록하는 기본값은 스크립트를 시작할 때의 값이다 (다시 적용하면 같은 결과)
+  });
+
+  it('이름·SCHEMA·DEFAULT·= 꼴을 받고, 문자셋만 쓰면 그 기본 콜레이션, 콜레이션만 쓰면 그 문자셋이다', () => {
+    expect(created('ALTER SCHEMA `shop` DEFAULT CHARACTER SET = latin1;\nCREATE TABLE n (id int);')).toContain('DEFAULT CHARSET=latin1');
+    expect(created('ALTER DATABASE shop COLLATE utf8mb4_unicode_ci;\nCREATE TABLE n (c varchar(5));')).toContain('COLLATE=utf8mb4_unicode_ci');
+  });
+
+  it('다른 스키마·옵션 없음·맞지 않는 짝·ENCRYPTION 은 거부한다', () => {
+    expect(run('ALTER DATABASE other CHARACTER SET utf8mb4;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('다른 스키마') } });
+    expect(run('ALTER DATABASE shop;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1064') } });
+    expect(run('ALTER DATABASE CHARACTER SET latin1 COLLATE utf8mb4_bin;')).toMatchObject({ ok: false, error: { reason: expect.stringContaining('1253') } });
+    expect(run("ALTER DATABASE shop ENCRYPTION = 'Y';")).toMatchObject({ ok: false, error: { reason: expect.stringContaining(RE_EXPORT) } });
   });
 });
