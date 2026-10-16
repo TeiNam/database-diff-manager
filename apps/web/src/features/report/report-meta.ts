@@ -8,6 +8,7 @@ export interface ReportOptions {
   generatedAt: Date;
   generatedBy: string;
   appVersion: string;
+  scope?: 'changes' | 'all'; // all: 변경 없는 객체도 넣는다 (기본 changes)
   excludeAdded?: boolean; // BASE 에 없는(추가된) 객체를 뺀다
   excludeDropped?: boolean; // TARGET 에 없는(삭제된) 객체를 뺀다
 }

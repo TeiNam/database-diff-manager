@@ -78,6 +78,7 @@ describe('ExportReportButton', () => {
     const t = parseSqlDump('CREATE TABLE `orders` (\n  `x` bigint\n);\nCREATE TABLE `new_t` (\n  `z` int\n);').model;
     render(<ExportReportButton data={{ ...DATA, baseModel: b, targetModel: t, diff: diffSchemas(b, t) }} mode="sql" layout="split" generatedBy="park" />);
     const user = userEvent.setup();
+    await user.selectOptions(screen.getByRole('combobox', { name: '리포트 범위' }), 'all');
     await user.click(screen.getByRole('checkbox', { name: '삭제 포함' }));
     await user.click(screen.getByRole('button', { name: '리포트 내보내기' }));
     await vi.waitFor(() => expect(click).toHaveBeenCalledTimes(1));
@@ -85,6 +86,7 @@ describe('ExportReportButton', () => {
     expect(html).toContain('new_t');
     expect(html).not.toContain('gone_t');
     expect(html).toContain('삭제된 객체');
+    expect(html).toContain('전체 (변경 없는 객체 포함)');
     expect(screen.getByRole('checkbox', { name: '추가 포함' })).toBeChecked();
   });
 
