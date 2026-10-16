@@ -54,7 +54,7 @@ export function cappedReason(reason: string): string {
 export interface State {
   model: SchemaModel; // ponytail: 작업용 사본 하나를 고쳐 쓴다 (입력 모델은 그대로, 실패하면 통째로 버린다)
   readonly schemaName: string;
-  readonly defaults: ApplyDefaults;
+  defaults: ApplyDefaults; // 스키마 기본값. 현재 스키마의 ALTER SCHEMA·DATABASE 가 바꾼다 (no-op.ts)
   fkChecks: boolean;
   // 세션 FOREIGN_KEY_CHECKS 를 모르면 그 까닭 (안내 글, 알면 undefined) — 앞의 SET 이 값을 모르는 변수에서 정했다. 모르는 동안은 fkChecks 를 쓰지 않는다 (unknown-session.ts)
   fkChecksUnknown: string | undefined;

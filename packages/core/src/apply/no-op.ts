@@ -3,7 +3,7 @@
 import { Cursor } from '../cursor';
 import type { Token } from '../lexer';
 import { splitList } from './lists';
-import { canonicalCharset, canonicalCollation, charsetOfCollation } from './normalize-mysql';
+import { canonicalCharset, canonicalCollation, charsetOfCollation, primaryCollation } from './normalize-mysql';
 import { optionValue } from './options';
 import { findTable, objectName, type State } from './state';
 import { forgetStateChangedBy, storedFunctionCall } from './stored-call';
@@ -33,6 +33,7 @@ export function noOpHandler(c: Cursor): NoOp | undefined {
   if (NO_OP_WORDS.has(word) || NO_OP_PAIRS.some((pair) => c.isWord(...pair)) || isFlush(c)) return ignoreStatement;
   if (isMaintenance(c)) return checkMaintainedTables;
   if (isKeysToggle(c)) return checkKeysToggle;
+  if (c.isWord('ALTER', 'SCHEMA') || c.isWord('ALTER', 'DATABASE')) return alterSchemaDefaults;
   return c.isWord('CREATE', 'SCHEMA', 'IF', 'NOT', 'EXISTS') || c.isWord('CREATE', 'DATABASE', 'IF', 'NOT', 'EXISTS') ? checkCurrentSchema : undefined;
 }
 
@@ -109,20 +110,39 @@ function checkCurrentSchema(st: State, c: Cursor): void {
   c.expectWord('IF', 'NOT', 'EXISTS');
   const name = c.ident();
   if (name !== st.schemaName) fail(`다른 스키마 \`${name}\` 의 CREATE SCHEMA·DATABASE 는 받지 않습니다 — 이 버전은 스키마 \`${st.schemaName}\` 하나를 나타냅니다 — ${RE_EXPORT}`);
-  checkSchemaOptions(c);
+  checkSchemaOptions(c, 'CREATE');
+}
+
+const SCHEMA_OPTION_WORDS: ReadonlySet<string> = new Set(['DEFAULT', 'CHARACTER', 'CHARSET', 'COLLATE', 'ENCRYPTION', 'READ']);
+
+// 현재 스키마의 ALTER {DATABASE|SCHEMA} [이름] 문자셋·콜레이션: 스키마 기본값만 바꾼다. 있는 테이블·루틴의 SHOW CREATE 는 그대로이고, 뒤에 문자셋 없이 만드는
+// 테이블·루틴과 CONVERT TO CHARACTER SET DEFAULT 가 새 기본값을 쓴다 — 기본 DB 를 바꾸면 MySQL 은 세션의 character_set_database·collation_database 도 고친다
+// (sql_db.cc mysql_alter_db). 문자셋만 쓰면 그 기본 콜레이션, 콜레이션만 쓰면 그 문자셋이다. ENCRYPTION 은 뒤에 만드는 테이블 옵션을, READ ONLY 는 뒤 DDL 을 바꿔 받지 않는다
+function alterSchemaDefaults(st: State, c: Cursor): void {
+  c.next();
+  c.next();
+  const head = c.peek();
+  const named = head !== undefined && (head.t === 'ident' || (head.t === 'word' && !SCHEMA_OPTION_WORDS.has(head.v.toUpperCase())));
+  const name = named ? c.ident() : st.schemaName;
+  if (name !== st.schemaName) fail(`다른 스키마 \`${name}\` 의 ALTER SCHEMA·DATABASE 는 받지 않습니다 — 이 버전은 스키마 \`${st.schemaName}\` 하나를 나타냅니다 — ${RE_EXPORT}`);
+  const { charset, collation } = checkSchemaOptions(c, 'ALTER');
+  if (charset === undefined && collation === undefined) fail('ALTER SCHEMA·DATABASE 에 바꿀 옵션이 없습니다 (MySQL 1064)');
+  st.defaults = charset === undefined ? { charset: charsetOfCollation(collation!), collation: collation! } : { charset, collation: collation ?? primaryCollation(charset) };
 }
 
 // [DEFAULT] {CHARACTER SET|CHARSET} [=] 이름, [DEFAULT] COLLATE [=] 이름, [DEFAULT] ENCRYPTION [=] 'Y'|'N' (쉼표 없이 이어 쓴다). 있는 스키마여도 MySQL 은 이름을 먼저 본다
-// (모르는 문자셋 1115, 콜레이션 1273, 서로 맞지 않으면 1253)
-function checkSchemaOptions(c: Cursor): void {
+// (모르는 문자셋 1115, 콜레이션 1273, 서로 맞지 않으면 1253). ALTER 는 스키마 기본값을 바꾸므로 문자셋·콜레이션만 받는다
+function checkSchemaOptions(c: Cursor, verb: 'CREATE' | 'ALTER'): { charset?: string; collation?: string } {
   let charset: string | undefined;
   let collation: string | undefined;
   while (!c.done) {
     c.acceptWord('DEFAULT');
     if (c.acceptWord('CHARACTER', 'SET') || c.acceptWord('CHARSET')) charset = canonicalCharset(optionValue(c));
     else if (c.acceptWord('COLLATE')) collation = canonicalCollation(optionValue(c));
-    else if (c.acceptWord('ENCRYPTION')) optionValue(c);
+    else if (verb === 'CREATE' && c.acceptWord('ENCRYPTION')) optionValue(c);
+    else if (verb === 'ALTER') fail(`ALTER SCHEMA·DATABASE 는 문자셋·콜레이션만 받습니다: ${c.peek()?.v ?? '(끝)'} — ${RE_EXPORT}`);
     else fail(`CREATE SCHEMA·DATABASE 의 옵션은 문자셋·콜레이션·ENCRYPTION 만 받습니다: ${c.peek()?.v ?? '(끝)'} — ${RE_EXPORT}`);
   }
   if (charset !== undefined && collation !== undefined && charsetOfCollation(collation) !== charset) fail(`COLLATE ${collation} 은 문자셋 ${charset} 의 콜레이션이 아닙니다 (MySQL 1253)`);
+  return { charset, collation };
 }
